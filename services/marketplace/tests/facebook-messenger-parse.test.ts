@@ -63,6 +63,51 @@ describe('Messenger page interpretation', () => {
       .toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox page layout was not recognized.' });
   });
 
+  it('uses validated GraphQL ids before DOM anchors and fails closed on unusable recognized connections', () => {
+    const page = inbox({ threads: [{ threadId: 'dom-id', preview: 'DOM preview' }] });
+    expect(interpretMessengerInboxPage({
+      page, baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: false, threadIds: ['graphql-id'] }
+    })).toEqual({ kind: 'threads', threads: [{ thread_id: 'graphql-id' }] });
+    expect(interpretMessengerInboxPage({
+      page, baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
+      graphql: { recognized: true, malformed: true, empty: false, incomplete: false, threadIds: [] }
+    })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+    expect(interpretMessengerInboxPage({
+      page: inbox(), baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
+      graphql: { recognized: true, malformed: false, empty: true, incomplete: false, threadIds: [] }
+    })).toEqual({ kind: 'empty' });
+    expect(interpretMessengerInboxPage({
+      page: inbox(), baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: false, threadIds: [] }
+    })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+    expect(interpretMessengerInboxPage({
+      page, baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
+      graphql: { recognized: false, malformed: false, empty: false, incomplete: false, threadIds: [] }
+    })).toEqual({ kind: 'threads', threads: [{ thread_id: 'dom-id', preview: 'DOM preview' }] });
+  });
+
+  it('fails closed on a paginated connection with has_next_page and an empty current slice', () => {
+    expect(interpretMessengerInboxPage({
+      page: inbox(), baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: true, threadIds: [] }
+    })).toMatchObject({
+      kind: 'error',
+      code: 'UPSTREAM_ERROR',
+      message: 'The Facebook Marketplace inbox page only returned the first page of threads; pagination is not supported.'
+    });
+    // An incomplete connection must not silently fall through to the DOM anchor path either.
+    expect(interpretMessengerInboxPage({
+      page: inbox({ threads: [{ threadId: 'dom-id' }] }),
+      baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: true, threadIds: [] }
+    })).toMatchObject({
+      kind: 'error',
+      code: 'UPSTREAM_ERROR',
+      message: 'The Facebook Marketplace inbox page only returned the first page of threads; pagination is not supported.'
+    });
+  });
+
   it('classifies thread rows only on an authenticated main page and fails closed for zero rows', () => {
     expect(classifyMessengerThreadPage(thread({ messages: [{ sender: 'you', text: 'Hello' }] }))).toBe('messages');
     expect(classifyMessengerThreadPage(thread())).toBe('unknown');

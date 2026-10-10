@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer, type Server } from 'node:http';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { chromium, errors } from 'playwright';
 import type { Page } from 'playwright';
@@ -20,6 +20,7 @@ if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
 const fixtureDir = new URL('./fixtures/facebook-messenger/', import.meta.url);
 const fixtures = new Map([
   'inbox-normal.html', 'inbox-empty.html', 'inbox-login.html', 'inbox-checkpoint.html', 'inbox-layout-changed.html',
+  'inbox-buttons-graphql.html', 'inbox-buttons-graphql-delayed.html', 'inbox-buttons-graphql-stalled.html',
   'thread-normal.html', 'thread-layout-changed.html',
   'thread-composer.html', 'thread-no-composer.html', 'thread-two-composers.html'
 ].map((name) => [name, readFileSync(new URL(name, fixtureDir), 'utf8')]));
@@ -30,6 +31,8 @@ let inboxFixture = 'inbox-normal.html';
 let threadFixture = 'thread-normal.html';
 let hangInbox = false;
 let hangThread = false;
+let graphqlPayload: unknown = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [] } } } };
+const stalledResponses = new Set<ServerResponse<IncomingMessage>>();
 let inboxRedirectTarget: string | undefined;
 let threadRedirectTarget: string | undefined;
 const requests: string[] = [];
@@ -40,6 +43,31 @@ beforeAll(async () => {
   server = createServer((request, response) => {
     const pathname = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
     requests.push(request.url ?? pathname);
+    if (pathname === '/api/graphql/inbox') {
+      const body = JSON.stringify(graphqlPayload);
+      response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+      response.end(body);
+      return;
+    }
+    if (pathname === '/api/graphql/inbox-stall') {
+      // Send headers but never end the body: each request stalls until the test closes the
+      // response. The body's read must race against the per-read 2s timeout.
+      response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'transfer-encoding': 'chunked' });
+      response.write(':');
+      stalledResponses.add(response);
+      response.on('close', () => { stalledResponses.delete(response); });
+      return;
+    }
+    if (pathname === '/api/graphql/other') {
+      // A same-origin response for a different operation that still embeds the inbox connection
+      // name: operation validation, not shape alone, must reject it.
+      const body = JSON.stringify({ data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [
+        { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '99999999' }, id: 'message_thread:99999999' } }
+      ] } } } });
+      response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+      response.end(body);
+      return;
+    }
     if (hangInbox && pathname === '/marketplace/inbox/') return;
     if (hangThread && /^\/messages\/t\/[A-Za-z0-9._-]+\/$/.test(pathname)) return;
     // Redirect hooks simulate Facebook canonicalizing or moving an address; the redirect target
@@ -76,9 +104,13 @@ afterAll(async () => {
 });
 
 afterEach(async () => {
-  expect(requests.every((request) => /^\/(?:messages\/|marketplace\/inbox\/|messages\/t\/[A-Za-z0-9._-]+\/)$/.test(request))).toBe(true);
+  expect(requests.every((request) => /^\/(?:api\/graphql\/[^?]*|messages\/|marketplace\/inbox\/|messages\/t\/[A-Za-z0-9._-]+\/)$/.test(request))).toBe(true);
   await Promise.allSettled(managers.splice(0).map((manager) => manager.close()));
   for (const profileDir of profileDirs.splice(0)) rmSync(profileDir, { recursive: true, force: true });
+  for (const stalled of Array.from(stalledResponses)) {
+    stalled.end();
+    stalledResponses.delete(stalled);
+  }
   requests.length = 0;
   inboxFixture = 'inbox-normal.html';
   threadFixture = 'thread-normal.html';
@@ -86,6 +118,7 @@ afterEach(async () => {
   hangThread = false;
   inboxRedirectTarget = undefined;
   threadRedirectTarget = undefined;
+  graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [] } } } };
 });
 
 function configure(nextInbox = 'inbox-normal.html', nextThread = 'thread-normal.html', nextHangInbox = false, nextHangThread = false): void {
@@ -179,8 +212,86 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
       { thread_id: '1684432532', preview: 'Synthetic Seller: Is the desk available?' },
       { thread_id: '1684432533', preview: 'Sample Buyer: Thanks for the details.Listing details', item_id: '123456789' }
     ]);
-    expect(requests).toEqual(['/messages/', '/marketplace/inbox/']);
+    expect(requests).toEqual(['/marketplace/inbox/', '/marketplace/inbox/']);
   });
+
+  it('lists deduplicated ids from a passive GraphQL response on a button-only page', async () => {
+    configure('inbox-buttons-graphql.html');
+    graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [
+      { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654321' }, id: 'message_thread:87654321', snippet: 'OPAQUE-SNIPPET-SENTINEL' } },
+      { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654321' }, id: 'message_thread:87654321' } },
+      { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654322' } } }
+    ] } } } };
+    const backend = createBackend();
+    const threads = await backend.listThreads(listInput(), new AbortController().signal);
+    expect(threads).toEqual([{ thread_id: '87654321' }, { thread_id: '87654322' }]);
+    const serialized = JSON.stringify(threads);
+    // The unrelated same-origin operation and every unapproved field stay out of the result.
+    expect(serialized).not.toContain('99999999');
+    expect(serialized).not.toContain('OPAQUE-SNIPPET-SENTINEL');
+    expect(serialized).not.toContain('marketplaceInboxBuyerMessageThreads');
+    expect(serialized).not.toContain('thread_key');
+    expect(requests).toContain('/api/graphql/inbox');
+    expect(requests).toContain('/api/graphql/other');
+  }, 15_000);
+
+  it('captures a GraphQL response that lands after the first DOM read but within the settle budget', async () => {
+    configure('inbox-buttons-graphql-delayed.html');
+    graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [
+      { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '55550000' }, id: 'message_thread:55550000' } }
+    ] } } } };
+    const backend = createBackend({ settleTimeoutMs: 1_500 });
+    const threads = await backend.listThreads(listInput(), new AbortController().signal);
+    expect(threads).toEqual([{ thread_id: '55550000' }]);
+  }, 15_000);
+
+  it('uses a valid empty GraphQL connection and rejects absent or malformed connections', async () => {
+    configure('inbox-buttons-graphql.html');
+    const backend = createBackend({ settleTimeoutMs: 30 });
+    graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [], page_info: { has_next_page: false, end_cursor: null } } } } };
+    await expect(backend.listThreads(listInput(), new AbortController().signal)).resolves.toEqual([]);
+
+    configure('inbox-buttons-graphql.html');
+    graphqlPayload = { data: { viewer: {} } };
+    await expectProviderError(backend.listThreads(listInput(), new AbortController().signal), 'UPSTREAM_ERROR');
+
+    configure('inbox-buttons-graphql.html');
+    graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [{ node: { __typename: 'MessageThread', thread_key: { thread_fbid: 'bad id' } } }] } } } };
+    await expectProviderError(backend.listThreads(listInput(), new AbortController().signal), 'UPSTREAM_ERROR');
+  }, 30_000);
+
+  it('fails closed when the inbox connection is paginated and the current slice is empty', async () => {
+    configure('inbox-buttons-graphql.html');
+    const backend = createBackend({ settleTimeoutMs: 30 });
+    graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: {
+      edges: [],
+      page_info: { has_next_page: true, end_cursor: 'NEXT_PAGE_TOKEN_SENTINEL' }
+    } } } };
+    await expectProviderError(
+      backend.listThreads(listInput(), new AbortController().signal),
+      'UPSTREAM_ERROR',
+      'The Facebook Marketplace inbox page only returned the first page of threads; pagination is not supported.'
+    );
+  }, 15_000);
+
+  it('bounds the total GraphQL flush deadline so multiple stalled responses cannot serialize per-body timeouts', async () => {
+    configure('inbox-buttons-graphql-stalled.html');
+    // The fixture sends 10 fetch calls to /api/graphql/inbox-stall whose bodies never end.
+    // Each body read races against a 2s timeout; the dispatcher must run them concurrently
+    // and the flush must cap the total wait so the operation finishes within the flush budget
+    // (3s by default) plus the navigation/settle budgets, not 10 × 2s serialized.
+    const backend = createBackend({ settleTimeoutMs: 100 });
+    const start = Date.now();
+    const threads = await backend.listThreads(listInput(), new AbortController().signal);
+    const elapsed = Date.now() - start;
+    // Allow generous headroom for browser startup, navigation, and fixture load but well under
+    // the old worst case of ~20s for ten serialized body reads.
+    expect(threads).toEqual([]);
+    expect(elapsed).toBeLessThan(15_000);
+    // The dispatched reads should still be in flight (or just settled) when the operation
+    // returns; the listener cleanup must not hang waiting for the never-ending bodies.
+    expect(stalledResponses.size).toBeGreaterThan(0);
+  }, 30_000);
 
   it('returns empty only for a recognized empty inbox', async () => {
     configure('inbox-empty.html');
@@ -206,7 +317,7 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
       'LOGIN_REQUIRED',
       'Facebook login is required to read Marketplace conversations.'
     );
-    expect(requests).toEqual(['/messages/']);
+    expect(requests).toEqual(['/marketplace/inbox/']);
   });
 
   it('uses the shared credential recovery path after a Messenger login probe', async () => {
@@ -242,7 +353,7 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
         { sender: 'other', sender_name: 'Example Buyer', text: 'Could I pick it up tomorrow?' }
       ]
     });
-    expect(requests).toEqual(['/messages/', '/messages/t/1684432532/']);
+    expect(requests).toEqual(['/marketplace/inbox/', '/messages/t/1684432532/']);
   });
 
   it('fails closed for a thread page with no recognized message rows', async () => {

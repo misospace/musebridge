@@ -378,6 +378,12 @@ describe('fixture MCP service', () => {
       .toEqual(FIXTURE_OFFERS[1]);
     expect(structured(await client.callTool({ name: 'marketplace_status', arguments: {} })).shopping_backend).toBe('fixture');
     expect(structured(await client.callTool({ name: 'marketplace_status', arguments: {} })).events_backend).toBe('fixture');
+    expect(structured(await client.callTool({ name: 'marketplace_status', arguments: {} })).capabilities).toEqual([
+      { surface: 'marketplace', provider: 'facebook', backend: 'fixture' },
+      { surface: 'shopping', provider: 'ebay', backend: 'fixture' },
+      { surface: 'messenger', provider: 'facebook', backend: 'fixture' },
+      { surface: 'events', provider: 'ticketmaster', backend: 'fixture' }
+    ]);
     expect(z.toJSONSchema(z.object({ value: z.string() })).type).toBe('object');
   });
 
@@ -440,7 +446,7 @@ describe('fixture MCP service', () => {
       expect(service.messengerBrowser).toBeDefined();
       expect(service.messengerBrowser).not.toBe(service.browser);
       expect(service.messengerBrowser?.profileDir).toBe(join(profileRoot, 'messenger'));
-      expect(service.messengerProbe?.probeUrl).toBe('http://127.0.0.1:3210/messages/');
+      expect(service.messengerProbe?.probeUrl).toBe('http://127.0.0.1:3210/marketplace/inbox/');
       expect(service.browser.profileDir).not.toBe(service.messengerBrowser?.profileDir);
     } finally {
       await service.close();
@@ -591,11 +597,17 @@ describe('fixture MCP service', () => {
     expect(result).toEqual({
       ok: true,
       service_version: packageVersion,
-      schema_version: '1.1.0',
+      schema_version: '1.2.0',
       backend: 'status-only',
       facebook_session: { status: 'session_unknown' },
       shopping_backend: 'fixture',
-      events_backend: 'fixture'
+      events_backend: 'fixture',
+      capabilities: [
+        { surface: 'marketplace', provider: 'facebook', backend: 'status-only' },
+        { surface: 'shopping', provider: 'ebay', backend: 'fixture' },
+        { surface: 'messenger', provider: 'facebook', backend: null },
+        { surface: 'events', provider: 'ticketmaster', backend: 'fixture' }
+      ]
     });
     expect(service.browser.getInfo().browserStarted).toBe(false);
     expect(backend.search).not.toHaveBeenCalled();
@@ -659,7 +671,13 @@ describe('fixture MCP service', () => {
     expect(customSearch.backend).toBe('consumer-test');
     expect(customFetch.backend).toBe('consumer-test');
     expect(customStatus.backend).toBe('consumer-test');
-    expect(customStatus.schema_version).toBe('1.1.0');
+    expect(customStatus.schema_version).toBe('1.2.0');
+    expect(customStatus.capabilities).toEqual([
+      { surface: 'marketplace', provider: 'facebook', backend: 'consumer-test' },
+      { surface: 'shopping', provider: 'ebay', backend: 'fixture' },
+      { surface: 'messenger', provider: 'facebook', backend: null },
+      { surface: 'events', provider: 'ticketmaster', backend: 'fixture' }
+    ]);
   });
 
   it('searches case-insensitively by title, description, and location with deterministic filters', async () => {
@@ -876,7 +894,7 @@ describe('fixture MCP service', () => {
     ]);
     expect(structured(first).listings[0].id).toBe('fixture-chair-002');
     expect(structured(second).listing.state).toBe('sold');
-    expect(structured(third).schema_version).toBe('1.1.0');
+    expect(structured(third).schema_version).toBe('1.2.0');
   });
 
   it('bounds shutdown with both an in-flight backend call and a partial request body', async () => {
