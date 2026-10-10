@@ -24,12 +24,27 @@ function isObject(value: unknown): value is Record<string, unknown> {
 /**
  * Verified inbox connections are Relay-style paginated: `page_info.has_next_page` indicates
  * whether more slices remain on the server. The marketplace inbox is read-only over the first
- * slice, so a paginated connection cannot be claimed complete without that signal.
+ * slice, so a paginated connection cannot be claimed complete without that signal. We treat any
+ * shape other than the explicit terminal `page_info: { has_next_page: false }` as "cannot verify
+ * terminal pagination" — that includes `has_next_page: true` (more pages ahead) and an absent
+ * `page_info` (we cannot tell which side of the pagination boundary we are on).
  */
 function hasMorePages(connection: Record<string, unknown>): boolean {
   const pageInfo = connection.page_info;
   if (!isObject(pageInfo)) return false;
   return pageInfo.has_next_page === true;
+}
+
+/**
+ * Positive terminal-pagination gate: only an explicit `page_info: { has_next_page: false }` is
+ * accepted as the inbox being fully read. Absent `page_info` (or any non-`false` value) is
+ * reported as incomplete rather than empty so a future caller can distinguish a verified empty
+ * inbox from one we simply did not finish reading.
+ */
+function isTerminalPagination(connection: Record<string, unknown>): boolean {
+  const pageInfo = connection.page_info;
+  if (!isObject(pageInfo)) return false;
+  return pageInfo.has_next_page === false;
 }
 
 export function parseMessengerInboxGraphQLResponse(payload: unknown): ParsedResponse {
@@ -45,9 +60,11 @@ export function parseMessengerInboxGraphQLResponse(payload: unknown): ParsedResp
     return { kind: 'connection', threadIds: [], empty: false, malformed: true, incomplete: false };
   }
   if (connection.edges.length === 0) {
-    // An empty current slice with `has_next_page: true` is partial pagination, not a verified
-    // empty inbox; the tool reads one page so claiming completeness here would fabricate data.
-    if (hasMorePages(connection)) {
+    // An empty current slice with explicit `page_info: { has_next_page: false }` is the only
+    // shape that proves we read the full inbox. Any other shape — `has_next_page: true`, absent
+    // `page_info`, or a non-boolean value — is partial pagination; the tool reads one page so
+    // claiming completeness would fabricate data.
+    if (!isTerminalPagination(connection)) {
       return { kind: 'connection', threadIds: [], empty: false, malformed: false, incomplete: true };
     }
     return { kind: 'connection', threadIds: [], empty: true, malformed: false, incomplete: false };

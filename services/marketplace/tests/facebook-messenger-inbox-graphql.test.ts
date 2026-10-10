@@ -18,10 +18,7 @@ describe('Messenger inbox GraphQL response parsing', () => {
     });
   });
 
-  it('recognizes a well-formed empty connection', () => {
-    expect(parseMessengerInboxGraphQLResponse(response([]))).toEqual({
-      kind: 'connection', threadIds: [], empty: true, malformed: false, incomplete: false
-    });
+  it('recognizes a well-formed empty connection only when page_info explicitly says has_next_page:false', () => {
     expect(parseMessengerInboxGraphQLResponse(response([], { has_next_page: false }))).toEqual({
       kind: 'connection', threadIds: [], empty: true, malformed: false, incomplete: false
     });
@@ -30,6 +27,35 @@ describe('Messenger inbox GraphQL response parsing', () => {
   it('marks an empty current slice with has_next_page incomplete instead of empty', () => {
     expect(parseMessengerInboxGraphQLResponse(response([], { has_next_page: true }))).toEqual({
       kind: 'connection', threadIds: [], empty: false, malformed: false, incomplete: true
+    });
+  });
+
+  it('marks an empty current slice without page_info incomplete rather than fabricated empty', () => {
+    // Regression for the original `hasMorePages(connection) ? incomplete : empty` branch, which
+    // silently labeled an empty slice with absent `page_info` as a verified empty inbox. Without
+    // the explicit terminal-pagination signal we cannot prove the inbox was fully read, so the
+    // honest answer is "incomplete" rather than "empty".
+    expect(parseMessengerInboxGraphQLResponse(response([]))).toEqual({
+      kind: 'connection', threadIds: [], empty: false, malformed: false, incomplete: true
+    });
+    // A non-boolean `has_next_page` is not a terminal signal either.
+    expect(parseMessengerInboxGraphQLResponse(response([], { has_next_page: 'no' }))).toEqual({
+      kind: 'connection', threadIds: [], empty: false, malformed: false, incomplete: true
+    });
+    expect(parseMessengerInboxGraphQLResponse(response([], { has_next_page: null }))).toEqual({
+      kind: 'connection', threadIds: [], empty: false, malformed: false, incomplete: true
+    });
+  });
+
+  it('propagates the absent-page_info incomplete signal through the collector', () => {
+    const collector = new MessengerInboxGraphQLCollector();
+    collector.observe(response([]));
+    expect(collector.snapshot()).toEqual({
+      recognized: true,
+      malformed: false,
+      empty: false,
+      incomplete: true,
+      threadIds: []
     });
   });
 

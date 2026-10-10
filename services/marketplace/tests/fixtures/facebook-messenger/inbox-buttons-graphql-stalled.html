@@ -4,12 +4,14 @@
 <body>
   <main role="main">
     <header><span aria-label="Your account">Synthetic account</span></header>
+    <p>No conversations yet</p>
     <section aria-label="Conversations"><button type="button">Conversation button</button></section>
   </main>
   <script>
     // Trigger many matching same-origin GraphQL inbox requests whose bodies never complete.
     // The dispatcher must bound the total flush deadline so the browser session does not stall
-    // behind serialized per-body reads.
+    // behind serialized per-body reads. The DOM is intentionally a recognized empty inbox so the
+    // test can assert `[]` once the flush deadline fires without any verified GraphQL data.
     for (let i = 0; i < 10; i += 1) {
       fetch('/api/graphql/inbox-stall', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ operationName: 'CometMarketplaceInboxBuyerTabViewContainerQuery', index: i }) });
     }
