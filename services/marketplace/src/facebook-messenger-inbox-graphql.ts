@@ -1,0 +1,174 @@
+import { MAX_THREAD_ID_LENGTH, conversationThreadSchema } from './domain.js';
+
+export const MESSENGER_INBOX_OPERATIONS = [
+  'CometMarketplaceInboxBuyerTabViewContainerQuery',
+  'CometMarketplaceInboxBuyerTabViewPaginationQuery'
+] as const;
+
+export interface MessengerInboxGraphQLObservation {
+  recognized: boolean;
+  malformed: boolean;
+  empty: boolean;
+  incomplete: boolean;
+  threadIds: string[];
+}
+
+type ParsedResponse =
+  | { kind: 'unrelated' }
+  | { kind: 'connection'; threadIds: string[]; empty: boolean; malformed: boolean; incomplete: boolean };
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Verified inbox connections are Relay-style paginated: `page_info.has_next_page` indicates
+ * whether more slices remain on the server. The marketplace inbox is read-only over the first
+ * slice, so a paginated connection cannot be claimed complete without that signal. We treat any
+ * shape other than the explicit terminal `page_info: { has_next_page: false }` as "cannot verify
+ * terminal pagination" — that includes `has_next_page: true` (more pages ahead) and an absent
+ * `page_info` (we cannot tell which side of the pagination boundary we are on).
+ */
+function hasMorePages(connection: Record<string, unknown>): boolean {
+  const pageInfo = connection.page_info;
+  if (!isObject(pageInfo)) return false;
+  return pageInfo.has_next_page === true;
+}
+
+/**
+ * Positive terminal-pagination gate: only an explicit `page_info: { has_next_page: false }` is
+ * accepted as the inbox being fully read. Absent `page_info` (or any non-`false` value) is
+ * reported as incomplete rather than empty so a future caller can distinguish a verified empty
+ * inbox from one we simply did not finish reading.
+ */
+function isTerminalPagination(connection: Record<string, unknown>): boolean {
+  const pageInfo = connection.page_info;
+  if (!isObject(pageInfo)) return false;
+  return pageInfo.has_next_page === false;
+}
+
+export function parseMessengerInboxGraphQLResponse(payload: unknown): ParsedResponse {
+  if (!isObject(payload) || !isObject(payload.data) || !isObject(payload.data.viewer)) {
+    return { kind: 'unrelated' };
+  }
+  const viewer = payload.data.viewer;
+  if (!Object.prototype.hasOwnProperty.call(viewer, 'marketplaceInboxBuyerMessageThreads')) {
+    return { kind: 'unrelated' };
+  }
+  const connection = viewer.marketplaceInboxBuyerMessageThreads;
+  if (!isObject(connection) || !Array.isArray(connection.edges)) {
+    return { kind: 'connection', threadIds: [], empty: false, malformed: true, incomplete: false };
+  }
+  if (connection.edges.length === 0) {
+    // An empty current slice with explicit `page_info: { has_next_page: false }` is the only
+    // shape that proves we read the full inbox. Any other shape — `has_next_page: true`, absent
+    // `page_info`, or a non-boolean value — is partial pagination; the tool reads one page so
+    // claiming completeness would fabricate data.
+    if (!isTerminalPagination(connection)) {
+      return { kind: 'connection', threadIds: [], empty: false, malformed: false, incomplete: true };
+    }
+    return { kind: 'connection', threadIds: [], empty: true, malformed: false, incomplete: false };
+  }
+
+  const threadIds: string[] = [];
+  const seen = new Set<string>();
+  let malformed = false;
+  for (const edge of connection.edges) {
+    if (!isObject(edge) || !isObject(edge.node)) {
+      malformed = true;
+      continue;
+    }
+    const node = edge.node;
+    const threadKey = node.thread_key;
+    const threadId = isObject(threadKey) ? threadKey.thread_fbid : undefined;
+    if (
+      node.__typename !== 'MessageThread' ||
+      typeof threadId !== 'string' ||
+      threadId.length < 1 ||
+      threadId.length > MAX_THREAD_ID_LENGTH ||
+      !conversationThreadSchema.safeParse({ thread_id: threadId }).success
+    ) {
+      malformed = true;
+      continue;
+    }
+    if (typeof node.id === 'string' && !isConsistentThreadId(node.id, threadId)) {
+      malformed = true;
+      continue;
+    }
+    if (!seen.has(threadId)) {
+      seen.add(threadId);
+      threadIds.push(threadId);
+    }
+  }
+  // `incomplete` reflects the server's pagination signal, not the size of the current slice: any
+  // connection with `has_next_page: true` means we did not read the full inbox, whether the
+  // current slice happened to be empty or not. Earlier revisions gated the flag on
+  // `threadIds.length === 0`, which made it unreachable on the more common non-empty paginated
+  // response and silently mis-described the first slice as a complete inbox.
+  return {
+    kind: 'connection',
+    threadIds,
+    empty: false,
+    malformed,
+    incomplete: hasMorePages(connection)
+  };
+}
+
+/**
+ * The verified GraphQL `id` is a Facebook global id that decodes to `message_thread:<thread_fbid>`.
+ * Accept the literal form or its exact base64 encoding; anything else is an inconsistent key and is
+ * skipped rather than attributed to a thread. Non-thread id shapes are left to `thread_key`.
+ */
+function isConsistentThreadId(id: string, threadId: string): boolean {
+  const expected = `message_thread:${threadId}`;
+  return id === expected || id === Buffer.from(expected).toString('base64');
+}
+
+export class MessengerInboxGraphQLCollector {
+  private readonly maxThreads: number;
+  private readonly maxResponses: number;
+  private readonly threadIds: string[] = [];
+  private readonly seen = new Set<string>();
+  private recognized = false;
+  private malformed = false;
+  private empty = false;
+  private incomplete = false;
+  private recognizedResponses = 0;
+
+  constructor(options: { maxThreads?: number; maxResponses?: number } = {}) {
+    this.maxThreads = options.maxThreads ?? 20;
+    this.maxResponses = options.maxResponses ?? 40;
+  }
+
+  observe(payload: unknown): void {
+    try {
+      if (this.recognizedResponses >= this.maxResponses) return;
+      const parsed = parseMessengerInboxGraphQLResponse(payload);
+      if (parsed.kind === 'unrelated') return;
+      this.recognized = true;
+      this.recognizedResponses += 1;
+      this.malformed ||= parsed.malformed;
+      this.empty ||= parsed.empty;
+      this.incomplete ||= parsed.incomplete;
+      for (const threadId of parsed.threadIds) {
+        if (this.threadIds.length >= this.maxThreads) break;
+        if (this.seen.has(threadId)) continue;
+        this.seen.add(threadId);
+        this.threadIds.push(threadId);
+      }
+    } catch {
+      this.recognized = true;
+      this.malformed = true;
+    }
+  }
+
+  snapshot(): MessengerInboxGraphQLObservation {
+    return {
+      recognized: this.recognized,
+      malformed: this.malformed,
+      empty: this.empty && this.threadIds.length === 0 && !this.incomplete,
+      incomplete: this.incomplete,
+      threadIds: [...this.threadIds]
+    };
+  }
+}

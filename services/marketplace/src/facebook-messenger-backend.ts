@@ -29,6 +29,7 @@ import {
 } from './facebook-messenger-url.js';
 import { assertFacebookOrigin, FacebookSessionProbe, type FacebookProbeCode } from './facebook.js';
 import { FacebookCredentialLogin } from './facebook-login.js';
+import { MessengerInboxGraphQLCollector, MESSENGER_INBOX_OPERATIONS, type MessengerInboxGraphQLObservation } from './facebook-messenger-inbox-graphql.js';
 
 export interface FacebookMessengerBackendOptions {
   browser: BrowserSessionManager;
@@ -38,6 +39,7 @@ export interface FacebookMessengerBackendOptions {
   inboxPath?: string;
   navigationTimeoutMs?: number;
   settleTimeoutMs?: number;
+  graphqlFlushTimeoutMs?: number;
   maxThreads?: number;
   logger?: Pick<Console, 'error'>;
 }
@@ -50,6 +52,7 @@ export class FacebookMessengerBackend implements ConversationBackend {
   private readonly inboxPath: string;
   private readonly navigationTimeoutMs: number;
   private readonly settleTimeoutMs: number;
+  private readonly graphqlFlushTimeoutMs: number;
   private readonly maxThreads: number;
   private readonly logger: Pick<Console, 'error'>;
   private readonly loginController = new AbortController();
@@ -75,10 +78,12 @@ export class FacebookMessengerBackend implements ConversationBackend {
     this.login = options.login;
     this.navigationTimeoutMs = options.navigationTimeoutMs ?? 8_000;
     this.settleTimeoutMs = options.settleTimeoutMs ?? 3_000;
+    this.graphqlFlushTimeoutMs = options.graphqlFlushTimeoutMs ?? GRAPHQL_FLUSH_TIMEOUT_MS;
     this.maxThreads = options.maxThreads ?? MESSENGER_EXTRACT_LIMITS.maxThreads;
     this.logger = options.logger ?? console;
     validateTimeout(this.navigationTimeoutMs, 'navigationTimeoutMs');
     validateTimeout(this.settleTimeoutMs, 'settleTimeoutMs');
+    validateTimeout(this.graphqlFlushTimeoutMs, 'graphqlFlushTimeoutMs');
     if (!Number.isSafeInteger(this.maxThreads) || this.maxThreads < 1 || this.maxThreads > MESSENGER_EXTRACT_LIMITS.maxThreads) {
       throw new RangeError(`maxThreads must be an integer from 1 to ${MESSENGER_EXTRACT_LIMITS.maxThreads}`);
     }
@@ -105,26 +110,68 @@ export class FacebookMessengerBackend implements ConversationBackend {
 
     const inboxUrl = assertFacebookOrigin(buildMessengerInboxUrl({ baseUrl: this.probe.baseUrl, inboxPath: this.inboxPath }));
     let extracted: ExtractedInboxPage;
+    let graphql: MessengerInboxGraphQLObservation = { recognized: false, malformed: false, empty: false, incomplete: false, threadIds: [] };
     try {
-      extracted = await this.browser.runExclusive(signal, async (page, taskSignal) => {
-        await page.goto(inboxUrl, {
-          waitUntil: 'domcontentloaded',
-          timeout: this.navigationTimeoutMs,
-          signal: taskSignal
-        });
-        const extractOptions = {
-          threadPath: MESSENGER_THREAD_PATH,
-          limits: { ...MESSENGER_EXTRACT_LIMITS, maxThreads: this.maxThreads }
+      const result = await this.browser.runExclusive(signal, async (page, taskSignal) => {
+        const collector = new MessengerInboxGraphQLCollector({ maxThreads: this.maxThreads });
+        // Pending body reads run concurrently; each is bounded by `GRAPHQL_BODY_READ_TIMEOUT_MS`
+        // and the whole flush is bounded by `graphqlFlushTimeoutMs` so 60 stalled bodies cannot
+        // serialize 120s of work past the navigation and settle budgets.
+        const pendingReads = new Set<Promise<void>>();
+        let dispatchedReads = 0;
+        const baseOrigin = new URL(this.probe.baseUrl).origin;
+        const handler = (response: import('playwright').Response): void => {
+          const work = (async () => {
+            try {
+              const url = new URL(response.url());
+              if (url.origin !== baseOrigin || !url.pathname.startsWith('/api/graphql/')) return;
+              if (!isJsonContentType(response.headers()['content-type'])) return;
+              // Reject a response whose own request names a different GraphQL operation. When the
+              // request body is not observable the schema check below still has to agree.
+              if (matchInboxOperation(response.request()) === 'other') return;
+              if (dispatchedReads >= GRAPHQL_RESPONSE_READ_LIMIT) return;
+              dispatchedReads += 1;
+              const payload = await readResponseBody(response);
+              if (payload !== undefined) collector.observe(payload);
+            } catch {
+              return;
+            }
+          })();
+          pendingReads.add(work);
+          // Each newly dispatched read inherits the flush clock that was started by the outer
+          // `waitForReadFlush` call: the deadline is computed once in that call and the outer
+          // loop re-races `Promise.allSettled(Array.from(pending))` against a fresh timeout
+          // per pass, so a read added after the first pass is still bounded by the original
+          // total budget. The per-read `GRAPHQL_BODY_READ_TIMEOUT_MS` ceiling also holds, so
+          // the listener never holds the exclusive session past the flush deadline.
+          void work.finally(() => { pendingReads.delete(work); });
         };
-        let result = await page.evaluate(extractMessengerInboxPage, extractOptions);
-        const deadline = Date.now() + this.settleTimeoutMs;
-        while (classifyMessengerInboxPage(result) === 'unknown' && Date.now() < deadline && !taskSignal.aborted) {
-          await sleepUntilAbort(200, taskSignal);
-          if (!taskSignal.aborted) result = await page.evaluate(extractMessengerInboxPage, extractOptions);
+        page.on('response', handler);
+        try {
+          await page.goto(inboxUrl, {
+            waitUntil: 'domcontentloaded',
+            timeout: this.navigationTimeoutMs,
+            signal: taskSignal
+          });
+          const extractOptions = {
+            threadPath: MESSENGER_THREAD_PATH,
+            limits: { ...MESSENGER_EXTRACT_LIMITS, maxThreads: this.maxThreads }
+          };
+          let pageResult = await page.evaluate(extractMessengerInboxPage, extractOptions);
+          const deadline = Date.now() + this.settleTimeoutMs;
+          while (classifyMessengerInboxPage(pageResult) === 'unknown' && Date.now() < deadline && !taskSignal.aborted) {
+            await sleepUntilAbort(200, taskSignal);
+            if (!taskSignal.aborted) pageResult = await page.evaluate(extractMessengerInboxPage, extractOptions);
+          }
+          if (taskSignal.aborted) throw taskSignal.reason ?? new Error('Browser operation aborted');
+          return pageResult;
+        } finally {
+          page.off('response', handler);
+          await waitForReadFlush(pendingReads, this.graphqlFlushTimeoutMs);
+          graphql = collector.snapshot();
         }
-        if (taskSignal.aborted) throw taskSignal.reason ?? new Error('Browser operation aborted');
-        return result;
       });
+      extracted = result;
     } catch (error) {
       if (signal.aborted) throw signal.reason ?? error;
       if (error instanceof errors.TimeoutError) {
@@ -142,7 +189,8 @@ export class FacebookMessengerBackend implements ConversationBackend {
       page: extracted,
       baseUrl: this.probe.baseUrl,
       inboxPath: this.inboxPath,
-      limit: input.limit
+      limit: input.limit,
+      graphql
     });
     if (outcome.kind === 'error') throw new MarketplaceProviderError(outcome.code, outcome.message);
     if (outcome.kind === 'empty') return [];
@@ -300,6 +348,87 @@ function messengerSessionMessage(code: FacebookProbeCode): string {
     SESSION_INVALID: 'The Facebook session requires a security check.'
   } as const;
   return messages[code];
+}
+
+/**
+ * Reads a captured GraphQL response body without ever letting the read hang the tool. A response
+ * body that Chromium does not surface in time is skipped rather than awaited forever; a missing
+ * observation is a fail-closed upstream error, never fabricated data. The losing promise is
+ * settled so it cannot surface as an unhandled rejection. The dispatch counter in the handler
+ * separately bounds how many bodies are read, so unrelated same-origin GraphQL traffic cannot
+ * inflate the flush.
+ */
+const GRAPHQL_BODY_READ_TIMEOUT_MS = 2_000;
+const GRAPHQL_RESPONSE_READ_LIMIT = 60;
+const GRAPHQL_FLUSH_TIMEOUT_MS = 3_000;
+
+async function readResponseBody(response: import('playwright').Response): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      response.json().catch(() => undefined),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), GRAPHQL_BODY_READ_TIMEOUT_MS);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Waits for already-dispatched response body reads to settle, bounded by `totalMs`. The reads
+ * themselves run concurrently so a queue of stalled Chromium body reads cannot serialize past
+ * the navigation and settle budgets. Reads still in flight when the deadline elapses continue
+ * to settle in the background; each has its own 2s body-read timeout so the listener and page
+ * never hold the exclusive browser session beyond their deadline.
+ */
+async function waitForReadFlush(pending: Set<Promise<void>>, totalMs: number): Promise<void> {
+  if (pending.size === 0) return;
+  const deadline = Date.now() + totalMs;
+  while (pending.size > 0) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, remaining);
+    });
+    try {
+      await Promise.race([Promise.allSettled(Array.from(pending)), timeoutPromise]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+}
+
+function isJsonContentType(value: string | undefined): boolean {
+  if (typeof value !== 'string') return false;
+  const mediaType = value.split(';', 1)[0]?.trim().toLowerCase();
+  return mediaType === 'application/json' || mediaType === 'text/json' || mediaType === 'application/graphql+json';
+}
+
+/**
+ * Classifies the observed request against the verified inbox operations. `unavailable` means the
+ * request body could not be read (e.g. a GET), in which case the response body schema remains the
+ * only guard; `other` means a body was read and named a different operation.
+ *
+ * The match is a substring search against the raw request body for the verified operation names.
+ * That is intentionally lenient: Facebook sometimes wraps the operation name inside form-encoded
+ * `variables=` or `fb_api_req_friendly_name=` payloads where strict JSON parsing would miss it.
+ * The same origin and verified operation-name list bound the blast radius, but a same-origin
+ * request whose body happened to contain a verified name as free text would still match. If
+ * field-uniqueness proves fragile in practice, a follow-up should switch to a parsed-JSON check
+ * keyed on `variables` or `fb_api_req_friendly_name`.
+ */
+function matchInboxOperation(request: import('playwright').Request): 'inbox' | 'other' | 'unavailable' {
+  let postData: string | null;
+  try {
+    postData = request.postData();
+  } catch {
+    return 'unavailable';
+  }
+  if (typeof postData !== 'string' || postData.length === 0) return 'unavailable';
+  return MESSENGER_INBOX_OPERATIONS.some((operation) => postData.includes(operation)) ? 'inbox' : 'other';
 }
 
 function waitForRequestBudget<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | undefined> {
