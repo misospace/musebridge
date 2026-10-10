@@ -121,13 +121,13 @@ It creates one internal `AbortController` and forwards its signal to the backend
 
 ## Capability discovery
 
-Shipped in schema `1.2.0`: `marketplace_status` returns `service_version`, `schema_version`, `backend`, optional `shopping_backend`, optional `facebook_session`, and a **required** `capabilities` array. Each entry is `{ surface, provider, backend }`:
+Shipped in schema `1.2.0`: `marketplace_status` returns `service_version`, `schema_version`, `backend`, optional `shopping_backend`, optional `events_backend`, optional `facebook_session`, and a **required** `capabilities` array. Each entry is `{ surface, provider, backend }`:
 
-- `surface` is one of `marketplace`, `shopping`, `messenger` (closed enum in `capabilitySchema`).
-- `provider` is the declared session-scope provider (`facebook` for marketplace/messenger, `ebay` for shopping).
-- `backend` is the backend implementation name actually wired for that surface (`fixture` / `facebook` / `ebay`), or `null` when no backend serves it.
+- `surface` is one of `marketplace`, `shopping`, `messenger`, `events` (closed enum in `capabilitySchema`).
+- `provider` is the declared session-scope provider (`facebook` for marketplace/messenger, `ebay` for shopping, `ticketmaster` for events).
+- `backend` is the backend implementation name actually wired for that surface (`fixture` / `facebook` / `ebay` / `ticketmaster`), or `null` when no backend serves it.
 
-The array is non-empty and ordered marketplace, shopping, messenger. Today, `messenger` is the surface that can be `null` (Facebook backend selected but `MARKETPLACE_MESSENGER` off, or a custom non-conversation backend injected); `marketplace` and `shopping` are always wired by the service. The existing fields `backend`, `shopping_backend`, and `facebook_session` are unchanged.
+The array is non-empty and ordered marketplace, shopping, messenger, events. Today, `messenger` and `events` are the surfaces that can be `null` (Facebook backend selected but `MARKETPLACE_MESSENGER` off, or `EVENTS_BACKEND` left unset); `marketplace` and `shopping` are always wired by the service. The existing fields `backend`, `shopping_backend`, `events_backend`, and `facebook_session` are unchanged.
 
 Why this is additive and non-breaking: it adds one required field to `marketplace_status`'s success schema and bumps `SCHEMA_VERSION` from `1.1.0` to `1.2.0`; no tool name, input, or existing field changes. A new surface extends the array with one more entry rather than reshaping the response. Because `ListTools` lists all registered tools regardless of configuration (a fixture deployment still advertises `shopping_*` and `messenger_*`), the capabilities array is what distinguishes **configured backends** without probing a session or calling a tool.
 
