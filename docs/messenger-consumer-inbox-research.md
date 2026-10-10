@@ -1,6 +1,6 @@
 # Messenger ordinary personal inbox discovery (#78)
 
-Parent: #45 (consumer Messenger). Related Marketplace-only recovery: #64. Design record: PR #74, which carries `docs/messenger-consumer-research.md` on branch `courier/misospace/musebridge/issue-45` (not yet merged into `main`; referenced here only as a forward pointer). Status: research complete — verdict is **NO-GO** for building a consumer listing tool now. The ordinary `/messages/` discovery contract is **unverified and cannot be established from this repository**; this document specifies the conditional contract and the read-only operator validation protocol that would gate a future ticket. It complements `provider-action-boundaries.md` (normative enforcement) and `conversation-surface-research.md` (#43 step 1, authoritative for the Marketplace surface).
+Parent: #45 (consumer Messenger). Related Marketplace-only recovery: #64. Design record: [PR #74](https://github.com/misospace/musebridge/pull/74), merged October 10, which adds `docs/messenger-consumer-research.md`. **Status: operator inspection stopped on verified automatic thread selection; discovery remains incomplete.** The October 10 authenticated Chrome run changed `/messages/` to `/messages/t/[redacted]` without a conversation click. Direct navigation is therefore **NO-GO for the proposed non-opening listing workflow in this session**. Whether another passive path exists remains unverified. Keep #78 open; do not create an implementation child. This document complements `provider-action-boundaries.md` (normative enforcement) and `conversation-surface-research.md` (#43 step 1, authoritative for the Marketplace surface).
 
 ## What #78 asks
 
@@ -34,7 +34,23 @@ What the issue requires:
 - The extractor only recognizes `/messages/t/{id}/` anchors with the id grammar `^[A-Za-z0-9][A-Za-z0-9._-]*$` bounded to 128 (`services/marketplace/src/facebook-messenger-extract.ts:70,118`), thread message rows `[role="row"]` with `You said/sent/replied:` / `{Name} said:` markers (`facebook-messenger-extract.ts:172-201`), and the empty marker `no conversations|no messages yet|nothing here yet` (`facebook-messenger-extract.ts:101`).
 - An unrecognized layout is a typed `UPSTREAM_ERROR`, never an empty success (`services/marketplace/src/facebook-messenger-parse.ts`).
 
-## Critical finding (auto-open probe risk)
+## Live operator observation (2026-10-10)
+
+The operator explicitly authorized one controlled `/messages/` load after being told that automatic conversation selection could generate a Facebook read acknowledgment visible as Seen to the participants. This authorization covered the initial load, not message inspection or further conversation interaction.
+
+Procedure and sanitized evidence:
+
+- Used the operator's authenticated Chrome profile and a new tab. No login credentials, cookies, tokens, or request headers were exported.
+- Opened DevTools Network on the new tab and verified recording was active **before** navigating. The existing `graphql` filter was active; the capture log was cleared before the one load. No request was replayed.
+- Navigated once to `https://www.facebook.com/messages/`. After the page settled, both Chrome's address field and the page accessibility root reported `/messages/t/[redacted]`. No conversation control was clicked. This verifies automatic thread navigation/selection in this session; it does not establish which thread was selected or why.
+- The capture showed 12 request rows matching the same-origin `/api/graphql/` endpoint. No operation names, request payloads, response schemas, or response bodies were inspected after the automatic selection. This count proves neither a listing connection nor a receipt.
+- Stopped inspection immediately on that result and closed the inspection tab. Verified that the thread page was absent afterward. No message bodies were extracted and no identifiers were saved.
+
+**Verified:** the tested root-inbox navigation automatically selected a thread URL. **Unverified:** whether a Seen receipt was emitted, message content rendered, an authoritative listing connection exists, or the behavior repeats in another session. No rollout explanation is claimed.
+
+DOM selectors, hydration state, populated/empty list structure, login/challenge markers, pagination/virtualization, E2EE/session requirements, and personal-vs-Marketplace membership remain unverified for the ordinary inbox. The URL alone does not classify conversation membership. The stop rule prevented the remaining probes; it did not undo any side effect of the authorized load.
+
+## Existing probe and integration risk
 
 The messenger probe **already navigates `/messages/` on every messenger tool call**:
 
@@ -42,9 +58,9 @@ The messenger probe **already navigates `/messages/` on every messenger tool cal
 2. `ensureUsableSession` calls `probeSession` (`facebook-messenger-backend.ts:205-208`).
 3. The messenger-surface probe navigates its probe URL, which is `/messages/` (`facebook.ts:8,64-70`; the navigation is `loadSnapshot` → `page.goto(this.probeUrl)` at `facebook.ts:103-107`).
 
-**Open risk:** if `/messages/` auto-opens a conversation on load, the existing probe may already be emitting a provider-visible "Seen" receipt for that conversation — before any consumer tool exists. This is unverified. **No new `/messages/` navigation may be added until non-auto-open behavior is verified** by the operator protocol below. This risk is a reason the verdict is NO-GO rather than "proceed carefully."
+**Observed navigation hazard, unverified receipt:** the live Chrome run automatically selected a thread. The same probe target in a service profile could therefore open a thread before a listing call, but this run did not execute the service or verify its receipt behavior. Do not add production `/messages/` navigation to a non-opening list operation on this evidence. A manual research visit requires informed approval before the first potentially receipt-generating load.
 
-**Base and in-flight change.** This document is written against `main` at `ff215e2`, where the messenger probe still navigates `/messages/`. The Marketplace-only recovery branch for #64 (PR #81, commit `842ae03`) already rewrites the messenger-scope probe and credential-login verification to the non-opening Marketplace inbox path (`FACEBOOK_MESSENGER_INBOX_PATH = '/marketplace/inbox/'`, `facebook.ts:9,67`). If that lands before this document's gate is reached, the **probe-navigation** risk is removed from `messenger_threads_list` calls, but the **listing-navigation** risk (any new `consumer_threads_list` that visits `/messages/`) and the whole ordinary-inbox discovery question remain open. The operator protocol is still required before a consumer listing tool is built.
+**Base and in-flight change.** The code citations in this document describe the PR's original base `ff215e2`. A live repository check on October 10 against `main` at `4e820c8` confirmed that the default messenger probe still targets `/messages/`. The Marketplace-only recovery [PR #81](https://github.com/misospace/musebridge/pull/81) was open and unmerged at that check; it proposes changing the messenger probe and credential-login verification to `/marketplace/inbox/`. Landing that change would remove this root-inbox navigation from those paths; it would not verify an ordinary-inbox listing source or make new `/messages/` listing navigation safe.
 
 ## Access paths evaluated
 
@@ -52,7 +68,7 @@ Cross-reference PR #74 `docs/messenger-consumer-research.md` for the full consum
 
 | Path | What it could yield | Status | Basis |
 |---|---|---|---|
-| DOM anchor scan of `/messages/` | Thread hrefs/keys from rendered links | **Unverified / likely insufficient** | Marketplace precedent: 24 conversation buttons, zero `/messages/t/` anchors (#64); do not copy the broken selector contract |
+| DOM anchor scan of `/messages/` | Thread hrefs/keys from rendered links | **Unverified** | October 10 inspection stopped on automatic selection; Marketplace's button layout is not evidence about this DOM |
 | Passively observed GraphQL/JSON responses | An authoritative key in a normal loaded response | **Unverified for `/messages/`** | #64's Marketplace connection (`marketplaceInboxBuyerMessageThreads`) is Marketplace-scope ONLY and must not be assumed for `/messages/` |
 | Embedded hydration/bootstrap state | A key in initial page state | **Unverified** | No evidence gathered; no replay or endpoint calls permitted |
 | `messenger.com` standalone | Same ordinary inbox on another origin | **Rejected for now** | Adds an origin/login for no discovery gain; `conversation-surface-research.md` |
@@ -76,8 +92,10 @@ No mapping may be inferred from names, order, previews, or timestamps, and authe
 
 Two distinct risks must be separated:
 
-1. **Probe navigation (present today):** the messenger probe visits `/messages/`; if that auto-opens a thread, a receipt may already fire. Unknown, and the first thing the operator protocol must settle.
-2. **Listing navigation (future):** any `consumer_threads_list` that navigates `/messages/` inherits the same auto-open question. Per `provider-action-boundaries.md:39,86`, the named "Seen" exception is scoped to **thread opens only**; a listing operation is expected to open **no** threads and emit **no** receipts. If ordinary-inbox listing cannot be done without opening a thread, it is not `read`-eligible as specified and the tool must not ship.
+1. **Probe navigation (current default):** the messenger probe visits `/messages/`. Automatic thread selection was observed in the operator's Chrome session; whether the service profile does the same or emits a receipt is unverified. The current probe does not enforce the intended non-opening list boundary.
+2. **Listing navigation (future):** direct `/messages/` navigation failed the non-opening requirement in this run. Per `provider-action-boundaries.md:39,86`, the named "Seen" exception is scoped to **thread opens only**; a listing operation is expected to open **no** threads and emit **no** receipts. A list tool cannot silently inherit that exception. A different non-opening access path must be verified before implementation.
+
+Detecting a thread URL and aborting after navigation is a containment measure, not proof that a receipt was prevented. It cannot establish a side-effect-free listing path.
 
 ## State classification
 
@@ -95,9 +113,9 @@ If, and only if, the operator protocol below positively verifies a passive autho
 
 - **Name:** `consumer_threads_list` (tentative).
 - **Scope/profile:** same `(facebook, default, messenger)` scope and same `MESSENGER_PROFILE_DIR` (`~/.marketplace/browser-profile-messenger`), enabled only by `MARKETPLACE_MESSENGER=1` (`services/marketplace/src/service.ts:126,127-137,398-400`). No new scope or profile.
-- **Risk class:** `read`, under the thread-opens-only Seen exception — and only if listing opens no threads.
+- **Risk class:** `read`, only if listing opens no threads and does not rely on the thread-read Seen exception.
 - **Input:** bounded `limit`, mirroring the existing 1..20 default 10 (`domain.ts:151-153`).
-- **Output:** `{ ok, backend, threads[] }` with an opaque, grammar-bounded key (`MAX_THREAD_ID_LENGTH = 128`, `domain.ts:9,36`) and no inferred preview/participant fields.
+- **Output:** `{ ok, backend, threads[] }` with an explicit `threads[].thread_id`: an authoritative, grammar-bounded key (`MAX_THREAD_ID_LENGTH = 128`, `domain.ts:9,36`) and no inferred preview/participant fields. Bounded validated IDs are permitted in the authorized MCP result; they are prohibited in logs, research reports, stored diagnostic artifacts, and raw response dumps. Synthetic fixtures may contain invented IDs.
 - **Fail-closed:** unrecognized layout or absent/unsupported key source → typed error, never empty success; ids never synthesized; read URLs (if ever added) rebuilt from the configured origin with the redirect guard (`facebook-messenger-parse.ts:102-107`; inbox guard `:51-52`).
 
 ## Observable errors
@@ -116,26 +134,29 @@ Any future implementation must ship fixture-first, against synthetic sanitized p
 - Populated ordinary inbox yields deduplicated validated keys.
 - Positively verified empty connection yields `[]`.
 - Absent/unknown/malformed source fails with a typed error (never a false empty).
-- Duplicate/invalid keys are dropped.
+- Duplicate valid keys are deduplicated; malformed authoritative records fail closed rather than producing a false empty result.
 - Late/out-of-order/unrelated responses are bounded and never fabricate completeness.
 - Response listeners are attached before navigation and removed in `finally`.
 - Abort and handler cleanup are covered.
-- No content, keys, cookies, headers, or bodies appear in logs or tool output (counts/booleans only).
+- Authorized MCP results contain only the specified bounded validated IDs, never message bodies, raw responses, cookies, tokens, or headers. Logs and diagnostic reports contain counts/booleans only and no identifiers or content.
+- Automatic `/messages/t/` navigation prevents successful list classification; cleanup runs without inspecting the selected conversation. This test detects the failure and does not claim that aborting prevents Seen.
+- Auth probes and login verification for a non-opening list must not navigate a conversation-selecting surface. The existing probe path is an integration prerequisite, not a selector-only fix.
 - Browser tests must make zero Facebook requests.
 
 ## Operator validation protocol (read-only)
 
-Run manually in an authenticated Chrome session; record **counts and booleans only**, never identifiers, names, previews, or message text.
+Run manually in an authenticated Chrome session; record **sanitized structural evidence** (schemas, counts, booleans, and key shapes), never actual identifiers, names, previews, or message text.
 
-1. Confirm the operator risk acknowledgment is recorded before starting (open item in PR #74).
-2. Open `/messages/` once and record whether a conversation auto-opens (boolean) and whether any receipt/Seen indicator appears — do not send anything.
-3. Record booleans for login/checkpoint/captcha/empty markers and whether an authenticated marker is present.
-4. With a response listener attached **before** navigation, record whether any normal loaded same-origin GraphQL/JSON response carries a per-conversation connection (boolean + operation name only); do **not** replay requests or call endpoints.
-5. Record whether DOM anchors expose a per-conversation key, and whether that key is stable across two loads (boolean).
-6. Record whether the page virtualizes/paginates and whether a completeness claim is possible from one load (boolean).
-7. If a candidate key is found, record only its **shape** (grammar class and length bound), never a value.
-8. Classify personal-vs-Marketplace from the page/response (boolean), not from the URL.
-9. If step 2 shows auto-open, **stop** — no listing tool is viable without a non-auto-open path and explicit operator approval.
+1. Confirm explicit informed operator consent to the initial load. Explain that automatic thread selection could send a read acknowledgment to Facebook and make Seen visible to participants. Stopping afterward cannot undo that side effect. Without consent, do not navigate.
+2. Stage passive capture **before the first navigation**: DevTools Network recording on a fresh tab, or an existing approved Playwright response listener. Do not export a HAR, authenticated HTML, headers, payloads, or raw response bodies.
+3. Load `/messages/` once. Immediately check the sanitized URL and structural selection indicators. **If a thread is selected, stop immediately before DOM/state/response inspection or further interaction; close the inspection tab.** Do not infer that a receipt was prevented or emitted. Any further research requires separate approval for its concrete actions.
+4. Only if the first load remains a list with no selected conversation, record booleans for login/checkpoint/captcha/empty and authenticated markers.
+5. Inspect only passive captured response structure and metadata: connection presence, operation name, allowlisted key shape, and in-memory uniqueness/equality checks. Do not replay requests, invoke private modules, or read message fields.
+6. Check DOM/hydration candidates without clicking. Never infer association from names, order, preview snippets, timestamps, or matching counts. A second load is not part of this protocol; stability across loads remains unverified unless separately authorized and performed safely.
+7. Record whether virtualization/pagination is structurally exposed; do not scroll, paginate, or claim completeness from one load without further authorization and evidence.
+8. Classify personal-vs-Marketplace from verified page/response structure, not the URL alone. Record only schemas, counts, booleans, and key grammar/length, never actual keys or private content.
+
+The October 10 run stopped at step 3. Steps 4–8 were not performed.
 
 ## Verified vs assumed
 
@@ -149,10 +170,14 @@ Run manually in an authenticated Chrome session; record **counts and booleans on
 
 - The Marketplace inbox had 24 conversation buttons and zero `/messages/t/` anchors, with GraphQL `CometMarketplaceInboxBuyerTabViewContainerQuery`/`PaginationQuery` carrying `data.viewer.marketplaceInboxBuyerMessageThreads.edges[].node` (`__typename: "MessageThread"`, `thread_key.thread_fbid`) — **Marketplace-scope ONLY**, and not assumed for `/messages/`.
 
+**Live #78 evidence (2026-10-10 operator run):**
+
+- One informed, authorized root-inbox load automatically navigated to `/messages/t/[redacted]` without a conversation click. Capture was staged first; inspection stopped and the tab was closed. See the procedure above for the evidence and limits.
+
 **Assumed / unverified (do not treat as fact):**
 
 - That `/messages/` renders any usable key in DOM, responses, or hydration state.
-- That the ordinary inbox does not auto-open a thread.
+- Whether automatic selection repeats across sessions, and whether the observed load emitted Seen.
 - That Marketplace's GraphQL connection shape recurs on `/messages/`.
 - That ordinary-inbox pagination/virtualization is bounded like Marketplace's.
 - That any key can be mapped to a conversation without opening it.
@@ -161,17 +186,17 @@ Run manually in an authenticated Chrome session; record **counts and booleans on
 
 Mapped to `provider-action-boundaries.md`:
 
-- **Risk class.** Any consumer listing is at most `read`. The named Seen exception (`provider-action-boundaries.md:39,86`) covers **thread opens only**; `messenger_threads_list` opens no threads and has no receipt side effect, and `consumer_threads_list` must meet the same bar.
+- **Risk class.** The intended consumer listing is `read` only if it meets the non-opening boundary. The named Seen exception (`provider-action-boundaries.md:39,86`) covers **thread opens only**. The statement that listing opens no threads is a required contract, not verified runtime behavior for the current probe chain or an ordinary-inbox implementation.
 - **No new scope.** Same `(facebook, default, messenger)` scope and profile; no shared state change.
-- **Never log or persist content.** No message text, keys, cookies, headers, or response bodies in logs or output; diagnostics are counts/booleans only.
+- **Results versus diagnostics.** A future authorized MCP result may return the specified bounded validated IDs. Logs, diagnostic output, research reports, and stored diagnostic artifacts must contain no identifiers or private content. Never return message bodies, raw responses, cookies, tokens, or headers from this listing tool. The operator investigation does not persist actual identifiers.
 - **Never automate 2FA or challenges.** Challenge states surface as typed errors requiring manual recovery.
 - **No replay / no endpoint calls.** Only passively observed normal loads; no hardcoded tokens or undocumented calls.
 - **Untrusted content.** Any extracted text remains other-participant-controlled and bounded; interpretation belongs to Miso.
 
 ## Deliberate gaps / recommendation
 
-- **Recommendation:** close #78 with **NO-GO** for building a consumer listing tool now. The ordinary `/messages/` discovery contract cannot be established from this repository, and the probe's existing `/messages/` navigation may already carry an unverified receipt risk.
-- **#78 acceptance criteria mapped:** (1) verified structural contract *or* evidence-based no-go → **this document is the evidence-based no-go**; (2) no threads opened / no receipts without approval → **enforced by the protocol's step 9 (auto-open) stop rule**; (3) privacy-safe evidence, known failure modes, bounded tests → **specified above, not built**; (4) focused implementation child **only** when verified → **none created here**.
+- **Recommendation:** keep #78 open for the unresolved passive-access question. The tested direct-navigation path is NO-GO for a non-opening listing tool; this is observed evidence, not proof that every alternative is infeasible. Do not implement `consumer_threads_list` now.
+- **#78 acceptance criteria mapped:** (1) direct-navigation failure observed, but populated/empty structure and alternative passive paths remain unverified; (2) initial potential auto-open/receipt was explicitly approved beforehand, and inspection stopped on selection; receipt emission remains unknown; (3) sanitized evidence, failure modes, and bounded tests specified, not built; (4) **no implementation child created**, because no non-opening authoritative source is verified.
 - **No implementation child is proposed.** A future ticket may be opened only after the operator protocol positively verifies a passive authoritative key and non-auto-open behavior.
 - **Cross-links:** `provider-action-boundaries.md` (normative enforcement), `conversation-surface-research.md` (#43 step 1 Marketplace surface), PR #74 `docs/messenger-consumer-research.md` (consumer Messenger design record), #64 (Marketplace-only listing recovery), and `services/marketplace/AGENTS.md` (scope, credential, privacy invariants).
-- **Reopen condition:** only when a read-only operator validation run establishes a passive authoritative key for the ordinary `/messages/` inbox **and** confirms the surface does not auto-open a conversation. Until both hold, the verdict stands as final.
+- **Owner and handoff:** assigned through Dispatch to the operator/Codex team. Next evidence collection must propose a concrete passive path that avoids automatic selection, with any potential side effects explained and authorized before action. Establish an authoritative source and its safe loading behavior before creating an implementation child. This document does not authorize another `/messages/` load or change the provider boundary.
