@@ -83,12 +83,17 @@ export function parseMessengerInboxGraphQLResponse(payload: unknown): ParsedResp
       threadIds.push(threadId);
     }
   }
+  // `incomplete` reflects the server's pagination signal, not the size of the current slice: any
+  // connection with `has_next_page: true` means we did not read the full inbox, whether the
+  // current slice happened to be empty or not. Earlier revisions gated the flag on
+  // `threadIds.length === 0`, which made it unreachable on the more common non-empty paginated
+  // response and silently mis-described the first slice as a complete inbox.
   return {
     kind: 'connection',
     threadIds,
     empty: false,
     malformed,
-    incomplete: hasMorePages(connection) && threadIds.length === 0
+    incomplete: hasMorePages(connection)
   };
 }
 

@@ -138,6 +138,12 @@ export class FacebookMessengerBackend implements ConversationBackend {
             }
           })();
           pendingReads.add(work);
+          // Each newly dispatched read inherits the flush clock that was started by the outer
+          // `waitForReadFlush` call: the deadline is computed once in that call and the outer
+          // loop re-races `Promise.allSettled(Array.from(pending))` against a fresh timeout
+          // per pass, so a read added after the first pass is still bounded by the original
+          // total budget. The per-read `GRAPHQL_BODY_READ_TIMEOUT_MS` ceiling also holds, so
+          // the listener never holds the exclusive session past the flush deadline.
           void work.finally(() => { pendingReads.delete(work); });
         };
         page.on('response', handler);
@@ -405,6 +411,14 @@ function isJsonContentType(value: string | undefined): boolean {
  * Classifies the observed request against the verified inbox operations. `unavailable` means the
  * request body could not be read (e.g. a GET), in which case the response body schema remains the
  * only guard; `other` means a body was read and named a different operation.
+ *
+ * The match is a substring search against the raw request body for the verified operation names.
+ * That is intentionally lenient: Facebook sometimes wraps the operation name inside form-encoded
+ * `variables=` or `fb_api_req_friendly_name=` payloads where strict JSON parsing would miss it.
+ * The same origin and verified operation-name list bound the blast radius, but a same-origin
+ * request whose body happened to contain a verified name as free text would still match. If
+ * field-uniqueness proves fragile in practice, a follow-up should switch to a parsed-JSON check
+ * keyed on `variables` or `fb_api_req_friendly_name`.
  */
 function matchInboxOperation(request: import('playwright').Request): 'inbox' | 'other' | 'unavailable' {
   let postData: string | null;

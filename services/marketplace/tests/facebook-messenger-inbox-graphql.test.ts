@@ -33,6 +33,14 @@ describe('Messenger inbox GraphQL response parsing', () => {
     });
   });
 
+  it('marks a non-empty connection with has_next_page incomplete even when edges were returned', () => {
+    // Regression for the previous `hasMorePages(connection) && threadIds.length === 0` guard,
+    // which made the flag unreachable whenever the current slice had any thread.
+    expect(parseMessengerInboxGraphQLResponse(response([edge('12345678')], { has_next_page: true }))).toEqual({
+      kind: 'connection', threadIds: ['12345678'], empty: false, malformed: false, incomplete: true
+    });
+  });
+
   it('marks invalid thread keys and inconsistent ids malformed without returning them', () => {
     const mismatchedBase64 = Buffer.from('message_thread:other').toString('base64');
     for (const item of [
@@ -82,6 +90,20 @@ describe('Messenger inbox GraphQL response parsing', () => {
     collector.observe(response([], { has_next_page: true }));
     expect(collector.snapshot()).toMatchObject({
       recognized: true,
+      empty: false,
+      incomplete: true,
+      threadIds: ['12345678']
+    });
+  });
+
+  it('reports incomplete for a non-empty paginated connection even without a follow-up empty slice', () => {
+    // Regression for the previous `hasMorePages && threadIds.length === 0` guard, which meant a
+    // single observed paginated-but-non-empty connection was reported as complete.
+    const collector = new MessengerInboxGraphQLCollector();
+    collector.observe(response([edge('12345678')], { has_next_page: true }));
+    expect(collector.snapshot()).toEqual({
+      recognized: true,
+      malformed: false,
       empty: false,
       incomplete: true,
       threadIds: ['12345678']
