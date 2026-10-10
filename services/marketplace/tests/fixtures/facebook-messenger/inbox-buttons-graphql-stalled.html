@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Synthetic stalled button inbox</title></head>
+<body>
+  <main role="main">
+    <header><span aria-label="Your account">Synthetic account</span></header>
+    <section aria-label="Conversations"><button type="button">Conversation button</button></section>
+  </main>
+  <script>
+    // Trigger many matching same-origin GraphQL inbox requests whose bodies never complete.
+    // The dispatcher must bound the total flush deadline so the browser session does not stall
+    // behind serialized per-body reads.
+    for (let i = 0; i < 10; i += 1) {
+      fetch('/api/graphql/inbox-stall', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ operationName: 'CometMarketplaceInboxBuyerTabViewContainerQuery', index: i }) });
+    }
+  </script>
+</body>
+</html>

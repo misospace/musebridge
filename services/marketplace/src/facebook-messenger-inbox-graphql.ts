@@ -9,15 +9,27 @@ export interface MessengerInboxGraphQLObservation {
   recognized: boolean;
   malformed: boolean;
   empty: boolean;
+  incomplete: boolean;
   threadIds: string[];
 }
 
 type ParsedResponse =
   | { kind: 'unrelated' }
-  | { kind: 'connection'; threadIds: string[]; empty: boolean; malformed: boolean };
+  | { kind: 'connection'; threadIds: string[]; empty: boolean; malformed: boolean; incomplete: boolean };
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Verified inbox connections are Relay-style paginated: `page_info.has_next_page` indicates
+ * whether more slices remain on the server. The marketplace inbox is read-only over the first
+ * slice, so a paginated connection cannot be claimed complete without that signal.
+ */
+function hasMorePages(connection: Record<string, unknown>): boolean {
+  const pageInfo = connection.page_info;
+  if (!isObject(pageInfo)) return false;
+  return pageInfo.has_next_page === true;
 }
 
 export function parseMessengerInboxGraphQLResponse(payload: unknown): ParsedResponse {
@@ -30,10 +42,15 @@ export function parseMessengerInboxGraphQLResponse(payload: unknown): ParsedResp
   }
   const connection = viewer.marketplaceInboxBuyerMessageThreads;
   if (!isObject(connection) || !Array.isArray(connection.edges)) {
-    return { kind: 'connection', threadIds: [], empty: false, malformed: true };
+    return { kind: 'connection', threadIds: [], empty: false, malformed: true, incomplete: false };
   }
   if (connection.edges.length === 0) {
-    return { kind: 'connection', threadIds: [], empty: true, malformed: false };
+    // An empty current slice with `has_next_page: true` is partial pagination, not a verified
+    // empty inbox; the tool reads one page so claiming completeness here would fabricate data.
+    if (hasMorePages(connection)) {
+      return { kind: 'connection', threadIds: [], empty: false, malformed: false, incomplete: true };
+    }
+    return { kind: 'connection', threadIds: [], empty: true, malformed: false, incomplete: false };
   }
 
   const threadIds: string[] = [];
@@ -66,7 +83,13 @@ export function parseMessengerInboxGraphQLResponse(payload: unknown): ParsedResp
       threadIds.push(threadId);
     }
   }
-  return { kind: 'connection', threadIds, empty: false, malformed };
+  return {
+    kind: 'connection',
+    threadIds,
+    empty: false,
+    malformed,
+    incomplete: hasMorePages(connection) && threadIds.length === 0
+  };
 }
 
 /**
@@ -87,6 +110,7 @@ export class MessengerInboxGraphQLCollector {
   private recognized = false;
   private malformed = false;
   private empty = false;
+  private incomplete = false;
   private recognizedResponses = 0;
 
   constructor(options: { maxThreads?: number; maxResponses?: number } = {}) {
@@ -103,6 +127,7 @@ export class MessengerInboxGraphQLCollector {
       this.recognizedResponses += 1;
       this.malformed ||= parsed.malformed;
       this.empty ||= parsed.empty;
+      this.incomplete ||= parsed.incomplete;
       for (const threadId of parsed.threadIds) {
         if (this.threadIds.length >= this.maxThreads) break;
         if (this.seen.has(threadId)) continue;
@@ -119,7 +144,8 @@ export class MessengerInboxGraphQLCollector {
     return {
       recognized: this.recognized,
       malformed: this.malformed,
-      empty: this.empty && this.threadIds.length === 0,
+      empty: this.empty && this.threadIds.length === 0 && !this.incomplete,
+      incomplete: this.incomplete,
       threadIds: [...this.threadIds]
     };
   }

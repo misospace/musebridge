@@ -62,6 +62,15 @@ export function interpretMessengerInboxPage(input: {
     if (threads.length > 0) return { kind: 'threads', threads };
   }
   if (graphql?.malformed) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox threads could not be parsed.' };
+  // An empty current slice with `has_next_page: true` is paginated partial data; the tool only
+  // observes the first page so claiming an empty inbox would fabricate completeness.
+  if (graphql?.incomplete) {
+    return {
+      kind: 'error',
+      code: 'UPSTREAM_ERROR',
+      message: 'The Facebook Marketplace inbox page only returned the first page of threads; pagination is not supported.'
+    };
+  }
   if (graphql?.empty) return { kind: 'empty' };
   if (graphql?.recognized) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox threads could not be parsed.' };
   // Without a verified GraphQL connection the DOM anchors are the only remaining signal, and they

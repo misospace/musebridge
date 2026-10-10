@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer, type Server } from 'node:http';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { chromium } from 'playwright';
 import { BrowserSessionManager } from '../src/browser.js';
@@ -18,7 +18,7 @@ if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
 
 const fixtureDir = new URL('./fixtures/facebook-messenger/', import.meta.url);
 const fixtures = new Map([
-  'inbox-normal.html', 'inbox-empty.html', 'inbox-login.html', 'inbox-checkpoint.html', 'inbox-layout-changed.html', 'inbox-buttons-graphql.html', 'inbox-buttons-graphql-delayed.html',
+  'inbox-normal.html', 'inbox-empty.html', 'inbox-login.html', 'inbox-checkpoint.html', 'inbox-layout-changed.html', 'inbox-buttons-graphql.html', 'inbox-buttons-graphql-delayed.html', 'inbox-buttons-graphql-stalled.html',
   'thread-normal.html', 'thread-layout-changed.html'
 ].map((name) => [name, readFileSync(new URL(name, fixtureDir), 'utf8')]));
 
@@ -28,6 +28,7 @@ let inboxFixture = 'inbox-normal.html';
 let threadFixture = 'thread-normal.html';
 let hangInbox = false;
 let graphqlPayload: unknown = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [] } } } };
+const stalledResponses = new Set<ServerResponse<IncomingMessage>>();
 let inboxRedirectTarget: string | undefined;
 let threadRedirectTarget: string | undefined;
 const requests: string[] = [];
@@ -42,6 +43,15 @@ beforeAll(async () => {
       const body = JSON.stringify(graphqlPayload);
       response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
       response.end(body);
+      return;
+    }
+    if (pathname === '/api/graphql/inbox-stall') {
+      // Send headers but never end the body: each request stalls until the test closes the
+      // response. The body's read must race against the per-read 2s timeout.
+      response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'transfer-encoding': 'chunked' });
+      response.write(':');
+      stalledResponses.add(response);
+      response.on('close', () => { stalledResponses.delete(response); });
       return;
     }
     if (pathname === '/api/graphql/other') {
@@ -92,6 +102,10 @@ afterEach(async () => {
   expect(requests.every((request) => /^\/(?:api\/graphql\/[^?]*|messages\/|marketplace\/inbox\/|messages\/t\/[A-Za-z0-9._-]+\/)$/.test(request))).toBe(true);
   await Promise.allSettled(managers.splice(0).map((manager) => manager.close()));
   for (const profileDir of profileDirs.splice(0)) rmSync(profileDir, { recursive: true, force: true });
+  for (const stalled of Array.from(stalledResponses)) {
+    stalled.end();
+    stalledResponses.delete(stalled);
+  }
   requests.length = 0;
   inboxFixture = 'inbox-normal.html';
   threadFixture = 'thread-normal.html';
@@ -182,7 +196,7 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
   it('uses a valid empty GraphQL connection and rejects absent or malformed connections', async () => {
     configure('inbox-buttons-graphql.html');
     const backend = createBackend({ settleTimeoutMs: 30 });
-    graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [] } } } };
+    graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [], page_info: { has_next_page: false, end_cursor: null } } } } };
     await expect(backend.listThreads(listInput(), new AbortController().signal)).resolves.toEqual([]);
 
     configure('inbox-buttons-graphql.html');
@@ -192,6 +206,39 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
     configure('inbox-buttons-graphql.html');
     graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [{ node: { __typename: 'MessageThread', thread_key: { thread_fbid: 'bad id' } } }] } } } };
     await expectProviderError(backend.listThreads(listInput(), new AbortController().signal), 'UPSTREAM_ERROR');
+  }, 30_000);
+
+  it('fails closed when the inbox connection is paginated and the current slice is empty', async () => {
+    configure('inbox-buttons-graphql.html');
+    const backend = createBackend({ settleTimeoutMs: 30 });
+    graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: {
+      edges: [],
+      page_info: { has_next_page: true, end_cursor: 'NEXT_PAGE_TOKEN_SENTINEL' }
+    } } } };
+    await expectProviderError(
+      backend.listThreads(listInput(), new AbortController().signal),
+      'UPSTREAM_ERROR',
+      'The Facebook Marketplace inbox page only returned the first page of threads; pagination is not supported.'
+    );
+  }, 15_000);
+
+  it('bounds the total GraphQL flush deadline so multiple stalled responses cannot serialize per-body timeouts', async () => {
+    configure('inbox-buttons-graphql-stalled.html');
+    // The fixture sends 10 fetch calls to /api/graphql/inbox-stall whose bodies never end.
+    // Each body read races against a 2s timeout; the dispatcher must run them concurrently
+    // and the flush must cap the total wait so the operation finishes within the flush budget
+    // (3s by default) plus the navigation/settle budgets, not 10 × 2s serialized.
+    const backend = createBackend({ settleTimeoutMs: 100 });
+    const start = Date.now();
+    const threads = await backend.listThreads(listInput(), new AbortController().signal);
+    const elapsed = Date.now() - start;
+    // Allow generous headroom for browser startup, navigation, and fixture load but well under
+    // the old worst case of ~20s for ten serialized body reads.
+    expect(threads).toEqual([]);
+    expect(elapsed).toBeLessThan(15_000);
+    // The dispatched reads should still be in flight (or just settled) when the operation
+    // returns; the listener cleanup must not hang waiting for the never-ending bodies.
+    expect(stalledResponses.size).toBeGreaterThan(0);
   }, 30_000);
 
   it('returns empty only for a recognized empty inbox', async () => {

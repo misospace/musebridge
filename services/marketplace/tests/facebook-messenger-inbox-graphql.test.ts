@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { MessengerInboxGraphQLCollector, parseMessengerInboxGraphQLResponse } from '../src/facebook-messenger-inbox-graphql.js';
 
-function response(edges: unknown[]) {
-  return { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges } } } };
+function response(edges: unknown[], pageInfo: Record<string, unknown> | undefined = undefined) {
+  const connection: Record<string, unknown> = { edges };
+  if (pageInfo) connection.page_info = pageInfo;
+  return { data: { viewer: { marketplaceInboxBuyerMessageThreads: connection } } };
 }
 function edge(threadId: unknown, extra: Record<string, unknown> = {}) {
   return { node: { __typename: 'MessageThread', thread_key: { thread_fbid: threadId }, ...extra } };
@@ -12,12 +14,23 @@ describe('Messenger inbox GraphQL response parsing', () => {
   it('parses valid connections, deduplicates ids, and accepts literal and base64 thread ids', () => {
     const base64Id = Buffer.from('message_thread:abc').toString('base64');
     expect(parseMessengerInboxGraphQLResponse(response([edge('abc'), edge('abc', { id: 'message_thread:abc' }), edge('abc', { id: base64Id })]))).toEqual({
-      kind: 'connection', threadIds: ['abc'], empty: false, malformed: false
+      kind: 'connection', threadIds: ['abc'], empty: false, malformed: false, incomplete: false
     });
   });
 
   it('recognizes a well-formed empty connection', () => {
-    expect(parseMessengerInboxGraphQLResponse(response([]))).toEqual({ kind: 'connection', threadIds: [], empty: true, malformed: false });
+    expect(parseMessengerInboxGraphQLResponse(response([]))).toEqual({
+      kind: 'connection', threadIds: [], empty: true, malformed: false, incomplete: false
+    });
+    expect(parseMessengerInboxGraphQLResponse(response([], { has_next_page: false }))).toEqual({
+      kind: 'connection', threadIds: [], empty: true, malformed: false, incomplete: false
+    });
+  });
+
+  it('marks an empty current slice with has_next_page incomplete instead of empty', () => {
+    expect(parseMessengerInboxGraphQLResponse(response([], { has_next_page: true }))).toEqual({
+      kind: 'connection', threadIds: [], empty: false, malformed: false, incomplete: true
+    });
   });
 
   it('marks invalid thread keys and inconsistent ids malformed without returning them', () => {
@@ -29,7 +42,7 @@ describe('Messenger inbox GraphQL response parsing', () => {
       edge('valid', { id: 'message_thread:valid:extra' }),
       edge(123)
     ]) {
-      expect(parseMessengerInboxGraphQLResponse(response([item]))).toMatchObject({ kind: 'connection', threadIds: [], malformed: true });
+      expect(parseMessengerInboxGraphQLResponse(response([item]))).toMatchObject({ kind: 'connection', threadIds: [], malformed: true, incomplete: false });
     }
   });
 
@@ -48,6 +61,30 @@ describe('Messenger inbox GraphQL response parsing', () => {
       collector.observe(Object.create(null));
       collector.observe(new Proxy({}, { get: () => { throw new Error('hostile'); } }));
     }).not.toThrow();
-    expect(collector.snapshot()).toEqual({ recognized: true, malformed: true, empty: false, threadIds: ['first'] });
+    expect(collector.snapshot()).toEqual({ recognized: true, malformed: true, empty: false, incomplete: false, threadIds: ['first'] });
+  });
+
+  it('does not report empty when an observed response is paginated but the current slice is empty', () => {
+    const collector = new MessengerInboxGraphQLCollector();
+    collector.observe(response([], { has_next_page: true }));
+    expect(collector.snapshot()).toEqual({
+      recognized: true,
+      malformed: false,
+      empty: false,
+      incomplete: true,
+      threadIds: []
+    });
+  });
+
+  it('does not let a later paginated empty response overwrite prior thread ids', () => {
+    const collector = new MessengerInboxGraphQLCollector();
+    collector.observe(response([edge('12345678')]));
+    collector.observe(response([], { has_next_page: true }));
+    expect(collector.snapshot()).toMatchObject({
+      recognized: true,
+      empty: false,
+      incomplete: true,
+      threadIds: ['12345678']
+    });
   });
 });

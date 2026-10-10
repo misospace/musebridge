@@ -39,6 +39,7 @@ export interface FacebookMessengerBackendOptions {
   inboxPath?: string;
   navigationTimeoutMs?: number;
   settleTimeoutMs?: number;
+  graphqlFlushTimeoutMs?: number;
   maxThreads?: number;
   logger?: Pick<Console, 'error'>;
 }
@@ -51,6 +52,7 @@ export class FacebookMessengerBackend implements ConversationBackend {
   private readonly inboxPath: string;
   private readonly navigationTimeoutMs: number;
   private readonly settleTimeoutMs: number;
+  private readonly graphqlFlushTimeoutMs: number;
   private readonly maxThreads: number;
   private readonly logger: Pick<Console, 'error'>;
   private readonly loginController = new AbortController();
@@ -76,10 +78,12 @@ export class FacebookMessengerBackend implements ConversationBackend {
     this.login = options.login;
     this.navigationTimeoutMs = options.navigationTimeoutMs ?? 8_000;
     this.settleTimeoutMs = options.settleTimeoutMs ?? 3_000;
+    this.graphqlFlushTimeoutMs = options.graphqlFlushTimeoutMs ?? GRAPHQL_FLUSH_TIMEOUT_MS;
     this.maxThreads = options.maxThreads ?? MESSENGER_EXTRACT_LIMITS.maxThreads;
     this.logger = options.logger ?? console;
     validateTimeout(this.navigationTimeoutMs, 'navigationTimeoutMs');
     validateTimeout(this.settleTimeoutMs, 'settleTimeoutMs');
+    validateTimeout(this.graphqlFlushTimeoutMs, 'graphqlFlushTimeoutMs');
     if (!Number.isSafeInteger(this.maxThreads) || this.maxThreads < 1 || this.maxThreads > MESSENGER_EXTRACT_LIMITS.maxThreads) {
       throw new RangeError(`maxThreads must be an integer from 1 to ${MESSENGER_EXTRACT_LIMITS.maxThreads}`);
     }
@@ -106,15 +110,18 @@ export class FacebookMessengerBackend implements ConversationBackend {
 
     const inboxUrl = assertFacebookOrigin(buildMessengerInboxUrl({ baseUrl: this.probe.baseUrl, inboxPath: this.inboxPath }));
     let extracted: ExtractedInboxPage;
-    let graphql: MessengerInboxGraphQLObservation = { recognized: false, malformed: false, empty: false, threadIds: [] };
+    let graphql: MessengerInboxGraphQLObservation = { recognized: false, malformed: false, empty: false, incomplete: false, threadIds: [] };
     try {
       const result = await this.browser.runExclusive(signal, async (page, taskSignal) => {
         const collector = new MessengerInboxGraphQLCollector({ maxThreads: this.maxThreads });
-        let responseWork = Promise.resolve();
+        // Pending body reads run concurrently; each is bounded by `GRAPHQL_BODY_READ_TIMEOUT_MS`
+        // and the whole flush is bounded by `graphqlFlushTimeoutMs` so 60 stalled bodies cannot
+        // serialize 120s of work past the navigation and settle budgets.
+        const pendingReads = new Set<Promise<void>>();
         let dispatchedReads = 0;
         const baseOrigin = new URL(this.probe.baseUrl).origin;
         const handler = (response: import('playwright').Response): void => {
-          responseWork = responseWork.then(async () => {
+          const work = (async () => {
             try {
               const url = new URL(response.url());
               if (url.origin !== baseOrigin || !url.pathname.startsWith('/api/graphql/')) return;
@@ -129,7 +136,9 @@ export class FacebookMessengerBackend implements ConversationBackend {
             } catch {
               return;
             }
-          }).catch(() => undefined);
+          })();
+          pendingReads.add(work);
+          void work.finally(() => { pendingReads.delete(work); });
         };
         page.on('response', handler);
         try {
@@ -152,7 +161,7 @@ export class FacebookMessengerBackend implements ConversationBackend {
           return pageResult;
         } finally {
           page.off('response', handler);
-          await responseWork;
+          await waitForReadFlush(pendingReads, this.graphqlFlushTimeoutMs);
           graphql = collector.snapshot();
         }
       });
@@ -345,6 +354,7 @@ function messengerSessionMessage(code: FacebookProbeCode): string {
  */
 const GRAPHQL_BODY_READ_TIMEOUT_MS = 2_000;
 const GRAPHQL_RESPONSE_READ_LIMIT = 60;
+const GRAPHQL_FLUSH_TIMEOUT_MS = 3_000;
 
 async function readResponseBody(response: import('playwright').Response): Promise<unknown> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -357,6 +367,31 @@ async function readResponseBody(response: import('playwright').Response): Promis
     ]);
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Waits for already-dispatched response body reads to settle, bounded by `totalMs`. The reads
+ * themselves run concurrently so a queue of stalled Chromium body reads cannot serialize past
+ * the navigation and settle budgets. Reads still in flight when the deadline elapses continue
+ * to settle in the background; each has its own 2s body-read timeout so the listener and page
+ * never hold the exclusive browser session beyond their deadline.
+ */
+async function waitForReadFlush(pending: Set<Promise<void>>, totalMs: number): Promise<void> {
+  if (pending.size === 0) return;
+  const deadline = Date.now() + totalMs;
+  while (pending.size > 0) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, remaining);
+    });
+    try {
+      await Promise.race([Promise.allSettled(Array.from(pending)), timeoutPromise]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 }
 
