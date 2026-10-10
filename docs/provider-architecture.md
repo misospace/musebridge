@@ -26,15 +26,16 @@ A **capability surface** is the tuple:
 
 The scope triple is defined by the action-boundary contract (`provider-action-boundaries.md`): `provider` is the external service identity, `account` is one login identity (today always `default`), and `surface` is one product area on that provider. Each scope owns its own session assessment, browser profile (when browser-backed), and failure posture. A tool declares exactly one scope and one risk class; dispatch enforces it.
 
-Today's three surfaces:
+Today's four surfaces:
 
 | Surface | Provider | Backend interface (`backend.ts`) | Tools (`tools.ts`) | Session kind |
 |---|---|---|---|---|
 | `marketplace` | `facebook` | `MarketplaceBackend` | `marketplace_search`, `marketplace_fetch`, `marketplace_status` | Browser session scope |
 | `shopping` | `ebay` | `ShoppingBackend` | `shopping_search`, `shopping_fetch` | API token, no browser |
 | `messenger` | `facebook` | `ConversationBackend` | `messenger_threads_list`, `messenger_thread_read` | Separate browser session scope |
+| `events` | `ticketmaster` | `EventsBackend` | `events_search`, `events_fetch` | API token, no browser |
 
-Backends are selected by kind and expose a bounded `name` (`fixture`, `facebook`, or `ebay`). The backend interface is the only thing core dispatch knows about a provider; the domain contract is the only shape a provider must fill.
+Backends are selected by kind and expose a bounded `name` (`fixture`, `facebook`, `ebay`, or `ticketmaster`). The backend interface is the only thing core dispatch knows about a provider; the domain contract is the only shape a provider must fill.
 
 ## Module layout and cohesive namespaces
 
@@ -45,10 +46,10 @@ Files under `services/marketplace/src/` are grouped by cohesion rather than by t
 - `service.ts` — composition root: reads environment/config, constructs backends, wires the HTTP server and MCP sessions.
 - `tools.ts` — the tool registry, validation, authorization, dispatch, cancellation, and the single `CallToolRequestSchema` handler.
 - `domain.ts` — all Zod contracts and the versioned output schemas; the single source of truth for shapes.
-- `backend.ts` — the `MarketplaceBackend`, `ConversationBackend`, and `ShoppingBackend` interfaces plus `ProviderError`.
+- `backend.ts` — the `MarketplaceBackend`, `ConversationBackend`, `ShoppingBackend`, and `EventsBackend` interfaces plus `ProviderError`.
 - `authorization.ts` — risk classes, scopes, grant shape, `authorizeAction`, `DenyAllAuthorizer`.
 - `browser.ts` — the provider-agnostic Playwright persistent-profile manager.
-- `fixtures.ts` — synthetic fixture data and the `FixtureBackend` / `FixtureShoppingBackend` implementations.
+- `fixtures.ts` — synthetic fixture data and the `FixtureBackend` / `FixtureShoppingBackend` / `FixtureEventsBackend` implementations.
 - `reauth.ts` / `admin.ts` — the operator re-auth lease and its loopback admin API.
 - `market-config.ts` — startup loader for a mounted Facebook market map.
 
@@ -56,6 +57,7 @@ Files under `services/marketplace/src/` are grouped by cohesion rather than by t
 
 - `facebook-*.ts` — `facebook-marketplace-*` (URL, extract, parse, backend), `facebook-messenger-*`, `facebook-login.ts`, `facebook.ts` (probe + origin constants).
 - `ebay.ts` (HTTP client) and `ebay-backend.ts` (`ShoppingBackend` implementation).
+- `ticketmaster.ts` (HTTP client) and `ticketmaster-backend.ts` (`EventsBackend` implementation).
 
 **Dependency rule.** Provider-specific modules are never imported by the core dispatch/contract modules. `tools.ts` imports only `backend.ts`, `domain.ts`, `authorization.ts`, and `browser.ts`; `domain.ts` and `backend.ts` import no provider module. The concrete proof is `ebay-backend.ts`, whose entire import list is:
 
@@ -67,7 +69,7 @@ import { EbayClient, EbayHttpError, type EbayClientOptions } from './ebay.js';
 
 Zero Facebook imports. Only the composition root (`service.ts`) and the public `index.ts` re-exports reference concrete provider modules; that is the one place allowed to know all providers.
 
-**Honest coupling note.** Three "core" files are not yet fully provider-agnostic in their imports: `reauth.ts` imports the Facebook origin/path constants from `facebook.ts`; `market-config.ts` imports the Facebook market validators from `facebook-marketplace-url.ts`; and `fixtures.ts` carries synthetic data for all three surfaces. The truly agnostic dispatch path is `tools.ts` → `backend.ts` interfaces → `domain.ts` contracts. Untangling the reauth/config edge is deferred until a second browser-backed provider exists (see non-generalizations).
+**Honest coupling note.** Three "core" files are not yet fully provider-agnostic in their imports: `reauth.ts` imports the Facebook origin/path constants from `facebook.ts`; `market-config.ts` imports the Facebook market validators from `facebook-marketplace-url.ts`; and `fixtures.ts` carries synthetic data for all four surfaces. The truly agnostic dispatch path is `tools.ts` → `backend.ts` interfaces → `domain.ts` contracts. Untangling the reauth/config edge is deferred until a second browser-backed provider exists (see non-generalizations).
 
 ## Typed tool inputs/outputs/errors
 
@@ -91,7 +93,7 @@ There is exactly one `CallToolRequestSchema` handler. It:
 4. On success, runs the backend through `runBackendOperation` and parses the output against the selected output schema.
 5. On refusal or failure, returns the uniform `runtimeFailureSchema` shape with `isError: true`.
 
-`assertWritableToolsHaveAuthorizer(TOOLS, options.authorizer)` runs at registration and throws before the tool is served if any `send` or `high_consequence` tool has no authorizer. Today all seven tools are `read`, so a `DenyAllAuthorizer` is installed and never consulted.
+`assertWritableToolsHaveAuthorizer(TOOLS, options.authorizer)` runs at registration and throws before the tool is served if any `send` or `high_consequence` tool has no authorizer. Today all nine tools are `read`, so a `DenyAllAuthorizer` is installed and never consulted.
 
 One caveat for new capabilities: the **output-schema selection is an explicit per-tool branch** (a nested ternary in the handler), as is the backend invocation branch. Adding a tool means touching both branches — there is no name-to-schema map yet. This is the concrete place a new capability must edit core dispatch.
 
@@ -129,7 +131,7 @@ Shipped in schema `1.2.0`: `marketplace_status` returns `service_version`, `sche
 
 The array is non-empty and ordered marketplace, shopping, messenger, events. Today, `messenger` and `events` are the surfaces that can be `null` (Facebook backend selected but `MARKETPLACE_MESSENGER` off, or `EVENTS_BACKEND` left unset); `marketplace` and `shopping` are always wired by the service. The existing fields `backend`, `shopping_backend`, `events_backend`, and `facebook_session` are unchanged.
 
-Why this is additive and non-breaking: it adds one required field to `marketplace_status`'s success schema and bumps `SCHEMA_VERSION` from `1.1.0` to `1.2.0`; no tool name, input, or existing field changes. A new surface extends the array with one more entry rather than reshaping the response. Because `ListTools` lists all registered tools regardless of configuration (a fixture deployment still advertises `shopping_*` and `messenger_*`), the capabilities array is what distinguishes **configured backends** without probing a session or calling a tool.
+Why this is additive and non-breaking: it adds one required field to `marketplace_status`'s success schema and bumps `SCHEMA_VERSION` from `1.1.0` to `1.2.0`; no tool name, input, or existing field changes. A new surface extends the array with one more entry rather than reshaping the response. Because `ListTools` lists all registered tools regardless of configuration (a fixture deployment still advertises `shopping_*`, `events_*`, and `messenger_*`), the capabilities array is what distinguishes **configured backends** without probing a session or calling a tool.
 
 ## Compatibility strategy
 
@@ -141,7 +143,7 @@ Distinguish identity surfaces by their stability to consumers:
 | Service package name | `marketplace-mcp` | `services/marketplace/package.json` | Internal build/runtime name; coordinate renames |
 | Container image | `ghcr.io/misospace/marketplace-mcp` | `.github/workflows/ci.yml`, README | Host-facing; legacy `ghcr.io/misospace/marketplace` has **no alias** |
 | MCP server identity | `marketplace` | `new Server({ name: 'marketplace', ... })` in `service.ts` | Consumer contract; do not rename silently |
-| Public tool names | the seven above | `TOOLS` in `tools.ts` | **The stable consumer contract** |
+| Public tool names | the nine above | `TOOLS` in `tools.ts` | **The stable consumer contract** |
 | Deployment workload names | ToolHive / OpenClaw profiles | external, not in this repo | Not yet registered; hosts own them |
 
 Rules:
@@ -153,7 +155,7 @@ Rules:
 
 **Consumer compatibility checklist**
 
-- [ ] Tool names unchanged (`marketplace_search`, `marketplace_fetch`, `marketplace_status`, `shopping_search`, `shopping_fetch`, `messenger_threads_list`, `messenger_thread_read`).
+- [ ] Tool names unchanged (`marketplace_search`, `marketplace_fetch`, `marketplace_status`, `shopping_search`, `shopping_fetch`, `events_search`, `events_fetch`, `messenger_threads_list`, `messenger_thread_read`).
 - [ ] MCP server identity still `marketplace`.
 - [ ] `SCHEMA_VERSION` bumped only for additive output changes; existing fields keep their names and types.
 - [ ] New status fields are additive; `capabilities` entries are added, not reshaped.
@@ -187,13 +189,13 @@ The recipe a new capability follows:
 - **No central provider registry / plugin loader.** Providers are constructed explicitly in `service.ts`; adding one is a code change, not a data change.
 - **No shared package extraction.** A second service package would duplicate the transport, registry, and authorization spine for one consumer.
 - **No config-driven provider table.** The surfaces are compile-time TypeScript, which keeps the schemas and scopes type-checked.
-- **The three backend interfaces stay separate by design.** `MarketplaceBackend`, `ConversationBackend`, and `ShoppingBackend` have different input/output types (`Listing` vs `ConversationThread`/`ConversationMessage` vs `ProductOffer`); collapsing them into one generic interface would erase the types that make the contracts safe.
+- **The four backend interfaces stay separate by design.** `MarketplaceBackend`, `ConversationBackend`, `ShoppingBackend`, and `EventsBackend` have different input/output types (`Listing` vs `ConversationThread`/`ConversationMessage` vs `ProductOffer` vs `EventAvailability`); collapsing them into one generic interface would erase the types that make the contracts safe.
 - **Generalization is deferred until a third capability justifies it**, matching #40's "generalize only infrastructure actually shared by two capabilities." A third browser-backed provider, for example, is the natural trigger to lift the reauth/market-config coupling.
 
 ## Tests and fixtures
 
 - Provider-agnostic tests cover the registry, dispatch, validation, authorization, cancellation, and the service lifecycle.
-- Per-provider synthetic fixtures live under `tests/fixtures/`: `facebook-marketplace/` (search cards, item pages, login/captcha/checkpoint/layout-change states), `facebook-messenger/` (inbox and thread pages), and `ebay/` (search/item/token/error JSON).
+- Per-provider synthetic fixtures live under `tests/fixtures/`: `facebook-marketplace/` (search cards, item pages, login/captcha/checkpoint/layout-change states), `facebook-messenger/` (inbox and thread pages), `ebay/` (search/item/token/error JSON), and `events/` (Ticketmaster search/event/error JSON).
 - Browser tests are gated by `REQUIRE_BROWSER_TESTS=1`; they use a synthetic local server and make **zero** real network calls (Facebook tests block network access entirely).
 - CI installs Chromium and runs `npm run test -- --fileParallelism=false` with `REQUIRE_BROWSER_TESTS=1` to serialize browser-heavy files; ordinary local `npm test` keeps default parallelism.
 
