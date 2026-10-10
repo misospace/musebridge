@@ -13,6 +13,7 @@ import {
   subjectDigest
 } from '../src/authorization.js';
 import type { GrantConsumptionStore } from '../src/grant-state.js';
+import { InMemoryGrantConsumptionStore } from '../src/grant-state.js';
 import { UnverifiedGrantAuthorizer } from './helpers/unverified-grant-authorizer.js';
 import { FixtureBackend } from '../src/backend.js';
 import { registerMarketplaceTools, assertWritableToolsHaveAuthorizer, TOOL_DEFINITIONS } from '../src/tools.js';
@@ -167,7 +168,7 @@ describe('hmac-signed approval grants', () => {
   }
 
   function authorizer(): HmacGrantAuthorizer {
-    return new HmacGrantAuthorizer({ secret, now: () => fixedNow });
+    return new HmacGrantAuthorizer({ secret, now: () => fixedNow, store: new InMemoryGrantConsumptionStore() });
   }
 
   it('authorizes a valid signed grant once and rejects reuse as single-use', () => {
@@ -251,7 +252,15 @@ describe('hmac-signed approval grants', () => {
   });
 
   it('rejects a constructor secret shorter than 32 characters', () => {
-    expect(() => new HmacGrantAuthorizer({ secret: '0123456789abcdef01234567' })).toThrow(TypeError);
+    expect(() => new HmacGrantAuthorizer({ secret: '0123456789abcdef01234567', store: new InMemoryGrantConsumptionStore() })).toThrow(TypeError);
+  });
+
+  it('rejects a constructor without an explicit store so single-use replay cannot silently weaken', () => {
+    // The store check fires after the secret check; a secret too short still wins first and
+    // throws the secret message, so this case uses a valid-length secret but omits the store.
+    expect(() => new HmacGrantAuthorizer({ secret: '0123456789abcdef0123456789abcdef01234567' } as unknown as { secret: string; store: GrantConsumptionStore })).toThrow(TypeError);
+    expect(() => new HmacGrantAuthorizer({ secret: '0123456789abcdef0123456789abcdef01234567', store: undefined } as unknown as { secret: string; store: GrantConsumptionStore })).toThrow(TypeError);
+    expect(() => new HmacGrantAuthorizer({ secret: '0123456789abcdef0123456789abcdef01234567', store: {} as unknown as GrantConsumptionStore })).toThrow(TypeError);
   });
 
   it('keeps grant ids and digests out of every refusal message', () => {

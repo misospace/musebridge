@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { HmacGrantAuthorizer, canonicalActionInput, subjectDigest, type ActionRequest } from '../src/authorization.js';
+import { InMemoryGrantConsumptionStore } from '../src/grant-state.js';
 import { FixtureBackend, ProviderError, renderDeliveredMessage, type ConversationBackend } from '../src/backend.js';
 import type { ConversationMessage, ConversationThreadMessages, ThreadSendInput } from '../src/domain.js';
 import { registerMarketplaceTools, type MarketplaceToolOptions } from '../src/tools.js';
@@ -88,7 +89,7 @@ function buildGrant(input: ThreadSendInput, overrides: Partial<GrantFields> = {}
 }
 
 type SendBehavior = 'ok' | 'timeout' | 'submit-upstream' | 'upstream' | 'session-invalid';
-type ReadBehavior = 'confirmed' | 'bare-token' | 'unconfirmed' | 'null' | 'throws';
+type ReadBehavior = 'confirmed' | 'bare-token' | 'unconfirmed' | 'null' | 'throws' | 'other-party-marker';
 
 function fakeConversations(send: SendBehavior, read: ReadBehavior, input: ThreadSendInput) {
   const calls = { sendThread: 0, readThread: 0 };
@@ -108,6 +109,15 @@ function fakeConversations(send: SendBehavior, read: ReadBehavior, input: Thread
       }
       if (read === 'unconfirmed') {
         return { thread_id: input.thread_id, messages: [{ sender: 'you', text: 'A reply that carries no idempotency marker.' }] as ConversationMessage[] };
+      }
+      if (read === 'other-party-marker') {
+        // The other party's reply quotes our token back to us. Only messages attributed to the
+        // local sender can confirm a send; an echo from the counterpart must read back as unknown
+        // rather than confirming our own send.
+        return {
+          thread_id: input.thread_id,
+          messages: [{ sender: 'other', sender_name: 'Synthetic Seller', text: renderDeliveredMessage(input) }] as ConversationMessage[]
+        };
       }
       return null;
     },
@@ -129,7 +139,7 @@ describe('messenger_send grant enforcement', () => {
     const input = sendInput();
     const { conversations, calls } = fakeConversations('ok', 'confirmed', input);
     const approvalGrant = vi.fn((request: ActionRequest) => buildGrant(input));
-    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
     const handlers = register({ conversations, authorizer, approvalGrant });
 
     const result = await invoke(handlers, 'messenger_send', { ...input });
@@ -153,7 +163,7 @@ describe('messenger_send grant enforcement', () => {
     const { conversations, calls } = fakeConversations('ok', 'confirmed', input);
     const approvalGrant = vi.fn((request: ActionRequest) =>
       buildGrant(input, { subject_digest: subjectDigest({ ...input, message: 'A different message than the granted one.' }) }));
-    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
     const handlers = register({ conversations, authorizer, approvalGrant });
 
     const result = await invoke(handlers, 'messenger_send', { ...input });
@@ -172,7 +182,7 @@ describe('messenger_send grant enforcement', () => {
     const { conversations, calls } = fakeConversations('ok', 'confirmed', input);
     const envelope = buildGrant(input);
     const approvalGrant = vi.fn(() => envelope);
-    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
     const handlers = register({ conversations, authorizer, approvalGrant });
 
     const first = await invoke(handlers, 'messenger_send', { ...input });
@@ -194,7 +204,7 @@ describe('messenger_send grant enforcement', () => {
   it('fails closed with APPROVAL_REQUIRED when the host seam is absent', async () => {
     const input = sendInput();
     const { conversations, calls } = fakeConversations('ok', 'confirmed', input);
-    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
     const handlers = register({ conversations, authorizer });
 
     const result = await invoke(handlers, 'messenger_send', { ...input });
@@ -214,7 +224,7 @@ describe('messenger_send grant enforcement', () => {
     const approvalGrant = vi.fn(() => {
       throw new Error('approval channel unavailable');
     });
-    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
     const handlers = register({ conversations, authorizer, approvalGrant });
 
     const result = await invoke(handlers, 'messenger_send', { ...input });
@@ -232,7 +242,7 @@ describe('messenger_send grant enforcement', () => {
     const input = sendInput();
     const { conversations, calls } = fakeConversations('session-invalid', 'confirmed', input);
     const approvalGrant = vi.fn(() => buildGrant(input));
-    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
     const handlers = register({ conversations, authorizer, approvalGrant });
 
     const result = await invoke(handlers, 'messenger_send', { ...input });
@@ -252,7 +262,7 @@ describe('messenger_send post-success delivery observation', () => {
     const input = sendInput();
     const { conversations, calls } = fakeConversations('ok', 'unconfirmed', input);
     const approvalGrant = vi.fn(() => buildGrant(input));
-    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
     const handlers = register({ conversations, authorizer, approvalGrant });
 
     const result = await invoke(handlers, 'messenger_send', { ...input });
@@ -267,7 +277,7 @@ describe('messenger_send post-success delivery observation', () => {
     const input = sendInput();
     const { conversations, calls } = fakeConversations('ok', 'throws', input);
     const approvalGrant = vi.fn(() => buildGrant(input));
-    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
     const handlers = register({ conversations, authorizer, approvalGrant });
 
     const result = await invoke(handlers, 'messenger_send', { ...input });
@@ -282,7 +292,7 @@ describe('messenger_send post-success delivery observation', () => {
     const input = sendInput();
     const { conversations, calls } = fakeConversations('ok', 'null', input);
     const approvalGrant = vi.fn(() => buildGrant(input));
-    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
     const handlers = register({ conversations, authorizer, approvalGrant });
 
     const result = await invoke(handlers, 'messenger_send', { ...input });
@@ -297,7 +307,22 @@ describe('messenger_send post-success delivery observation', () => {
     const input = sendInput();
     const { conversations, calls } = fakeConversations('ok', 'bare-token', input);
     const approvalGrant = vi.fn(() => buildGrant(input));
-    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
+    const handlers = register({ conversations, authorizer, approvalGrant });
+
+    const result = await invoke(handlers, 'messenger_send', { ...input });
+
+    expect(result.isError).toBe(false);
+    expect(result.structuredContent).toEqual({ ok: true, backend: 'fixture', thread_id: input.thread_id, status: 'unknown' });
+    expect(calls.sendThread).toBe(1);
+    expect(calls.readThread).toBe(1);
+  });
+
+  it('does not treat a token echoed by the other party as confirmation of our send', async () => {
+    const input = sendInput();
+    const { conversations, calls } = fakeConversations('ok', 'other-party-marker', input);
+    const approvalGrant = vi.fn(() => buildGrant(input));
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
     const handlers = register({ conversations, authorizer, approvalGrant });
 
     const result = await invoke(handlers, 'messenger_send', { ...input });
@@ -314,7 +339,7 @@ describe('messenger_send timeout reconciliation', () => {
     const input = sendInput();
     const { conversations, calls } = fakeConversations('timeout', 'confirmed', input);
     const approvalGrant = vi.fn(() => buildGrant(input));
-    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
     const handlers = register({ conversations, authorizer, approvalGrant });
 
     const result = await invoke(handlers, 'messenger_send', { ...input });
@@ -329,7 +354,7 @@ describe('messenger_send timeout reconciliation', () => {
     const input = sendInput();
     const { conversations, calls } = fakeConversations('timeout', 'unconfirmed', input);
     const approvalGrant = vi.fn(() => buildGrant(input));
-    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
     const handlers = register({ conversations, authorizer, approvalGrant });
 
     const result = await invoke(handlers, 'messenger_send', { ...input });
@@ -344,7 +369,7 @@ describe('messenger_send timeout reconciliation', () => {
     const input = sendInput();
     const { conversations, calls } = fakeConversations('timeout', 'throws', input);
     const approvalGrant = vi.fn(() => buildGrant(input));
-    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
     const handlers = register({ conversations, authorizer, approvalGrant });
 
     const result = await invoke(handlers, 'messenger_send', { ...input });
@@ -372,7 +397,7 @@ describe('messenger_send timeout reconciliation', () => {
       }
     } satisfies ConversationBackend;
     const approvalGrant = vi.fn(() => buildGrant(input));
-    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
     const handlers = register({ conversations, authorizer, approvalGrant });
 
     const abort = new AbortController();
@@ -399,7 +424,7 @@ describe('messenger_send post-submit failure reconciliation', () => {
     const input = sendInput();
     const { conversations, calls } = fakeConversations('submit-upstream', 'confirmed', input);
     const approvalGrant = vi.fn(() => buildGrant(input));
-    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
     const handlers = register({ conversations, authorizer, approvalGrant });
 
     const result = await invoke(handlers, 'messenger_send', { ...input });
@@ -414,7 +439,7 @@ describe('messenger_send post-submit failure reconciliation', () => {
     const input = sendInput();
     const { conversations, calls } = fakeConversations('submit-upstream', 'unconfirmed', input);
     const approvalGrant = vi.fn(() => buildGrant(input));
-    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
     const handlers = register({ conversations, authorizer, approvalGrant });
 
     const result = await invoke(handlers, 'messenger_send', { ...input });
@@ -429,7 +454,7 @@ describe('messenger_send post-submit failure reconciliation', () => {
     const input = sendInput();
     const { conversations, calls } = fakeConversations('upstream', 'confirmed', input);
     const approvalGrant = vi.fn(() => buildGrant(input));
-    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
     const handlers = register({ conversations, authorizer, approvalGrant });
 
     const result = await invoke(handlers, 'messenger_send', { ...input });
@@ -454,7 +479,7 @@ describe('messenger_send registration', () => {
   });
 
   it('lists messenger_send only when the conversation surface is configured', async () => {
-    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
     const { conversations } = fakeConversations('ok', 'confirmed', sendInput());
 
     const withSurface = captureHandlers();
@@ -469,7 +494,7 @@ describe('messenger_send registration', () => {
   });
 
   it('rejects a messenger_send call as an unknown tool when the surface is not configured', async () => {
-    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
     const handlers = register({ authorizer });
 
     await expect(invoke(handlers, 'messenger_send', { ...sendInput() })).rejects.toMatchObject({
@@ -481,7 +506,7 @@ describe('messenger_send registration', () => {
 
   it('keeps messenger_thread_read grant-free and successful while the send surface is active', async () => {
     const conversations = new FixtureBackend();
-    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET, store: new InMemoryGrantConsumptionStore() });
     const approvalGrant = vi.fn();
     const handlers = register({ conversations, authorizer, approvalGrant });
 

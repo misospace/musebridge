@@ -92,18 +92,24 @@ export class HmacGrantAuthorizer implements ActionAuthorizer {
     readonly secret: string;
     readonly now?: () => Date;
     /**
-     * Single-use grant consumption state. The default in-memory store is
-     * process-local only: a consumed grant would be replayable after a
-     * restart or on a second replica. Durable deployments must pass a file
-     * store.
+     * Single-use grant consumption state. REQUIRED: a missing store would
+     * silently fall back to process-local consumption, which a grant would
+     * replay across a restart or a second replica and defeat single-use
+     * enforcement. Tests and dev-only flows that need an in-memory store
+     * must construct one explicitly (e.g. `new InMemoryGrantConsumptionStore()`);
+     * production deployments pass a `FileGrantConsumptionStore` (or another
+     * durable implementation) so consumed grants survive restarts.
      */
-    readonly store?: GrantConsumptionStore;
+    readonly store: GrantConsumptionStore;
   }) {
     if (typeof options.secret !== 'string' || options.secret.length < 32) {
       throw new TypeError('secret must be a string of at least 32 characters');
     }
+    if (!options.store || typeof options.store.claim !== 'function') {
+      throw new TypeError('store is required: a missing or non-durable store would silently weaken single-use enforcement. Pass an explicit GrantConsumptionStore (use InMemoryGrantConsumptionStore for tests/dev only).');
+    }
     this.secret = options.secret;
-    this.store = options.store ?? new InMemoryGrantConsumptionStore();
+    this.store = options.store;
     this.now = options.now ?? (() => new Date());
   }
 
