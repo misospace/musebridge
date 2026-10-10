@@ -1,6 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
-import { InMemoryGrantConsumptionStore, type GrantConsumptionStore } from './grant-state.js';
+import type { GrantConsumptionStore } from './grant-state.js';
 
 export const ACTION_RISK_CLASSES = ['read', 'prepare', 'send', 'high_consequence'] as const;
 export type ActionRiskClass = typeof ACTION_RISK_CLASSES[number];
