@@ -6,6 +6,8 @@ import {
   threadSendInputSchema,
   shoppingFetchInputSchema,
   shoppingSearchInputSchema,
+  eventsFetchInputSchema,
+  eventsSearchInputSchema,
   providerErrorMetadataSchema,
   providerErrorSchema,
   searchInputSchema,
@@ -13,6 +15,7 @@ import {
   type ConversationMessage,
   type ConversationThread,
   type ConversationThreadMessages,
+  type EventAvailability,
   type ProductOffer,
   type ProviderErrorCode,
   type ProviderErrorMetadata,
@@ -39,6 +42,14 @@ export interface ShoppingBackend {
   readonly name: string;
   search(input: ReturnType<typeof shoppingSearchInputSchema.parse>, signal: AbortSignal): Promise<ProductOffer[]> | ProductOffer[];
   fetch(input: ReturnType<typeof shoppingFetchInputSchema.parse>, signal: AbortSignal): Promise<ProductOffer | null> | ProductOffer | null;
+}
+
+// Events availability surface (#50). HTTP-API-backed and strictly read-only; `name` is the
+// configured backend kind ('ticketmaster'), while each event carries its own `provider` value.
+export interface EventsBackend {
+  readonly name: string;
+  search(input: ReturnType<typeof eventsSearchInputSchema.parse>, signal: AbortSignal): Promise<EventAvailability[]> | EventAvailability[];
+  fetch(input: ReturnType<typeof eventsFetchInputSchema.parse>, signal: AbortSignal): Promise<EventAvailability | null> | EventAvailability | null;
 }
 
 export class ProviderError extends Error {

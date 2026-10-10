@@ -3,10 +3,12 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { FixtureBackend, type ConversationBackend, type MarketplaceBackend, type ShoppingBackend } from './backend.js';
-import { FixtureShoppingBackend } from './fixtures.js';
+import { FixtureBackend, type ConversationBackend, type EventsBackend, type MarketplaceBackend, type ShoppingBackend } from './backend.js';
+import { FixtureEventsBackend, FixtureShoppingBackend } from './fixtures.js';
 import { EbayClient } from './ebay.js';
 import { EbayShoppingBackend } from './ebay-backend.js';
+import { TicketmasterClient } from './ticketmaster.js';
+import { TicketmasterEventsBackend } from './ticketmaster-backend.js';
 import { FacebookMarketplaceBackend } from './facebook-marketplace-backend.js';
 import { FacebookMessengerBackend } from './facebook-messenger-backend.js';
 import type { FacebookMarket } from './facebook-marketplace-url.js';
@@ -44,6 +46,8 @@ export interface ServiceOptions {
   backendKind?: 'fixture' | 'facebook';
   shoppingBackendKind?: 'fixture' | 'ebay';
   shopping?: ShoppingBackend;
+  eventsBackendKind?: 'fixture' | 'ticketmaster';
+  events?: EventsBackend;
   facebookMarkets?: readonly FacebookMarket[];
   host?: string;
   port?: number;
@@ -112,6 +116,7 @@ export interface MarketplaceService {
   readonly messengerReauth?: ReauthManager;
   readonly messengerAdmin?: ReauthAdminServer;
   readonly shopping: ShoppingBackend;
+  readonly events: EventsBackend;
   close(): Promise<void>;
   address(): ReturnType<HttpServer['address']>;
 }
@@ -135,6 +140,13 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
       clientSecret: requiredEnv('EBAY_CLIENT_SECRET')
     }))
     : new FixtureShoppingBackend());
+  const eventsBackendKind = options.eventsBackendKind ?? parseEventsBackendKind(process.env.EVENTS_BACKEND);
+  if (options.events !== undefined && options.eventsBackendKind !== undefined) {
+    throw new TypeError('events and eventsBackendKind cannot both select a backend');
+  }
+  const events = options.events ?? (eventsBackendKind === 'ticketmaster'
+    ? new TicketmasterEventsBackend(new TicketmasterClient({ apiKey: requiredEnv('TICKETMASTER_API_KEY') }))
+    : new FixtureEventsBackend());
   const loginWaitMs = options.facebookLoginWaitMs ?? parseLoginWaitMs(process.env.FACEBOOK_LOGIN_WAIT_SECONDS);
   if (!Number.isSafeInteger(loginWaitMs) || loginWaitMs <= 0) {
     throw new RangeError('facebookLoginWaitMs must be a positive safe integer');
@@ -410,6 +422,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
         sessionAssessment: () => toProviderSessionAssessment(browser.getInfo()),
         conversations,
         shopping,
+        events,
         authorizer,
         ...(options.approvalGrant !== undefined ? { approvalGrant: options.approvalGrant } : {})
       });
@@ -482,6 +495,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     ...(messengerReauth !== undefined ? { messengerReauth } : {}),
     ...(messengerAdmin !== undefined ? { messengerAdmin } : {}),
     shopping,
+    events,
     address: () => httpServer.address(),
     close
   };
@@ -510,9 +524,15 @@ export function parseShoppingBackendKind(value: string | undefined): 'fixture' |
   throw new RangeError('SHOPPING_BACKEND must be either "fixture" or "ebay"');
 }
 
-function requiredEnv(name: 'EBAY_CLIENT_ID' | 'EBAY_CLIENT_SECRET'): string {
+export function parseEventsBackendKind(value: string | undefined): 'fixture' | 'ticketmaster' {
+  if (value === undefined || value === 'fixture') return 'fixture';
+  if (value === 'ticketmaster') return 'ticketmaster';
+  throw new RangeError('EVENTS_BACKEND must be either "fixture" or "ticketmaster"');
+}
+
+function requiredEnv(name: 'EBAY_CLIENT_ID' | 'EBAY_CLIENT_SECRET' | 'TICKETMASTER_API_KEY'): string {
   const value = process.env[name];
-  if (!value) throw new RangeError(`${name} is required when SHOPPING_BACKEND=ebay`);
+  if (!value) throw new RangeError(`${name} is required when ${name === 'TICKETMASTER_API_KEY' ? 'EVENTS_BACKEND=ticketmaster' : 'SHOPPING_BACKEND=ebay'}`);
   return value;
 }
 
