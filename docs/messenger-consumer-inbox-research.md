@@ -108,11 +108,13 @@ $.require.[].[].[].__bbox.define.[].[].activeThreadKeys : array
 $.require.[].[].[].__bbox.define.[].[].allActiveThreadKeys : array
 ```
 
-These are schema observations, not proof that `message_threads` contains the rendered inbox keys. A further connection-schema/equality probe was staged but had not executed when this evidence was recorded; no edge/node shape, key count, completeness, or DOM-to-bootstrap equality is claimed. Route-state keys describe selected-route state and must not be presented as an inbox list.
+The operator subsequently executed the connection-schema/equality probe on the ordinary inbox tab. Its `message_threads` object had only `unseen_count:number` and `recent_unread_count_with_e2ee:number`; no `edges`, node keys, or page-info fields were present, so it yielded zero authoritative keys or DOM matches. This object is unread-count metadata, not a verified inbox identity source. Route-state keys describe selected-route state and must not be presented as an inbox list.
 
 ### Remaining access gate and limitations
 
-A Facebook homepage/header Messenger list is a concrete alternative to investigate. A separate homepage tab was opened, but its page content was not available through accessibility, so no Messenger-menu interaction or structural verification was completed. This is an inspection limitation, not evidence that the menu is absent or safe. No alternate URL flags, private endpoints, request replay, or speculative redirect suppression were tried.
+A Facebook homepage/header Messenger list is a concrete alternative under investigation. The separate homepage tab initially exposed no page content through accessibility; after the operator's next handoff it was inspectable. The header had a `pop up button` named `Messenger`. Opening that control kept Chrome at the Facebook root URL, exposed a `Chats` heading, and exposed no detected `Write to`/`Type a message` composer. No chat entry or `See all in Messenger` link was clicked. Thread URLs appearing in the accessibility tree at this point were links, not evidence of navigation.
+
+The same structural probe then found 18 linked rows, each with one distinct key. Whole-page links included unrelated/navigation destinations, so the list container still needs a verified semantic boundary before a consumer extractor is specified. The homepage bootstrap schema also contained `message_threads.edges[].node.thread_key.thread_fbid` (10 observed field paths), unlike the ordinary tab's unread-count-only object. Its exact connection schema and equality with the header rows remain unverified pending execution of the next probe. Thus the header list is a promising candidate, not yet an approved production path. No alternate URL flags, private endpoints, request replay, or speculative redirect suppression were tried.
 
 Empty-state, challenge states, pagination/virtualization, cross-load key stability, encryption/session requirements, and personal-vs-Marketplace membership remain unverified. The `/messages/e2ee/t/` path and backup-operation name do not prove that the automation profile can decrypt or restore anything. Counts do not prove completeness. During Console-input troubleshooting one diagnostic inadvertently displayed a private composer label; it was not repeated or copied into this document. No message body was extracted.
 
@@ -138,8 +140,8 @@ Cross-reference PR #74 `docs/messenger-consumer-research.md` for the full consum
 |---|---|---|---|
 | DOM anchor scan of `/messages/` | Thread hrefs/keys from rendered links | **22 row-linked keys verified after automatic selection** | Eight plain and fourteen E2EE links; non-opening loading behavior remains unverified |
 | Passively observed GraphQL/JSON responses | An authoritative key in a normal loaded response | **Operation names observed; connection keys unverified** | Twelve normal GraphQL requests; no Marketplace inbox operation; no request replay |
-| Embedded hydration/bootstrap state | A key in initial page state | **Candidate schema verified; key association unverified** | `data.viewer.message_threads` object and selected-route `thread_key` fields observed; connection probe awaiting execution |
-| Homepage/header Messenger list | Thread keys without ordinary-root navigation | **Unverified** | Homepage page content unavailable to accessibility during inspection; no menu interaction completed |
+| Embedded hydration/bootstrap state | A key in initial page state | **Ordinary tab contains only unread counts** | No edges/keys there; selected-route state is not a list |
+| Homepage/header Messenger list | Thread keys without ordinary-root navigation | **18 linked rows observed; boundary/key corroboration pending** | Root URL retained and no detected composer after opening `Messenger`; bootstrap exposes 10 `thread_fbid` fields, not yet compared |
 | `messenger.com` standalone | Same ordinary inbox on another origin | **Rejected for now** | Adds an origin/login for no discovery gain; `conversation-surface-research.md` |
 | Official API | Personal inbox listing | **Does not exist** | Messenger Platform is Page/business-scoped; no personal-consumer-inbox API (`conversation-surface-research.md`) |
 
