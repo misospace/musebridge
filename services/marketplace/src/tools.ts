@@ -309,7 +309,13 @@ export function registerMarketplaceTools(
             backend: backendName,
             shopping_backend: options.shopping?.name,
             events_backend: options.events?.name,
-            ...(sessionAssessment ? { facebook_session: { status: sessionAssessment() } } : {})
+            ...(sessionAssessment ? { facebook_session: { status: sessionAssessment() } } : {}),
+            capabilities: [
+              { surface: marketplaceScope.surface, provider: marketplaceScope.provider, backend: backendName },
+              { surface: shoppingScope.surface, provider: shoppingScope.provider, backend: options.shopping?.name ?? null },
+              { surface: messengerScope.surface, provider: messengerScope.provider, backend: options.conversations?.name ?? null },
+              { surface: eventsScope.surface, provider: eventsScope.provider, backend: options.events?.name ?? null }
+            ]
           };
         }
         validatedOutput = outputSchema.parse(output);
