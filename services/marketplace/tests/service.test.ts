@@ -14,7 +14,7 @@ import { chromium } from 'playwright';
 import { BrowserSessionManager } from '../src/browser.js';
 import { ProviderError } from '../src/index.js';
 import { facebookCredentialsFromEnv } from '../src/facebook-login.js';
-import { createMarketplaceService, type MarketplaceService, parseBackendKind, parseBackendTimeout, parseEventsBackendKind, parseLoginWaitMs, parseMessengerEnabled, parseShoppingBackendKind } from '../src/service.js';
+import { createMarketplaceService, type MarketplaceService, parseBackendKind, parseBackendTimeout, parseEventsBackendKind, parseLoginWaitMs, parseMessengerEnabled, parseMessengerProbeOnly, parseShoppingBackendKind } from '../src/service.js';
 import * as packageEntry from '../src/index.js';
 import { runBackendOperation } from '../src/tools.js';
 import { threadsListInputSchema, threadReadInputSchema } from '../src/domain.js';
@@ -26,6 +26,15 @@ import { canonicalActionInput, type ActionRequest, type ApprovalGrant, type Sign
 const packageVersion = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8')
 ).version as string;
+
+it('validates the Messenger probe-only switch without silently enabling login on a typo', () => {
+  expect(parseMessengerProbeOnly(undefined)).toBe(false);
+  expect(parseMessengerProbeOnly('0')).toBe(false);
+  expect(parseMessengerProbeOnly('1')).toBe(true);
+  for (const invalid of ['', 'true', 'yes', '2']) {
+    expect(() => parseMessengerProbeOnly(invalid)).toThrow(RangeError);
+  }
+});
 
 let service: MarketplaceService;
 let baseUrl: string;

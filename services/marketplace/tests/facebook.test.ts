@@ -2,7 +2,7 @@ import { createServer, type Server } from 'node:http';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { chromium } from 'playwright';
 import { BrowserSessionManager as BrowserManager, BrowserUnavailableError, type BrowserSessionOptions } from '../src/browser.js';
 import { ProviderError } from '../src/backend.js';
@@ -11,6 +11,8 @@ import {
   classifyFacebookSession,
   FACEBOOK_ORIGIN,
   FacebookSessionProbe,
+  readFacebookPage,
+  type FacebookCaptchaSignals,
   type FacebookPageSnapshot,
   type FacebookSessionProbeOptions
 } from '../src/facebook.js';
@@ -62,6 +64,114 @@ const baseSnapshot = (overrides: Partial<FacebookPageSnapshot> = {}): FacebookPa
   mentionsCheckpoint: false,
   mentionsCaptcha: false,
   ...overrides
+});
+
+const noCaptchaSignals: FacebookCaptchaSignals = {
+  iframeMatched: false, iframeVisible: false, idMatched: false, idVisible: false,
+  testIdMatched: false, testIdVisible: false, textMatched: false, textVisible: false,
+  captchaWordMatched: false, captchaWordVisible: false, notRobotMatched: false, notRobotVisible: false,
+  verifyHumanMatched: false, verifyHumanVisible: false,
+  authenticatedMarkerMatched: true, authenticatedMarkerVisible: true,
+  mainLandmarkMatched: true, mainLandmarkVisible: true
+};
+
+describe('Messenger CAPTCHA visibility classification', () => {
+  it('blocks hidden-only CAPTCHA markup even with authenticated markers or a login form', () => {
+    for (const hasLoginForm of [false, true]) {
+      const snapshot = baseSnapshot({ hasLoginForm, hasCaptchaFrame: true,
+        captchaSignals: { ...noCaptchaSignals, idMatched: true } });
+      expect(classifyFacebookSession(snapshot, synthetic.origin, 'messenger'))
+        .toEqual({ status: 'session_unknown', outcome: 'ambiguous' });
+    }
+  });
+
+  it.each(['iframe', 'id', 'testId', 'text'] as const)('keeps a visible %s CAPTCHA signal blocked despite auth markers', (signal) => {
+    const snapshot = baseSnapshot({ hasCaptchaFrame: true, captchaSignals: {
+      ...noCaptchaSignals, [`${signal}Matched`]: true, [`${signal}Visible`]: true
+    } });
+    expect(classifyFacebookSession(snapshot, synthetic.origin, 'messenger'))
+      .toEqual({ status: 'session_needs_reauth', outcome: 'captcha', code: 'CAPTCHA_REQUIRED' });
+  });
+
+  it('logs only explicit structural booleans, excluding the URL and provider text', async () => {
+    const manager = createManager();
+    const logger = { error: vi.fn() };
+    const probe = createProbe(manager, { surface: 'messenger', logger });
+    vi.spyOn(probe as unknown as { loadSnapshot(): Promise<FacebookPageSnapshot> }, 'loadSnapshot')
+      .mockResolvedValue(baseSnapshot({ url: `${synthetic.origin}/marketplace/inbox/?private=URL_SENTINEL`,
+        hasCaptchaFrame: true, captchaSignals: { ...noCaptchaSignals, idMatched: true } }));
+    vi.spyOn(manager, 'runExclusive').mockImplementation(async (_signal, task) => task({} as never, _signal));
+    await probe.probeSession(new AbortController().signal);
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    const [label, diagnostics] = logger.error.mock.calls[0]!;
+    expect(label).toBe('Facebook Messenger probe diagnostics:');
+    expect(diagnostics).toMatchObject({ idMatched: true, idVisible: false,
+      hiddenOnlyCaptchaSignal: true, authenticatedMarkerMatched: true, sessionUsable: false });
+    expect(Object.values(diagnostics).every((value) => typeof value === 'boolean')).toBe(true);
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('URL_SENTINEL');
+    expect(synthetic.requests).toEqual([]);
+  });
+});
+
+describe.skipIf(!browserAvailable)('CAPTCHA structural extraction', () => {
+  it.each([
+    ['iframe', '<iframe src="about:blank#captcha"></iframe>', 'iframeMatched', 'iframeVisible'],
+    ['id', '<div id="captcha-widget">Widget</div>', 'idMatched', 'idVisible'],
+    ['test ID', '<div data-testid="captcha-widget">Widget</div>', 'testIdMatched', 'testIdVisible'],
+    ['CAPTCHA word', '<p>CAPTCHA</p>', 'captchaWordMatched', 'captchaWordVisible'],
+    ['robot text', "<p>I'm not a robot</p>", 'notRobotMatched', 'notRobotVisible'],
+    ['human text', '<p>Verify you are a human</p>', 'verifyHumanMatched', 'verifyHumanVisible']
+  ] as const)('identifies an isolated %s signal without returning provider content', async (_name, markup, matched, visible) => {
+    const snapshot = await createManager().runExclusive(new AbortController().signal, async (page) => {
+      await page.route('**/*', (route) => route.abort());
+      await page.setContent(markup);
+      return readFacebookPage(page);
+    });
+    expect(snapshot.captchaSignals![matched]).toBe(true);
+    expect(snapshot.captchaSignals![visible]).toBe(true);
+    const sources = ['iframeMatched', 'idMatched', 'testIdMatched', 'captchaWordMatched', 'notRobotMatched', 'verifyHumanMatched'] as const;
+    expect(sources.filter((key) => snapshot.captchaSignals![key])).toEqual([matched]);
+  });
+
+  it('waits for hidden markup to render within the settle budget', async () => {
+    const manager = createManager();
+    const probe = createProbe(manager, { surface: 'messenger', settleTimeoutMs: 1_000 });
+    const snapshot = await manager.runExclusive(new AbortController().signal, async (page) => {
+      await page.route('**/*', (route) => route.abort());
+      await page.setContent('<main><div aria-label="Your account">Account</div><div id="captcha-widget" style="display:none">Widget</div></main>');
+      vi.spyOn(page, 'goto').mockResolvedValue(null);
+      await page.evaluate(() => { setTimeout(() => {
+        document.getElementById('captcha-widget')!.style.display = 'block';
+      }, 100); });
+      return probe['loadSnapshot'](page, new AbortController().signal);
+    });
+    expect(snapshot.captchaSignals).toMatchObject({ idMatched: true, idVisible: true });
+    expect(classifyFacebookSession(snapshot, synthetic.origin, 'messenger')).toMatchObject({ code: 'CAPTCHA_REQUIRED' });
+  });
+
+  it.each(['', 'display:none', 'visibility:hidden', 'opacity:0'])(
+    'separates matched signals from visibility under %s', async (style) => {
+      const manager = createManager();
+      const snapshot = await manager.runExclusive(new AbortController().signal, async (page) => {
+        await page.route('**/*', (route) => route.abort());
+        await page.setContent(`<main><a aria-label="Your account">PRIVATE_NAME_SENTINEL</a>
+          <section style="${style}"><iframe src="about:blank#captcha"></iframe>
+          <div id="captcha-sentinel">Widget</div><div data-testid="captcha-sentinel">Widget</div>
+          <p>Verify you are a human</p></section></main>`);
+        return readFacebookPage(page);
+      });
+      const visible = style === '';
+      expect(snapshot.captchaSignals).toEqual({
+        iframeMatched: true, iframeVisible: visible, idMatched: true, idVisible: visible,
+        testIdMatched: true, testIdVisible: visible, textMatched: true, textVisible: visible,
+        captchaWordMatched: false, captchaWordVisible: false, notRobotMatched: false, notRobotVisible: false,
+        verifyHumanMatched: true, verifyHumanVisible: visible,
+        authenticatedMarkerMatched: true, authenticatedMarkerVisible: true,
+        mainLandmarkMatched: true, mainLandmarkVisible: true
+      });
+      expect(Object.values(snapshot.captchaSignals!).every((value) => typeof value === 'boolean')).toBe(true);
+      expect(JSON.stringify(snapshot.captchaSignals)).not.toContain('PRIVATE_NAME_SENTINEL');
+    });
 });
 
 describe('Facebook session classification', () => {

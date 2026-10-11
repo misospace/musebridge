@@ -69,6 +69,7 @@ export interface ServiceOptions {
   facebookLoginWaitMs?: number;
   /** Internal dependency/test seams for the isolated Messenger surface. */
   messengerEnabled?: boolean;
+  messengerProbeOnly?: boolean;
   messengerProfileDir?: string;
   messengerBrowser?: BrowserSessionManager;
   messengerProbe?: FacebookSessionProbe;
@@ -236,6 +237,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
       browser: messengerBrowser,
       probe: messengerProbe,
       ...(messengerLogin !== undefined ? { login: messengerLogin } : {}),
+      probeOnly: options.messengerProbeOnly ?? parseMessengerProbeOnly(process.env.FACEBOOK_MESSENGER_PROBE_ONLY),
       logger
     })
     : options.backend === undefined && selectedBackendKind === 'facebook'
@@ -516,6 +518,12 @@ function parseHost(value: string | undefined): string {
 
 export function parseMessengerEnabled(value: string | undefined): boolean {
   return value === '1';
+}
+
+export function parseMessengerProbeOnly(value: string | undefined): boolean {
+  if (value === undefined || value === '0') return false;
+  if (value === '1') return true;
+  throw new RangeError('FACEBOOK_MESSENGER_PROBE_ONLY must be "0" or "1"');
 }
 
 export function parseShoppingBackendKind(value: string | undefined): 'fixture' | 'ebay' {
