@@ -14,7 +14,7 @@ import { FacebookMessengerBackend } from './facebook-messenger-backend.js';
 import type { FacebookMarket } from './facebook-marketplace-url.js';
 import { backendNameSchema, SERVICE_VERSION } from './domain.js';
 import { BrowserSessionManager } from './browser.js';
-import { FACEBOOK_MESSENGER_PATH, FACEBOOK_ORIGIN, FacebookSessionProbe, toProviderSessionAssessment } from './facebook.js';
+import { FACEBOOK_MESSENGER_INBOX_PATH, FACEBOOK_ORIGIN, FacebookSessionProbe, toProviderSessionAssessment } from './facebook.js';
 import { DenyAllAuthorizer, HmacGrantAuthorizer, type ActionAuthorizer, type ActionRequest } from './authorization.js';
 import { FileGrantConsumptionStore, type GrantConsumptionStore } from './grant-state.js';
 import {
@@ -76,6 +76,7 @@ export interface ServiceOptions {
   messengerBaseUrl?: string;
   /** Internal dependency/test seams for the messenger scope's interactive reauth loop. */
   messengerReauthRuntime?: ReauthRuntime;
+  /** Internal dependency/test seam for the messenger scope's interactive reauth loop. When omitted, the loop lands on the messenger inbox path (same landing as the messenger session probe); this override takes precedence, and its side effects are the operator's responsibility. */
   messengerReauthTargetUrl?: string;
   messengerReauthAdminPort?: number;
   messengerReauthViewerPort?: number;
@@ -265,9 +266,12 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
   const admin = createReauthAdminServer({ reauth, port: adminPort, logger });
 
   // The messenger scope owns a separate interactive reauth loop: its own manager (driving the
-  // messenger browser profile), its own loopback admin port, and its own viewer port. It targets
-  // the messenger surface rather than the marketplace path, so a Messenger challenge can be
-  // resolved interactively without touching the marketplace session.
+  // messenger browser profile), its own loopback admin port, and its own viewer port. It lands
+  // on the messenger inbox path by default (the same landing as the messenger session probe),
+  // because '/messages/' auto-selects a thread and can send a visible Seen receipt; a Messenger
+  // challenge is still resolved interactively without touching the marketplace session.
+  // messengerReauthTargetUrl is an opt-in override whose side effects are the operator's
+  // responsibility.
   const messengerReauthAdminPort = options.messengerReauthAdminPort ?? MESSENGER_REAUTH_ADMIN_PORT;
   const messengerReauthViewerPort = options.messengerReauthViewerPort ?? MESSENGER_REAUTH_VIEWER_PORT;
   validateServicePort(messengerReauthAdminPort, 'messengerReauthAdminPort');
@@ -278,7 +282,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
       browser: messengerBrowser,
       runtime: options.messengerReauthRuntime ?? new ProcessReauthRuntime(),
       targetUrl: options.messengerReauthTargetUrl
-        ?? new URL(FACEBOOK_MESSENGER_PATH, options.messengerBaseUrl ?? options.facebookBaseUrl ?? FACEBOOK_ORIGIN).href,
+        ?? new URL(FACEBOOK_MESSENGER_INBOX_PATH, options.messengerBaseUrl ?? options.facebookBaseUrl ?? FACEBOOK_ORIGIN).href,
       ...(messengerReauthViewerPort > 0 ? { viewerPort: messengerReauthViewerPort } : {}),
       leaseMs,
       logger: {

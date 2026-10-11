@@ -12,6 +12,7 @@ import { FIXTURE_LISTINGS, FIXTURE_OFFERS } from '../src/fixtures.js';
 import type { MarketplaceBackend } from '../src/backend.js';
 import { chromium } from 'playwright';
 import { BrowserSessionManager } from '../src/browser.js';
+import { FACEBOOK_MESSENGER_INBOX_PATH } from '../src/facebook.js';
 import { ProviderError } from '../src/index.js';
 import { facebookCredentialsFromEnv } from '../src/facebook-login.js';
 import { createMarketplaceService, type MarketplaceService, parseBackendKind, parseBackendTimeout, parseEventsBackendKind, parseLoginWaitMs, parseMessengerEnabled, parseMessengerProbeOnly, parseShoppingBackendKind } from '../src/service.js';
@@ -1377,6 +1378,59 @@ describe('production authorizer and messenger reauth wiring', () => {
       const marketplaceStatus = await fetch(`http://127.0.0.1:${adminAddress.port}/reauth/status`);
       expect(marketplaceStatus.status).toBe(200);
       expect(await marketplaceStatus.json()).toEqual({ phase: 'idle', lease: null, expiresAt: null, remainingMs: null });
+    } finally {
+      await service.close();
+      rmSync(profileRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('lands the messenger reauth loop on the messenger inbox path by default', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    const profileRoot = mkdtempSync(join(tmpdir(), 'marketplace-messenger-reauth-landing-'));
+    const messengerBaseUrl = 'http://127.0.0.1:3210';
+    try {
+      service = createMarketplaceService({
+        host: '127.0.0.1',
+        port: 0,
+        adminPort: 0,
+        backendKind: 'facebook',
+        messengerEnabled: true,
+        messengerProfileDir: join(profileRoot, 'messenger'),
+        messengerBaseUrl,
+        messengerReauthAdminPort: 0,
+        messengerReauthViewerPort: 0
+      });
+      // Without a messengerReauthTargetUrl, the loop lands on the same page the session probe
+      // uses (the inbox) instead of '/messages/', which auto-opens a thread.
+      expect(service.messengerReauth?.targetUrl).toBe(
+        new URL(FACEBOOK_MESSENGER_INBOX_PATH, messengerBaseUrl).href
+      );
+    } finally {
+      await service.close();
+      rmSync(profileRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('lets messengerReauthTargetUrl override the default messenger reauth landing', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    const profileRoot = mkdtempSync(join(tmpdir(), 'marketplace-messenger-reauth-override-'));
+    const overrideUrl = 'http://127.0.0.1:3210/override/';
+    try {
+      service = createMarketplaceService({
+        host: '127.0.0.1',
+        port: 0,
+        adminPort: 0,
+        backendKind: 'facebook',
+        messengerEnabled: true,
+        messengerProfileDir: join(profileRoot, 'messenger'),
+        messengerBaseUrl: 'http://127.0.0.1:3210',
+        messengerReauthTargetUrl: overrideUrl,
+        messengerReauthAdminPort: 0,
+        messengerReauthViewerPort: 0
+      });
+      expect(service.messengerReauth?.targetUrl).toBe(overrideUrl);
     } finally {
       await service.close();
       rmSync(profileRoot, { recursive: true, force: true });
