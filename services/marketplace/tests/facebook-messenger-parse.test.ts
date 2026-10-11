@@ -158,6 +158,7 @@ describe('Messenger page interpretation', () => {
   it.each([
     'https://www.facebook.com/messages/t/99999/',
     'https://example.invalid/messages/t/1684432532/',
+    'https://www.facebook.com/messages/e2ee/t/1684432532/',
     'https://www.facebook.com/marketplace/inbox/'
   ])('rejects token-bearing messages from an unexpected address: %s', (url) => {
     const outcome = interpretMessengerThreadPage({
@@ -170,5 +171,34 @@ describe('Messenger page interpretation', () => {
       message: 'The Facebook Messenger thread page was not reached at the requested thread.'
     });
     expect(outcome).not.toHaveProperty('messages');
+  });
+
+  it('rejects extra path segments even when they follow the requested thread key', () => {
+    const outcome = interpretMessengerThreadPage({
+      page: thread({ url: 'https://www.facebook.com/messages/t/1684432532/other-thread/', messages: [{ sender: 'you', text: 'Synthetic [synthetic-reply-token]' }] }),
+      baseUrl: 'https://www.facebook.com', threadId: '1684432532'
+    });
+    expect(outcome).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+    expect(outcome).not.toHaveProperty('messages');
+  });
+
+  it.each([
+    [{ hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false, scannedRows: 1, unattributedRows: 1 }, 'The Facebook Messenger article message layout is unsupported; sender attribution was not verified.'],
+    [{ hasMessageLog: true, hasArticleMessages: false, hasExplicitEmptyState: true, scannedRows: 0, unattributedRows: 0 }, 'The Facebook Messenger empty thread layout could not be verified.']
+  ])('reports a static unsupported-layout diagnostic without returning content', (diagnostics, message) => {
+    const outcome = interpretMessengerThreadPage({
+      page: thread({ diagnostics }), baseUrl: 'https://www.facebook.com', threadId: '1684432532'
+    });
+    expect(outcome).toEqual({ kind: 'error', code: 'UPSTREAM_ERROR', message });
+  });
+
+  it('does not attribute unrelated role rows when an unsupported article conversation is present', () => {
+    expect(interpretMessengerThreadPage({
+      page: thread({
+        messages: [{ sender: 'you', text: 'Unrelated widget [synthetic-reply-token]' }],
+        diagnostics: { hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false, scannedRows: 1, unattributedRows: 0 }
+      }),
+      baseUrl: 'https://www.facebook.com', threadId: '1684432532'
+    })).toEqual({ kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger article message layout is unsupported; sender attribution was not verified.' });
   });
 });

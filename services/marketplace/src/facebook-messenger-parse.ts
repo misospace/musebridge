@@ -127,9 +127,17 @@ export function interpretMessengerThreadPage(input: {
   const threadPrefix = `/messages/t/${input.threadId}/`;
   const atThread = isExpectedPathname(input.page.url, input.baseUrl, (pathname) => {
     const withoutTrailingSlash = threadPrefix.slice(0, -1);
-    return pathname === withoutTrailingSlash || pathname.startsWith(threadPrefix);
+    return pathname === withoutTrailingSlash || pathname === threadPrefix;
   });
   if (!atThread) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger thread page was not reached at the requested thread.' };
+  // The observed article layout has no verified article-wide sender/content contract.
+  // Even attributed rows elsewhere on this page must not be used as its conversation.
+  if (input.page.diagnostics?.hasArticleMessages) {
+    return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger article message layout is unsupported; sender attribution was not verified.' };
+  }
+  if (input.page.diagnostics?.hasExplicitEmptyState && input.page.messages.length === 0) {
+    return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger empty thread layout could not be verified.' };
+  }
   if (kind === 'unknown') return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger thread page layout was not recognized.' };
 
   const messages: ConversationMessage[] = [];

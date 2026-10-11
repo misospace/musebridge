@@ -110,6 +110,10 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     expect(extracted.signals.hasAuthenticatedMarker).toBe(true);
     expect(extracted.messages).toEqual([]);
     expect(classifyMessengerThreadPage(extracted)).toBe('unknown');
+    expect(extracted.diagnostics).toEqual({
+      hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false,
+      scannedRows: 1, unattributedRows: 1
+    });
   });
 
   it('keeps empty and attachment-only thread layouts unknown without verified contracts', async () => {
@@ -139,5 +143,14 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
         { sender: 'you', containsToken: false }
       ]);
     // Presence in extracted text is not provider acknowledgement or delivery confirmation.
+  });
+
+  it('does not mistake a bounded old message window for the latest reply token', async () => {
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      Array.from({ length: MESSENGER_EXTRACT_LIMITS.maxMessages }, () => '<div role="row" aria-label="You said: synthetic">Earlier synthetic message</div>').join('') +
+      '<div role="row" aria-label="You said: synthetic">Newest [synthetic-reply-token]</div></main>');
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(extracted.messages).toHaveLength(MESSENGER_EXTRACT_LIMITS.maxMessages);
+    expect(extracted.messages.some((message) => message.text.includes('[synthetic-reply-token]'))).toBe(false);
   });
 });

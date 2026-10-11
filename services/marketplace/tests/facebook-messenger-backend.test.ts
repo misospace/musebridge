@@ -19,7 +19,7 @@ if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
 const fixtureDir = new URL('./fixtures/facebook-messenger/', import.meta.url);
 const fixtures = new Map([
   'inbox-normal.html', 'inbox-empty.html', 'inbox-login.html', 'inbox-checkpoint.html', 'inbox-layout-changed.html', 'inbox-buttons-graphql.html', 'inbox-buttons-graphql-delayed.html', 'inbox-buttons-graphql-stalled.html',
-  'thread-normal.html', 'thread-layout-changed.html', 'thread-articles-unattributed.html'
+  'thread-normal.html', 'thread-layout-changed.html', 'thread-articles-unattributed.html', 'thread-empty.html', 'thread-token-bounds.html'
 ].map((name) => [name, readFileSync(new URL(name, fixtureDir), 'utf8')]));
 
 let server: Server;
@@ -331,14 +331,31 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
     expect(requests).toEqual(['/marketplace/inbox/', '/messages/t/1684432532/']);
   });
 
-  it.each(['thread-layout-changed.html', 'thread-articles-unattributed.html'])('fails closed for unrecognized thread fixture %s', async (fixture) => {
+  it.each([
+    ['thread-layout-changed.html', 'The Facebook Messenger thread page layout was not recognized.'],
+    ['thread-articles-unattributed.html', 'The Facebook Messenger article message layout is unsupported; sender attribution was not verified.'],
+    ['thread-empty.html', 'The Facebook Messenger empty thread layout could not be verified.']
+  ])('fails closed for unrecognized thread fixture %s', async (fixture, message) => {
     configure('inbox-normal.html', fixture);
     const backend = createBackend({ settleTimeoutMs: 200 });
     await expectProviderError(
       backend.readThread(readInput(), new AbortController().signal),
       'UPSTREAM_ERROR',
-      'The Facebook Messenger thread page layout was not recognized.'
+      message
     );
+  });
+
+  it('reads bounded attributed token text through the backend without inventing delivery confirmation', async () => {
+    configure('inbox-normal.html', 'thread-token-bounds.html');
+    const result = await createBackend().readThread(readInput(), new AbortController().signal);
+    expect(result?.messages.map((message) => ({ sender: message.sender, containsToken: message.text.includes('[synthetic-reply-token]') })))
+      .toEqual([
+        { sender: 'you', containsToken: true },
+        { sender: 'other', containsToken: true },
+        { sender: 'you', containsToken: false }
+      ]);
+    expect(result?.messages[0]?.text).toHaveLength(2000);
+    expect(result).not.toHaveProperty('status');
   });
 
   it('honors cancellation promptly with the exact abort reason', async () => {
