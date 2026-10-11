@@ -19,7 +19,7 @@ if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
 const fixtureDir = new URL('./fixtures/facebook-messenger/', import.meta.url);
 const fixtures = new Map([
   'inbox-normal.html', 'inbox-empty.html', 'inbox-login.html', 'inbox-checkpoint.html', 'inbox-layout-changed.html', 'inbox-buttons-graphql.html', 'inbox-buttons-graphql-delayed.html', 'inbox-buttons-graphql-stalled.html',
-  'thread-normal.html', 'thread-layout-changed.html'
+  'thread-normal.html', 'thread-layout-changed.html', 'thread-articles-unattributed.html'
 ].map((name) => [name, readFileSync(new URL(name, fixtureDir), 'utf8')]));
 
 let server: Server;
@@ -331,8 +331,8 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
     expect(requests).toEqual(['/marketplace/inbox/', '/messages/t/1684432532/']);
   });
 
-  it('fails closed for a thread page with no recognized message rows', async () => {
-    configure('inbox-normal.html', 'thread-layout-changed.html');
+  it.each(['thread-layout-changed.html', 'thread-articles-unattributed.html'])('fails closed for unrecognized thread fixture %s', async (fixture) => {
+    configure('inbox-normal.html', fixture);
     const backend = createBackend({ settleTimeoutMs: 200 });
     await expectProviderError(
       backend.readThread(readInput(), new AbortController().signal),

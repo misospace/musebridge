@@ -154,4 +154,21 @@ describe('Messenger page interpretation', () => {
       threadId: '1684432532'
     })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger thread page was not reached at the requested thread.' });
   });
+
+  it.each([
+    'https://www.facebook.com/messages/t/99999/',
+    'https://example.invalid/messages/t/1684432532/',
+    'https://www.facebook.com/marketplace/inbox/'
+  ])('rejects token-bearing messages from an unexpected address: %s', (url) => {
+    const outcome = interpretMessengerThreadPage({
+      page: thread({ url, messages: [{ sender: 'you', text: 'Synthetic reply [synthetic-reply-token]' }] }),
+      baseUrl: 'https://www.facebook.com',
+      threadId: '1684432532'
+    });
+    expect(outcome).toEqual({
+      kind: 'error', code: 'UPSTREAM_ERROR',
+      message: 'The Facebook Messenger thread page was not reached at the requested thread.'
+    });
+    expect(outcome).not.toHaveProperty('messages');
+  });
 });
