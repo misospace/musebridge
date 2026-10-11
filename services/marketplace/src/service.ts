@@ -98,9 +98,10 @@ export interface ServiceOptions {
    * Durable single-use grant consumption state for the production HMAC grant
    * verifier; not an environment variable or tool input. When omitted and
    * GRANT_STATE_PATH names a directory, the service constructs a
-   * FileGrantConsumptionStore over that directory. The verifier's default
-   * in-memory state is process-local only; durable deployments must supply
-   * file-backed state.
+   * FileGrantConsumptionStore over that directory. The verifier requires an
+   * explicit store and never falls back to in-memory state; an in-memory store
+   * is process-local and replayable across a restart or a second replica, so
+   * it is for tests/dev only.
    */
   grantConsumptionStore?: GrantConsumptionStore;
 }
@@ -298,11 +299,11 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
   // otherwise the production HMAC grant verifier is installed only when a grant-issuer
   // secret is configured (via the seam or GRANT_ISSUER_SECRET, read here at assembly time
   // rather than at module load) AND durable grant consumption state is available (via the
-  // grantConsumptionStore seam or the GRANT_STATE_PATH directory). The verifier's default
-  // in-memory state is process-local only, so a configured secret without durable state
-  // installs the deny-all authorizer and warns once rather than silently weakening
-  // single-use enforcement; a secret-less deployment installs the deny-all authorizer.
-  // A set-but-invalid secret fails startup in the verifier constructor.
+  // grantConsumptionStore seam or the GRANT_STATE_PATH directory). The verifier requires an
+  // explicit store and never falls back to in-memory state, so a configured secret without
+  // durable state installs the deny-all authorizer and warns once rather than silently
+  // weakening single-use enforcement; a secret-less deployment installs the deny-all
+  // authorizer. A set-but-invalid secret fails startup in the verifier constructor.
   const grantIssuerSecret = options.grantIssuerSecret ?? process.env.GRANT_ISSUER_SECRET;
   let authorizer: ActionAuthorizer;
   if (options.authorizer !== undefined) {
