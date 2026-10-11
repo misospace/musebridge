@@ -93,6 +93,22 @@ Playwright's error text from the credential step is deliberately not surfaced: a
 
 ### Messenger surface (conversation reads)
 
+For a session-classification investigation, set `FACEBOOK_MESSENGER_PROBE_ONLY=1`.
+Both conversation tools then run only the isolated Messenger session probe: no credential
+login, inbox extraction, or conversation navigation follows, even if the probe is authenticated.
+The tool returns a typed error while this setting is enabled. Remove it only after the
+classification is understood. The setting accepts `0` or `1`; other values fail startup.
+
+Messenger probes emit one `Facebook Messenger probe diagnostics:` record containing only
+structural booleans. CAPTCHA iframe URL matches, element ID matches, test-ID matches, and
+challenge-text matches each have separate `Matched` and `Visible` flags, alongside matched
+and visible authenticated markers and main landmarks. No provider text, DOM attributes,
+URLs, identifiers, cookies, or credentials are recorded. `Visible` means a non-empty rendered
+box with visible CSS and no fully transparent ancestor; it does not prove a widget is active,
+unobscured, or within the viewport. A visible matching signal remains `CAPTCHA_REQUIRED`;
+hidden-only signals remain `session_unknown` and fail closed without triggering credential
+login. Visibility diagnostics do not relax authentication requirements or authorize reads.
+
 When `MARKETPLACE_BACKEND=facebook` and `MARKETPLACE_MESSENGER=1`, the service instantiates a second, fully isolated session scope `(facebook, default, messenger)`: its own persistent browser profile (`MESSENGER_PROFILE_DIR`), its own session probe (classifying `/messages/` with the same fail-closed login/checkpoint/captcha signals), and — when credentials are configured — its own single-in-flight credential login instance. The same `FACEBOOK_USERNAME`/`FACEBOOK_PASSWORD` pair is reused because it is the same identity; the isolation is between browser profiles and session assessments, not between identities. A messenger-scope browser launches only when a conversation tool is called.
 
 `messenger_threads_list` reads the Marketplace inbox page (`/marketplace/inbox/`); `messenger_thread_read` reads one thread page (`/messages/t/{thread_id}/`, rebuilt from the configured base). Extraction accepts only accessibility-contract signals — thread anchors with `/messages/t/{id}` hrefs, `role="row"` message rows with `You said:` / `{Name} said:` aria-label patterns, and `time[datetime]` timestamps — and fails closed: an authenticated page with neither recognizable content nor a recognized empty state is a typed `UPSTREAM_ERROR`, never an empty success or fabricated data. Message rows without a recognizable orientation marker are skipped rather than attributed. Because navigation follows redirects, a page is only trusted at its expected address: the inbox must be reached at the configured inbox path, and a thread must be reached at the requested thread id — a redirect to another conversation or page is a typed `UPSTREAM_ERROR`, never content attributed to the wrong thread.

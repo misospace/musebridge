@@ -1,4 +1,4 @@
-import type { Page } from 'playwright';
+import type { Locator, Page } from 'playwright';
 import { ProviderError } from './backend.js';
 import { BrowserSessionManager, BrowserUnavailableError, type BrowserSessionInfo, type ProviderSessionAssessment } from './browser.js';
 import type { ProviderErrorCode } from './domain.js';
@@ -31,6 +31,29 @@ export interface FacebookPageSnapshot {
   hasLoginPrompt: boolean;
   mentionsCheckpoint: boolean;
   mentionsCaptcha: boolean;
+  captchaSignals?: FacebookCaptchaSignals;
+}
+
+/** Only structural booleans: never include text, attributes, URLs, or identifiers. */
+export interface FacebookCaptchaSignals {
+  iframeMatched: boolean;
+  iframeVisible: boolean;
+  idMatched: boolean;
+  idVisible: boolean;
+  testIdMatched: boolean;
+  testIdVisible: boolean;
+  textMatched: boolean;
+  textVisible: boolean;
+  captchaWordMatched: boolean;
+  captchaWordVisible: boolean;
+  notRobotMatched: boolean;
+  notRobotVisible: boolean;
+  verifyHumanMatched: boolean;
+  verifyHumanVisible: boolean;
+  authenticatedMarkerMatched: boolean;
+  authenticatedMarkerVisible: boolean;
+  mainLandmarkMatched: boolean;
+  mainLandmarkVisible: boolean;
 }
 
 export interface FacebookSessionProbeOptions {
@@ -96,6 +119,18 @@ export class FacebookSessionProbe {
     }
 
     const result = classifyFacebookSession(snapshot, this.baseUrl, this.surface);
+    if (this.surface === 'messenger' && snapshot.captchaSignals) {
+      this.logger.error('Facebook Messenger probe diagnostics:', {
+        ...snapshot.captchaSignals,
+        captchaSignalMatched: snapshot.hasCaptchaFrame || snapshot.mentionsCaptcha,
+        visibleCaptchaSignal: hasVisibleCaptcha(snapshot.captchaSignals),
+        hiddenOnlyCaptchaSignal: (snapshot.hasCaptchaFrame || snapshot.mentionsCaptcha) && !hasVisibleCaptcha(snapshot.captchaSignals),
+        hasLoginSignal: snapshot.hasPasswordInput || snapshot.hasLoginForm || snapshot.hasLoginPrompt,
+        hasCheckpointSignal: isCheckpointUrl(snapshot.url) || snapshot.hasCheckpointForm || snapshot.mentionsCheckpoint,
+        expectedInboxUrl: snapshot.url === this.probeUrl,
+        sessionUsable: result.status === 'session_usable'
+      });
+    }
     this.browser.assessSession(result.status);
     return result;
   }
@@ -129,6 +164,11 @@ export function classifyFacebookSession(
   surface: 'marketplace' | 'messenger' = 'marketplace'
 ): FacebookSessionProbeResult {
   if (snapshot.hasCaptchaFrame || snapshot.mentionsCaptcha) {
+    // Dormant markup is not proof of a visible challenge, nor permission to log in or read.
+    // Legacy snapshots without visibility observations keep the existing conservative verdict.
+    if (surface === 'messenger' && snapshot.captchaSignals && !hasVisibleCaptcha(snapshot.captchaSignals)) {
+      return { status: 'session_unknown', outcome: 'ambiguous' };
+    }
     return { status: 'session_needs_reauth', outcome: 'captcha', code: 'CAPTCHA_REQUIRED' };
   }
   if (isCheckpointUrl(snapshot.url) || snapshot.hasCheckpointForm || snapshot.mentionsCheckpoint) {
@@ -160,11 +200,11 @@ export function toProviderSessionAssessment(info: BrowserSessionInfo): ProviderS
 }
 
 export async function readFacebookPage(page: Page): Promise<FacebookPageSnapshot> {
-  const [passwordCount, loginCount, checkpointCount, captchaCount, mainCount, marketplaceLinkCount, authMarkerCount, logoutLinkCount, loginPromptLinkCount, loginPromptButtonCount, checkpointTextCount, captchaTextCount, url] = await Promise.all([
+  const captchaSignals = await readFacebookCaptchaSignals(page);
+  const [passwordCount, loginCount, checkpointCount, mainCount, marketplaceLinkCount, authMarkerCount, logoutLinkCount, loginPromptLinkCount, loginPromptButtonCount, checkpointTextCount, url] = await Promise.all([
     page.locator('input[type="password"]').count(),
     page.locator('form[action*="/login"], input[name="pass"]').count(),
     page.locator('form[action*="checkpoint"], [data-testid*="checkpoint"]').count(),
-    page.locator('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]').count(),
     page.locator('main, [role="main"]').count(),
     page.locator('a[href*="/marketplace"]').count(),
     page.locator('a[href*="logout" i], [aria-label*="your account" i], [aria-label*="your profile" i]').count(),
@@ -172,7 +212,6 @@ export async function readFacebookPage(page: Page): Promise<FacebookPageSnapshot
     page.getByRole('link', { name: /^\s*log ?in( to facebook)?\s*$/i }).count(),
     page.getByRole('button', { name: /^\s*log ?in( to facebook)?\s*$/i }).count(),
     page.getByText(/security check|confirm your identity|unusual activity/i).count(),
-    page.getByText(/captcha|i'?m not a robot|verify you are a human/i).count(),
     page.url()
   ]);
 
@@ -181,22 +220,63 @@ export async function readFacebookPage(page: Page): Promise<FacebookPageSnapshot
     hasPasswordInput: passwordCount > 0,
     hasLoginForm: loginCount > 0,
     hasCheckpointForm: checkpointCount > 0,
-    hasCaptchaFrame: captchaCount > 0,
+    hasCaptchaFrame: captchaSignals.iframeMatched || captchaSignals.idMatched || captchaSignals.testIdMatched,
     hasMainLandmark: mainCount > 0,
     hasMarketplaceLink: marketplaceLinkCount > 0,
     hasAuthenticatedMarker: authMarkerCount > 0 || logoutLinkCount > 0,
     hasLoginPrompt: loginPromptLinkCount > 0 || loginPromptButtonCount > 0,
     mentionsCheckpoint: checkpointTextCount > 0,
-    mentionsCaptcha: captchaTextCount > 0
+    mentionsCaptcha: captchaSignals.textMatched,
+    captchaSignals
   };
 }
 
+export async function readFacebookCaptchaSignals(page: Page): Promise<FacebookCaptchaSignals> {
+  const [iframe, id, testId, captchaWord, notRobot, verifyHuman, authenticated, main] = await Promise.all([
+    observeSignal(page.locator('iframe[src*="captcha" i]')),
+    observeSignal(page.locator('[id*="captcha" i]')),
+    observeSignal(page.locator('[data-testid*="captcha" i]')),
+    observeSignal(page.getByText(/captcha/i)),
+    observeSignal(page.getByText(/i'?m not a robot/i)),
+    observeSignal(page.getByText(/verify you are a human/i)),
+    observeSignal(page.locator('a[href*="logout" i], [aria-label*="your account" i], [aria-label*="your profile" i]').or(page.getByRole('link', { name: /^\s*log ?out\s*$/i }))),
+    observeSignal(page.locator('main, [role="main"]'))
+  ]);
+  return {
+    iframeMatched: iframe.matched, iframeVisible: iframe.visible,
+    idMatched: id.matched, idVisible: id.visible,
+    testIdMatched: testId.matched, testIdVisible: testId.visible,
+    textMatched: captchaWord.matched || notRobot.matched || verifyHuman.matched,
+    textVisible: captchaWord.visible || notRobot.visible || verifyHuman.visible,
+    captchaWordMatched: captchaWord.matched, captchaWordVisible: captchaWord.visible,
+    notRobotMatched: notRobot.matched, notRobotVisible: notRobot.visible,
+    verifyHumanMatched: verifyHuman.matched, verifyHumanVisible: verifyHuman.visible,
+    authenticatedMarkerMatched: authenticated.matched, authenticatedMarkerVisible: authenticated.visible,
+    mainLandmarkMatched: main.matched, mainLandmarkVisible: main.visible
+  };
+}
+
+async function observeSignal(locator: Locator): Promise<{ matched: boolean; visible: boolean }> {
+  const [matched, visible] = await Promise.all([
+    locator.count(),
+    // Playwright considers opacity:0 visible; exclude fully transparent elements/ancestors
+    // too so dormant overlays are not described as a rendered challenge.
+    locator.filter({ visible: true }).evaluateAll((elements) => elements.some((element) => {
+      for (let current: Element | null = element; current; current = current.parentElement) {
+        if (getComputedStyle(current).opacity === '0') return false;
+      }
+      return true;
+    }))
+  ]);
+  return { matched: matched > 0, visible };
+}
+
+function hasVisibleCaptcha(signals: FacebookCaptchaSignals): boolean {
+  return signals.iframeVisible || signals.idVisible || signals.testIdVisible || signals.textVisible;
+}
+
 function hasDecisiveSignal(snapshot: FacebookPageSnapshot, baseUrl: string, surface: 'marketplace' | 'messenger'): boolean {
-  return snapshot.hasPasswordInput || snapshot.hasLoginForm || snapshot.hasCheckpointForm || snapshot.hasCaptchaFrame || snapshot.hasLoginPrompt ||
-    snapshot.mentionsCheckpoint || snapshot.mentionsCaptcha || isLoginUrl(snapshot.url) || isCheckpointUrl(snapshot.url) ||
-    (surface === 'messenger'
-      ? isMessengerUrl(snapshot.url, baseUrl) && snapshot.hasMainLandmark && snapshot.hasAuthenticatedMarker && !snapshot.hasLoginPrompt
-      : isMarketplaceUrl(snapshot.url, baseUrl) && snapshot.hasMainLandmark && snapshot.hasMarketplaceLink && snapshot.hasAuthenticatedMarker);
+  return classifyFacebookSession(snapshot, baseUrl, surface).outcome !== 'ambiguous';
 }
 
 function isLoginUrl(value: string): boolean {

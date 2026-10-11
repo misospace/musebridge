@@ -36,6 +36,8 @@ export interface FacebookMessengerBackendOptions {
   probe: FacebookSessionProbe;
   /** Optional env-backed login instance isolated to the Messenger browser profile. */
   login?: FacebookCredentialLogin;
+  /** Probe the existing session only; never log in, extract threads, or open a conversation. */
+  probeOnly?: boolean;
   inboxPath?: string;
   navigationTimeoutMs?: number;
   settleTimeoutMs?: number;
@@ -49,6 +51,7 @@ export class FacebookMessengerBackend implements ConversationBackend {
   private readonly browser: BrowserSessionManager;
   private readonly probe: FacebookSessionProbe;
   private readonly login: FacebookCredentialLogin | undefined;
+  private readonly probeOnly: boolean;
   private readonly inboxPath: string;
   private readonly navigationTimeoutMs: number;
   private readonly settleTimeoutMs: number;
@@ -76,6 +79,8 @@ export class FacebookMessengerBackend implements ConversationBackend {
     this.browser = options.browser;
     this.probe = options.probe;
     this.login = options.login;
+    this.probeOnly = options.probeOnly ?? false;
+    if (typeof this.probeOnly !== 'boolean') throw new TypeError('probeOnly must be a boolean');
     this.navigationTimeoutMs = options.navigationTimeoutMs ?? 8_000;
     this.settleTimeoutMs = options.settleTimeoutMs ?? 3_000;
     this.graphqlFlushTimeoutMs = options.graphqlFlushTimeoutMs ?? GRAPHQL_FLUSH_TIMEOUT_MS;
@@ -263,6 +268,10 @@ export class FacebookMessengerBackend implements ConversationBackend {
       throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook session could not be verified.');
     }
 
+    if (this.probeOnly) {
+      const code = session.code ?? 'SESSION_INVALID';
+      throw new MarketplaceProviderError(code, session.code ? messengerSessionMessage(code) : 'Messenger probe-only diagnostics are enabled; conversation access is disabled.');
+    }
     if (session.status === 'session_needs_reauth') {
       const recovery = await this.waitForCredentialLogin(session.code, signal);
       if (!recovery.recovered) {
