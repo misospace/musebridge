@@ -30,7 +30,7 @@ What the issue requires:
 
 **Does not exist:**
 
-- Any ordinary-inbox listing logic. `/messages/` appears in the codebase only as the messenger session-probe target (`FACEBOOK_MESSENGER_PATH = '/messages/'`, `services/marketplace/src/facebook.ts:8`; the probe path is selected per surface, `facebook.ts:64-70`).
+- Any ordinary-inbox listing logic. `/messages/` is no longer a navigation target: the messenger session probe and the interactive reauth loop both land on `/marketplace/inbox/` (`FACEBOOK_MESSENGER_INBOX_PATH`, `services/marketplace/src/facebook.ts`; the probe path is selected per surface), because `/messages/` auto-opens a thread and can send a visible Seen receipt. `FACEBOOK_MESSENGER_PATH` remains only as an exported constant.
 - The extractor only recognizes `/messages/t/{id}/` anchors with the id grammar `^[A-Za-z0-9][A-Za-z0-9._-]*$` bounded to 128 (`services/marketplace/src/facebook-messenger-extract.ts:70,118`), thread message rows `[role="row"]` with `You said/sent/replied:` / `{Name} said:` markers (`facebook-messenger-extract.ts:172-201`), and the empty marker `no conversations|no messages yet|nothing here yet` (`facebook-messenger-extract.ts:101`).
 - An unrecognized layout is a typed `UPSTREAM_ERROR`, never an empty success (`services/marketplace/src/facebook-messenger-parse.ts`).
 
