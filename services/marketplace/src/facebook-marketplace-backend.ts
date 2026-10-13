@@ -1,4 +1,5 @@
 import { errors } from 'playwright';
+import { marketplaceSearchDiagnostic } from './facebook-marketplace-diagnostics.js';
 import { BrowserSessionManager, BrowserUnavailableError, sleepUntilAbort } from './browser.js';
 import {
   fetchInputSchema,
@@ -126,26 +127,41 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     let extracted: ExtractedMarketplacePage;
     try {
       extracted = await this.browser.runExclusive(signal, async (page, taskSignal) => {
+        const startedAt = Date.now();
         await page.goto(searchUrl, {
           waitUntil: 'domcontentloaded',
           timeout: this.navigationTimeoutMs,
           signal: taskSignal
         });
 
+        const navigationMs = Date.now() - startedAt;
         const extractOptions = {
           itemPath: MARKETPLACE_ITEM_PATH,
           limits: { ...MARKETPLACE_EXTRACT_LIMITS, maxCards: this.maxCards }
         };
         let result = await page.evaluate(extractMarketplacePage, extractOptions);
-        const deadline = Date.now() + this.settleTimeoutMs;
+        const first = result;
+        let samples = 1;
+        const settleStartedAt = Date.now();
+        const deadline = settleStartedAt + this.settleTimeoutMs;
         while (classifyMarketplacePage(result) === 'unknown' && Date.now() < deadline && !taskSignal.aborted) {
           await sleepUntilAbort(200, taskSignal);
           if (!taskSignal.aborted) {
             // Playwright 1.63 page.evaluate accepts no abort signal. An in-flight evaluation cannot be cancelled, but in-page work is bounded by construction and the outer deadline still rejects the caller.
             result = await page.evaluate(extractMarketplacePage, extractOptions);
+            samples += 1;
           }
         }
         if (taskSignal.aborted) throw taskSignal.reason ?? new Error('Browser operation aborted');
+        this.logger.error('Facebook Marketplace search diagnostics:', marketplaceSearchDiagnostic({
+          requestedUrl: searchUrl,
+          first,
+          final: result,
+          navigationMs,
+          settleMs: Date.now() - settleStartedAt,
+          settleTimeoutMs: this.settleTimeoutMs,
+          samples
+        }));
         return result;
       });
     } catch (error) {
