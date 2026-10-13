@@ -102,6 +102,58 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     expect(messages.messages).toHaveLength(3);
     expect(messages.messages[0]?.text).toBe('Message 0');
   });
+
+  it('does not attribute the observed article layout or its token-bearing content', async () => {
+    const html = readFileSync(new URL('./fixtures/facebook-messenger/thread-articles-unattributed.html', import.meta.url), 'utf8');
+    await page.setContent(html, { waitUntil: 'domcontentloaded' });
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(extracted.signals.hasMainLandmark).toBe(true);
+    expect(extracted.signals.hasAuthenticatedMarker).toBe(true);
+    expect(extracted.messages).toEqual([]);
+    expect(classifyMessengerThreadPage(extracted)).toBe('unknown');
+    expect(extracted.diagnostics).toEqual({
+      hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false,
+      scannedRows: 1, unattributedRows: 1
+    });
+  });
+
+  it('keeps empty and attachment-only thread layouts unknown without verified contracts', async () => {
+    for (const content of [
+      '<div role="log">No messages yet</div>',
+      '<div role="row" aria-label="You sent an attachment"></div>'
+    ]) {
+      await page.setContent(`<main><span aria-label="Your account">Synthetic account</span>${content}</main>`);
+      const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+      expect(extracted.messages).toEqual([]);
+      expect(classifyMessengerThreadPage(extracted)).toBe('unknown');
+    }
+  });
+
+  it('preserves synthetic bracketed tokens only inside the bounded attributed text window', async () => {
+    const token = '[synthetic-reply-token]';
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      `<div role="row" aria-label="You said: synthetic">Own reply ${token}</div>` +
+      `<div role="row" aria-label="Synthetic Seller said: synthetic">Quoted ${token}</div>` +
+      `<div role="row" aria-label="You said: synthetic">${'X'.repeat(MESSENGER_EXTRACT_LIMITS.maxTextLength)}${token}</div>` +
+      '</main>');
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(extracted.messages.map((message) => ({ sender: message.sender, containsToken: message.text.includes(token) })))
+      .toEqual([
+        { sender: 'you', containsToken: true },
+        { sender: 'other', containsToken: true },
+        { sender: 'you', containsToken: false }
+      ]);
+    // Presence in extracted text is not provider acknowledgement or delivery confirmation.
+  });
+
+  it('does not mistake a bounded old message window for the latest reply token', async () => {
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      Array.from({ length: MESSENGER_EXTRACT_LIMITS.maxMessages }, () => '<div role="row" aria-label="You said: synthetic">Earlier synthetic message</div>').join('') +
+      '<div role="row" aria-label="You said: synthetic">Newest [synthetic-reply-token]</div></main>');
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(extracted.messages).toHaveLength(MESSENGER_EXTRACT_LIMITS.maxMessages);
+    expect(extracted.messages.some((message) => message.text.includes('[synthetic-reply-token]'))).toBe(false);
+  });
 });
 
 // Non-browser unit test: verifies the pure composer decision contract (count ->

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Synthetic token boundaries</title></head>
+<body><main role="main">
+  <span aria-label="Your account">Synthetic account</span>
+  <section id="synthetic-messages"></section>
+</main>
+<script>
+  const token = '[synthetic-reply-token]';
+  const content = [
+    ['You said: synthetic', 'X'.repeat(2000 - token.length) + token],
+    ['Synthetic Seller said: synthetic', 'Quoted ' + token],
+    ['You said: synthetic', 'X'.repeat(2000) + token],
+    ['Unattributed message', token]
+  ];
+  for (const [label, text] of content) {
+    const row = document.createElement('div');
+    row.setAttribute('role', 'row');
+    row.setAttribute('aria-label', label);
+    row.textContent = text;
+    document.getElementById('synthetic-messages').append(row);
+  }
+</script>
+</body></html>

@@ -44,6 +44,13 @@ export interface ExtractedThreadPage {
   url: string;
   signals: ExtractedMessengerSignals;
   messages: ExtractedMessage[];
+  diagnostics?: {
+    hasMessageLog: boolean;
+    hasArticleMessages: boolean;
+    hasExplicitEmptyState: boolean;
+    scannedRows: number;
+    unattributedRows: number;
+  };
 }
 
 export interface MessengerExtractionLimits {
@@ -169,11 +176,20 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
     mentionsCaptcha: /captcha|i'?m not a robot|verify you are a human/i.test(pageText)
   };
   const messages: ExtractedMessage[] = [];
+  const messageLog = document.querySelector('[role="log"]');
+  const diagnostics = {
+    hasMessageLog: messageLog !== null,
+    hasArticleMessages: document.querySelector('[role="log"] [role="article"]') !== null,
+    hasExplicitEmptyState: /no messages yet|no conversations|nothing here yet/i.test((messageLog?.textContent ?? '').slice(0, 20_000)),
+    scannedRows: 0,
+    unattributedRows: 0
+  };
   const rows = document.querySelectorAll('[role="row"]');
   const scanLength = Math.min(rows.length, maxMessagesScan);
   for (let index = 0; index < scanLength && messages.length < maxMessages; index += 1) {
     const row = rows[index];
     if (!row) continue;
+    diagnostics.scannedRows += 1;
     const label = row.getAttribute('aria-label') ?? '';
     let sender: 'you' | 'other' | undefined;
     let senderName: string | undefined;
@@ -187,7 +203,10 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
       }
     }
     // Attribution is required; unknown rows are not represented as messages.
-    if (!sender) continue;
+    if (!sender) {
+      diagnostics.unattributedRows += 1;
+      continue;
+    }
     const text = (row.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, maxTextLength);
     if (!text) continue;
     const message: ExtractedMessage = { sender, text, ...(senderName ? { senderName } : {}) };
@@ -201,7 +220,7 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
     }
     messages.push(message);
   }
-  return { url, signals, messages };
+  return { url, signals, messages, diagnostics };
 }
 
 // The message composer is recognized strictly by its accessibility contract: a contenteditable
