@@ -129,7 +129,7 @@ type ReauthStartupStage = 'profile-lock' | 'temporary-files' | 'xvfb' | 'x11vnc'
 export class ReauthManager {
   private readonly browser: BrowserSessionManager;
   private readonly runtime: ReauthRuntime;
-  private readonly targetUrl: string;
+  readonly targetUrl: string;
   private readonly now: () => number;
   private readonly logger: Pick<Console, 'error' | 'info'>;
   private readonly configuredViewerPort: number | undefined;

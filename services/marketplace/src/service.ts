@@ -14,7 +14,9 @@ import { FacebookMessengerBackend } from './facebook-messenger-backend.js';
 import type { FacebookMarket } from './facebook-marketplace-url.js';
 import { backendNameSchema, SERVICE_VERSION } from './domain.js';
 import { BrowserSessionManager } from './browser.js';
-import { FacebookSessionProbe, toProviderSessionAssessment } from './facebook.js';
+import { FACEBOOK_MESSENGER_INBOX_PATH, FACEBOOK_ORIGIN, FacebookSessionProbe, toProviderSessionAssessment } from './facebook.js';
+import { DenyAllAuthorizer, HmacGrantAuthorizer, type ActionAuthorizer, type ActionRequest } from './authorization.js';
+import { FileGrantConsumptionStore, type GrantConsumptionStore } from './grant-state.js';
 import {
   FACEBOOK_LOGIN_WAIT_DEFAULT_MS,
   FacebookCredentialLogin,
@@ -34,6 +36,10 @@ const BACKEND_TIMEOUT_MS = parseBackendTimeout(process.env.BACKEND_TIMEOUT_MS);
 const REAUTH_ADMIN_PORT = parseConfiguredPort(process.env.REAUTH_ADMIN_PORT, 'REAUTH_ADMIN_PORT', 8787);
 const REAUTH_VIEWER_PORT = parseConfiguredPort(process.env.REAUTH_VIEWER_PORT, 'REAUTH_VIEWER_PORT', 6080);
 const REAUTH_LEASE_MS = parseReauthLease(process.env.REAUTH_LEASE_MS);
+// The messenger scope's interactive reauth loop binds its own loopback admin port, distinct from
+// the marketplace loop, and (when configured) its own viewer port. Both default to ephemeral.
+const MESSENGER_REAUTH_ADMIN_PORT = parseConfiguredPort(process.env.MESSENGER_REAUTH_ADMIN_PORT, 'MESSENGER_REAUTH_ADMIN_PORT', 8788);
+const MESSENGER_REAUTH_VIEWER_PORT = parseConfiguredPort(process.env.MESSENGER_REAUTH_VIEWER_PORT, 'MESSENGER_REAUTH_VIEWER_PORT', 0);
 
 export interface ServiceOptions {
   backend?: MarketplaceBackend;
@@ -68,6 +74,36 @@ export interface ServiceOptions {
   messengerBrowser?: BrowserSessionManager;
   messengerProbe?: FacebookSessionProbe;
   messengerBaseUrl?: string;
+  /** Internal dependency/test seams for the messenger scope's interactive reauth loop. */
+  messengerReauthRuntime?: ReauthRuntime;
+  /** Internal dependency/test seam for the messenger scope's interactive reauth loop. When omitted, the loop lands on the messenger inbox path (same landing as the messenger session probe); this override takes precedence, and its side effects are the operator's responsibility. */
+  messengerReauthTargetUrl?: string;
+  messengerReauthAdminPort?: number;
+  messengerReauthViewerPort?: number;
+  /** Per-call host seam for approval grants; receives the validated action request (including the payload digest) so a host can correlate it with its own approval records. Grants must come from the host, never from tool arguments; this service does not issue grants. */
+  approvalGrant?: (request: ActionRequest) => unknown;
+  /**
+   * Write-action authorizer for `send` tools. When omitted, the service
+   * installs the production HMAC grant verifier when a non-empty grant-issuer
+   * secret (seam or GRANT_ISSUER_SECRET) is configured AND durable grant
+   * consumption state is available (the `grantConsumptionStore` seam or the
+   * GRANT_STATE_PATH directory); a configured secret without durable state
+   * installs the fail-closed deny-all authorizer (with one warning), as does a
+   * secret-less deployment.
+   */
+  authorizer?: ActionAuthorizer;
+  /** Shared grant-issuer secret seam for the production HMAC grant verifier; not an environment variable or tool input. Read at assembly time. */
+  grantIssuerSecret?: string;
+  /**
+   * Durable single-use grant consumption state for the production HMAC grant
+   * verifier; not an environment variable or tool input. When omitted and
+   * GRANT_STATE_PATH names a directory, the service constructs a
+   * FileGrantConsumptionStore over that directory. The verifier requires an
+   * explicit store and never falls back to in-memory state; an in-memory store
+   * is process-local and replayable across a restart or a second replica, so
+   * it is for tests/dev only.
+   */
+  grantConsumptionStore?: GrantConsumptionStore;
 }
 
 export interface MarketplaceService {
@@ -80,6 +116,8 @@ export interface MarketplaceService {
   readonly admin: ReauthAdminServer;
   readonly messengerBrowser?: BrowserSessionManager;
   readonly messengerProbe?: FacebookSessionProbe;
+  readonly messengerReauth?: ReauthManager;
+  readonly messengerAdmin?: ReauthAdminServer;
   readonly shopping: ShoppingBackend;
   readonly events: EventsBackend;
   close(): Promise<void>;
@@ -227,6 +265,64 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     }
   });
   const admin = createReauthAdminServer({ reauth, port: adminPort, logger });
+
+  // The messenger scope owns a separate interactive reauth loop: its own manager (driving the
+  // messenger browser profile), its own loopback admin port, and its own viewer port. It lands
+  // on the messenger inbox path by default (the same landing as the messenger session probe),
+  // because '/messages/' auto-selects a thread and can send a visible Seen receipt; a Messenger
+  // challenge is still resolved interactively without touching the marketplace session.
+  // messengerReauthTargetUrl is an opt-in override whose side effects are the operator's
+  // responsibility.
+  const messengerReauthAdminPort = options.messengerReauthAdminPort ?? MESSENGER_REAUTH_ADMIN_PORT;
+  const messengerReauthViewerPort = options.messengerReauthViewerPort ?? MESSENGER_REAUTH_VIEWER_PORT;
+  validateServicePort(messengerReauthAdminPort, 'messengerReauthAdminPort');
+  validateServicePort(messengerReauthViewerPort, 'messengerReauthViewerPort');
+  const messengerReauth = messengerBrowser === undefined
+    ? undefined
+    : new ReauthManager({
+      browser: messengerBrowser,
+      runtime: options.messengerReauthRuntime ?? new ProcessReauthRuntime(),
+      targetUrl: options.messengerReauthTargetUrl
+        ?? new URL(FACEBOOK_MESSENGER_INBOX_PATH, options.messengerBaseUrl ?? options.facebookBaseUrl ?? FACEBOOK_ORIGIN).href,
+      ...(messengerReauthViewerPort > 0 ? { viewerPort: messengerReauthViewerPort } : {}),
+      leaseMs,
+      logger: {
+        error: (...args: Parameters<Console['error']>) => logger.error(...args),
+       info: () => undefined
+       }
+     });
+  const messengerAdmin = messengerReauth === undefined
+    ? undefined
+    : createReauthAdminServer({ reauth: messengerReauth, port: messengerReauthAdminPort, logger });
+
+  // Write-action authorization is fail-closed. An explicitly supplied authorizer wins;
+  // otherwise the production HMAC grant verifier is installed only when a grant-issuer
+  // secret is configured (via the seam or GRANT_ISSUER_SECRET, read here at assembly time
+  // rather than at module load) AND durable grant consumption state is available (via the
+  // grantConsumptionStore seam or the GRANT_STATE_PATH directory). The verifier requires an
+  // explicit store and never falls back to in-memory state, so a configured secret without
+  // durable state installs the deny-all authorizer and warns once rather than silently
+  // weakening single-use enforcement; a secret-less deployment installs the deny-all
+  // authorizer. A set-but-invalid secret fails startup in the verifier constructor.
+  const grantIssuerSecret = options.grantIssuerSecret ?? process.env.GRANT_ISSUER_SECRET;
+  let authorizer: ActionAuthorizer;
+  if (options.authorizer !== undefined) {
+    authorizer = options.authorizer;
+  } else if (grantIssuerSecret !== undefined && grantIssuerSecret !== '') {
+    const grantStatePath = process.env.GRANT_STATE_PATH;
+    const durableStore: GrantConsumptionStore | undefined = options.grantConsumptionStore
+      ?? (grantStatePath !== undefined && grantStatePath !== ''
+        ? new FileGrantConsumptionStore({ dir: grantStatePath })
+        : undefined);
+    if (durableStore === undefined) {
+      console.warn('GRANT_ISSUER_SECRET is set but no durable grant consumption state (GRANT_STATE_PATH) is configured; write actions remain deny-all.');
+      authorizer = new DenyAllAuthorizer();
+    } else {
+      authorizer = new HmacGrantAuthorizer({ secret: grantIssuerSecret, store: durableStore });
+    }
+  } else {
+    authorizer = new DenyAllAuthorizer();
+  }
   const active = new Set<{ mcp: Server; transport: StreamableHTTPServerTransport }>();
   let shuttingDown = false;
   const shutdownController = new AbortController();
@@ -333,7 +429,9 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
         sessionAssessment: () => toProviderSessionAssessment(browser.getInfo()),
         conversations,
         shopping,
-        events
+        events,
+        authorizer,
+        ...(options.approvalGrant !== undefined ? { approvalGrant: options.approvalGrant } : {})
       });
       await mcp.connect(transport);
       await transport.handleRequest(request, response, body);
@@ -355,15 +453,25 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     closePromise = (async () => {
       if (backend instanceof FacebookMarketplaceBackend) await backend.close();
       if (conversations instanceof FacebookMessengerBackend) await conversations.close();
-      await stopReauthBounded(reauth, logger);
-      await admin.close().catch((error: unknown) => {
-        try {
-          logger.error('Reauth admin shutdown failed:', error instanceof Error ? error.name : 'UnknownError');
-        } catch {
-          // Continue the remaining service teardown if logging fails.
-        }
-      });
-      const closing = new Promise<void>((resolve, reject) => {
+       await stopReauthBounded(reauth, logger);
+       await admin.close().catch((error: unknown) => {
+         try {
+           logger.error('Reauth admin shutdown failed:', error instanceof Error ? error.name : 'UnknownError');
+         } catch {
+           // Continue the remaining service teardown if logging fails.
+         }
+       });
+       if (messengerReauth !== undefined) await stopReauthBounded(messengerReauth, logger);
+       if (messengerAdmin !== undefined) {
+         await messengerAdmin.close().catch((error: unknown) => {
+           try {
+             logger.error('Messenger reauth admin shutdown failed:', error instanceof Error ? error.name : 'UnknownError');
+           } catch {
+             // Continue the remaining service teardown if logging fails.
+           }
+         });
+       }
+       const closing = new Promise<void>((resolve, reject) => {
         if (!httpServer.listening) return resolve();
         httpServer.close((error) => error ? reject(error) : resolve());
       });
@@ -391,6 +499,8 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     admin,
     ...(messengerBrowser !== undefined ? { messengerBrowser } : {}),
     ...(messengerProbe !== undefined ? { messengerProbe } : {}),
+    ...(messengerReauth !== undefined ? { messengerReauth } : {}),
+    ...(messengerAdmin !== undefined ? { messengerAdmin } : {}),
     shopping,
     events,
     address: () => httpServer.address(),
@@ -558,10 +668,14 @@ async function readBoundedBody(request: IncomingMessage, response: ServerRespons
 }
 
 export async function listen(service: MarketplaceService): Promise<void> {
-  const results = await Promise.allSettled([
+  const listeners = [
     listenServer(service.server, service.port, service.host),
     listenServer(service.admin.server, service.admin.port, service.admin.host)
-  ]);
+  ];
+  if (service.messengerAdmin !== undefined) {
+    listeners.push(listenServer(service.messengerAdmin.server, service.messengerAdmin.port, service.messengerAdmin.host));
+  }
+  const results = await Promise.allSettled(listeners);
   const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
   if (failure) {
     await service.close().catch(() => undefined);
