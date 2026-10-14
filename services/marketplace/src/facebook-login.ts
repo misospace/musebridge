@@ -6,6 +6,7 @@ import {
   FACEBOOK_MESSENGER_INBOX_PATH,
   FACEBOOK_MARKETPLACE_PATH,
   classifyFacebookSession,
+  facebookMessengerSessionDiagnostics,
   normalizeFacebookBaseUrl,
   readFacebookPage,
   type FacebookPageSnapshot,
@@ -227,21 +228,23 @@ export class FacebookCredentialLogin {
   private async waitForUsableSession(page: Page, signal: AbortSignal): Promise<FacebookLoginResult> {
     const deadline = Date.now() + this.waitMs;
     let last: FacebookSessionProbeResult = { status: 'session_unknown', outcome: 'ambiguous' };
+    let lastSnapshot: FacebookPageSnapshot | undefined;
 
     for (;;) {
       if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
 
       try {
-        const snapshot = await readFacebookPage(page);
-        last = classifyFacebookSession(snapshot, this.baseUrl, this.surface);
+        lastSnapshot = await readFacebookPage(page);
+        last = classifyFacebookSession(lastSnapshot, this.baseUrl, this.surface);
         if (last.status === 'session_usable') return { outcome: 'authenticated' };
-        if (last.status === 'session_unknown' && isAuthenticatedNonVerificationPage(snapshot, this.baseUrl, this.verifyUrl)) {
+        if (last.status === 'session_unknown' && isAuthenticatedNonVerificationPage(lastSnapshot, this.baseUrl, this.verifyUrl)) {
           await page.goto(this.verifyUrl, {
             waitUntil: 'domcontentloaded',
             timeout: this.navigationTimeoutMs,
             signal
           });
-          last = classifyFacebookSession(await readFacebookPage(page), this.baseUrl, this.surface);
+          lastSnapshot = await readFacebookPage(page);
+          last = classifyFacebookSession(lastSnapshot, this.baseUrl, this.surface);
           if (last.status === 'session_usable') return { outcome: 'authenticated' };
         }
       } catch (error) {
@@ -251,7 +254,11 @@ export class FacebookCredentialLogin {
       }
 
       if (last.outcome === 'captcha') {
-        // A captcha cannot be satisfied from the phone, so stop rather than burning the window.
+        // Challenges are never automated; stop rather than retrying credentials or the page action.
+        if (this.surface === 'messenger' && lastSnapshot) {
+          const diagnostics = facebookMessengerSessionDiagnostics(lastSnapshot, last, this.verifyUrl);
+          if (diagnostics) this.logger.error('Facebook Messenger credential-login diagnostics:', diagnostics);
+        }
         this.browser.assessSession('session_needs_reauth');
         return { outcome: 'challenge', code: 'CAPTCHA_REQUIRED' };
       }
@@ -273,7 +280,8 @@ export class FacebookCredentialLogin {
         timeout: this.navigationTimeoutMs,
         signal
       });
-      last = classifyFacebookSession(await readFacebookPage(page), this.baseUrl, this.surface);
+      lastSnapshot = await readFacebookPage(page);
+      last = classifyFacebookSession(lastSnapshot, this.baseUrl, this.surface);
       if (last.status === 'session_usable') return { outcome: 'authenticated' };
     } catch (error) {
       if (signal.aborted) throw signal.reason ?? error;

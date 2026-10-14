@@ -93,7 +93,7 @@ describe('Messenger CAPTCHA visibility classification', () => {
       .toEqual({ status: 'session_needs_reauth', outcome: 'captcha', code: 'CAPTCHA_REQUIRED' });
   });
 
-  it('logs only explicit structural booleans, excluding the URL and provider text', async () => {
+  it('logs only structural booleans and classifier enums, excluding URL and provider text', async () => {
     const manager = createManager();
     const logger = { error: vi.fn() };
     const probe = createProbe(manager, { surface: 'messenger', logger });
@@ -107,7 +107,11 @@ describe('Messenger CAPTCHA visibility classification', () => {
     expect(label).toBe('Facebook Messenger probe diagnostics:');
     expect(diagnostics).toMatchObject({ idMatched: true, idVisible: false,
       hiddenOnlyCaptchaSignal: true, authenticatedMarkerMatched: true, sessionUsable: false });
-    expect(Object.values(diagnostics).every((value) => typeof value === 'boolean')).toBe(true);
+    const safeEnums = new Set([
+      'ambiguous', 'checkpoint', 'captcha', 'login_required', 'login_redirect',
+      'marketplace_authenticated', 'messages_authenticated', 'session_unknown', 'session_usable', 'session_needs_reauth'
+    ]);
+    expect(Object.values(diagnostics).every((value) => typeof value === 'boolean' || safeEnums.has(String(value)))).toBe(true);
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain('URL_SENTINEL');
     expect(synthetic.requests).toEqual([]);
   });

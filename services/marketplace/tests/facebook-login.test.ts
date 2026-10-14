@@ -353,8 +353,11 @@ describe.skipIf(!browserAvailable)('Facebook credential login', () => {
     expect(manager.getInfo().status).not.toBe('session_usable');
   });
 
-  itWithTimeout('hands a captcha back to manual re-auth instead of resubmitting credentials', async () => {
-    const { manager, login, server } = await harness('captcha-after-submit');
+  itWithTimeout('stops on a captcha with structural diagnostics and no credential retry', async () => {
+    const logged: unknown[][] = [];
+    const { manager, login, server } = await harness('captcha-after-submit', {
+      error: (...args: unknown[]) => { logged.push(args); }
+    }, undefined, 'messenger');
 
     const result = await login.attempt(new AbortController().signal);
 
@@ -362,6 +365,29 @@ describe.skipIf(!browserAvailable)('Facebook credential login', () => {
     // Exactly one submission: a challenge must never trigger a retry loop.
     expect(server.submissions).toHaveLength(1);
     expect(manager.getInfo().status).toBe('session_needs_reauth');
+    const diagnostic = logged.find(([message]) => message === 'Facebook Messenger credential-login diagnostics:')?.[1];
+    expect(diagnostic).toMatchObject({
+      iframeMatched: true,
+      iframeVisible: true,
+      textMatched: true,
+      textVisible: true,
+      captchaSignalMatched: true,
+      visibleCaptchaSignal: true,
+      hiddenOnlyCaptchaSignal: false,
+      hasLoginSignal: false,
+      loginRedirect: false,
+      hasCheckpointSignal: false,
+      checkpointRoute: false,
+      expectedInboxUrl: false,
+      sessionUsable: false,
+      classification: 'captcha',
+      sessionStatus: 'session_needs_reauth'
+    });
+    const diagnosticText = JSON.stringify(diagnostic);
+    expect(diagnosticText).not.toContain('/captcha/');
+    expect(diagnosticText).not.toContain('Please complete the captcha');
+    expect(diagnosticText).not.toContain(USERNAME_SENTINEL);
+    expect(diagnosticText).not.toContain(PASSWORD_SENTINEL);
   });
 
   itWithTimeout('reports a checkpoint as a challenge once the window closes, without resubmitting', async () => {
@@ -431,7 +457,8 @@ async function harness(
   credentials: { username: string; password: string; waitMs?: number } = {
     username: USERNAME_SENTINEL,
     password: PASSWORD_SENTINEL
-  }
+  },
+  surface: 'marketplace' | 'messenger' = 'marketplace'
 ): Promise<{ manager: BrowserSessionManager; login: FacebookCredentialLogin; server: SyntheticLoginServer }> {
   const server = await startLoginServer();
   servers.push(server);
@@ -442,6 +469,7 @@ async function harness(
     username: credentials.username,
     password: credentials.password,
     baseUrl: server.origin,
+    surface,
     waitMs: credentials.waitMs ?? TEST_WAIT_MS,
     pollIntervalMs: POLL_INTERVAL_MS,
     navigationTimeoutMs: 2_000,
