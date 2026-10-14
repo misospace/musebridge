@@ -74,6 +74,18 @@ describe('Messenger page interpretation', () => {
       graphql: { recognized: true, malformed: true, empty: false, incomplete: false, threadIds: [] }
     })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
     expect(interpretMessengerInboxPage({
+      page, baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: true, threadIds: ['partial-graphql-id'] }
+    })).toMatchObject({
+      kind: 'error',
+      code: 'UPSTREAM_ERROR',
+      message: 'The Facebook Marketplace inbox pagination could not be verified; a complete thread list cannot be returned.'
+    });
+    expect(interpretMessengerInboxPage({
+      page, baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
+      graphql: { recognized: true, malformed: true, empty: false, incomplete: false, threadIds: ['graphql-id'] }
+    })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+    expect(interpretMessengerInboxPage({
       page: inbox(), baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
       graphql: { recognized: true, malformed: false, empty: true, incomplete: false, threadIds: [] }
     })).toEqual({ kind: 'empty' });
@@ -94,7 +106,7 @@ describe('Messenger page interpretation', () => {
     })).toMatchObject({
       kind: 'error',
       code: 'UPSTREAM_ERROR',
-      message: 'The Facebook Marketplace inbox page only returned the first page of threads; pagination is not supported.'
+      message: 'The Facebook Marketplace inbox pagination could not be verified; a complete thread list cannot be returned.'
     });
     // An incomplete connection must not silently fall through to the DOM anchor path either.
     expect(interpretMessengerInboxPage({
@@ -104,7 +116,7 @@ describe('Messenger page interpretation', () => {
     })).toMatchObject({
       kind: 'error',
       code: 'UPSTREAM_ERROR',
-      message: 'The Facebook Marketplace inbox page only returned the first page of threads; pagination is not supported.'
+      message: 'The Facebook Marketplace inbox pagination could not be verified; a complete thread list cannot be returned.'
     });
   });
 

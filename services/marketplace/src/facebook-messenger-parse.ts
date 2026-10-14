@@ -53,6 +53,17 @@ export function interpretMessengerInboxPage(input: {
   const atInbox = isExpectedPathname(input.page.url, input.baseUrl, (pathname) => pathname === inboxPrefix || pathname.startsWith(`${inboxPrefix}/`));
   if (!atInbox) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox page was not reached at the expected address.' };
   const graphql = input.graphql;
+  if (graphql?.malformed) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox threads could not be parsed.' };
+  // Thread ids are returned only after the collector follows the observed cursor chain from the
+  // initial request through an explicit terminal page. Missing, untracked, or unlinked pages stay
+  // a typed failure rather than a partial success.
+  if (graphql?.incomplete) {
+    return {
+      kind: 'error',
+      code: 'UPSTREAM_ERROR',
+      message: 'The Facebook Marketplace inbox pagination could not be verified; a complete thread list cannot be returned.'
+    };
+  }
   if (graphql && graphql.threadIds.length > 0) {
     const threads: ConversationThread[] = [];
     for (const threadId of graphql.threadIds.slice(0, input.limit)) {
@@ -60,16 +71,6 @@ export function interpretMessengerInboxPage(input: {
       if (parsed.success) threads.push(parsed.data);
     }
     if (threads.length > 0) return { kind: 'threads', threads };
-  }
-  if (graphql?.malformed) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox threads could not be parsed.' };
-  // An empty current slice with `has_next_page: true` is paginated partial data; the tool only
-  // observes the first page so claiming an empty inbox would fabricate completeness.
-  if (graphql?.incomplete) {
-    return {
-      kind: 'error',
-      code: 'UPSTREAM_ERROR',
-      message: 'The Facebook Marketplace inbox page only returned the first page of threads; pagination is not supported.'
-    };
   }
   if (graphql?.empty) return { kind: 'empty' };
   if (graphql?.recognized) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox threads could not be parsed.' };

@@ -9,7 +9,7 @@
   <script>
     // The inbox connection arrives after the initial DOM read but well inside the settle budget.
     setTimeout(() => {
-      fetch('/api/graphql/inbox', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ operationName: 'CometMarketplaceInboxBuyerTabViewPaginationQuery' }) });
+      fetch('/api/graphql/inbox', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ operationName: 'CometMarketplaceInboxBuyerTabViewContainerQuery', variables: { cursor: null, count: 12 } }) });
     }, 300);
   </script>
 </body>

@@ -1,69 +1,96 @@
 import { describe, expect, it } from 'vitest';
-import { MessengerInboxGraphQLCollector, parseMessengerInboxGraphQLResponse } from '../src/facebook-messenger-inbox-graphql.js';
+import {
+  MessengerInboxGraphQLCollector,
+  MESSENGER_INBOX_OPERATIONS,
+  parseMessengerInboxGraphQLRequest,
+  parseMessengerInboxGraphQLResponse
+} from '../src/facebook-messenger-inbox-graphql.js';
 
-function response(edges: unknown[], pageInfo: Record<string, unknown> | undefined = undefined) {
+const terminal = { has_next_page: false, end_cursor: null };
+
+function response(edges: unknown[], pageInfo: Record<string, unknown> | null = terminal) {
   const connection: Record<string, unknown> = { edges };
   if (pageInfo) connection.page_info = pageInfo;
   return { data: { viewer: { marketplaceInboxBuyerMessageThreads: connection } } };
 }
+
 function edge(threadId: unknown, extra: Record<string, unknown> = {}) {
   return { node: { __typename: 'MessageThread', thread_key: { thread_fbid: threadId }, ...extra } };
 }
 
+function ids(start: number, count: number): string[] {
+  return Array.from({ length: count }, (_value, index) => String(start + index).padStart(8, '0'));
+}
+
+function edges(threadIds: string[]): unknown[] {
+  return threadIds.map((threadId) => edge(threadId));
+}
+
+function observe(collector: MessengerInboxGraphQLCollector, payload: unknown, cursor: string | null = null): void {
+  collector.observe(payload, { kind: 'page', cursor });
+}
+
+describe('Messenger inbox GraphQL request parsing', () => {
+  it('identifies the initial request and reads the continuation cursor from JSON or form data', () => {
+    expect(parseMessengerInboxGraphQLRequest({
+      body: JSON.stringify({ operationName: MESSENGER_INBOX_OPERATIONS[0], variables: { count: 12 } })
+    })).toEqual({ kind: 'page', cursor: null });
+
+    const body = new URLSearchParams({
+      fb_api_req_friendly_name: MESSENGER_INBOX_OPERATIONS[1],
+      variables: JSON.stringify({ cursor: 'cursor-one', count: 12 })
+    }).toString();
+    expect(parseMessengerInboxGraphQLRequest({ body })).toEqual({ kind: 'page', cursor: 'cursor-one' });
+  });
+
+  it('does not treat unrelated or cursor-ambiguous operations as pagination evidence', () => {
+    expect(parseMessengerInboxGraphQLRequest({
+      body: JSON.stringify({ operationName: 'UnrelatedMarketplaceQuery' })
+    })).toEqual({ kind: 'unrelated' });
+    expect(parseMessengerInboxGraphQLRequest({
+      body: JSON.stringify({ operationName: MESSENGER_INBOX_OPERATIONS[1], variables: { count: 12 } })
+    })).toEqual({ kind: 'unverified', knownInboxOperation: true });
+  });
+});
+
 describe('Messenger inbox GraphQL response parsing', () => {
-  it('parses valid connections, deduplicates ids, and accepts literal and base64 thread ids', () => {
+  it('parses valid terminal connections, deduplicates ids, and accepts literal and base64 ids', () => {
     const base64Id = Buffer.from('message_thread:abc').toString('base64');
-    expect(parseMessengerInboxGraphQLResponse(response([edge('abc'), edge('abc', { id: 'message_thread:abc' }), edge('abc', { id: base64Id })]))).toEqual({
-      kind: 'connection', threadIds: ['abc'], empty: false, malformed: false, incomplete: false
+    expect(parseMessengerInboxGraphQLResponse(response([
+      edge('abc'),
+      edge('abc', { id: 'message_thread:abc' }),
+      edge('abc', { id: base64Id })
+    ]))).toEqual({
+      kind: 'connection', threadIds: ['abc'], empty: false, malformed: false, incomplete: false,
+      pageInfo: { hasNextPage: false, endCursor: null }
     });
   });
 
-  it('recognizes a well-formed empty connection only when page_info explicitly says has_next_page:false', () => {
-    expect(parseMessengerInboxGraphQLResponse(response([], { has_next_page: false }))).toEqual({
-      kind: 'connection', threadIds: [], empty: true, malformed: false, incomplete: false
-    });
-  });
-
-  it('marks an empty current slice with has_next_page incomplete instead of empty', () => {
-    expect(parseMessengerInboxGraphQLResponse(response([], { has_next_page: true }))).toEqual({
-      kind: 'connection', threadIds: [], empty: false, malformed: false, incomplete: true
-    });
-  });
-
-  it('marks an empty current slice without page_info incomplete rather than fabricated empty', () => {
-    // Regression for the original `hasMorePages(connection) ? incomplete : empty` branch, which
-    // silently labeled an empty slice with absent `page_info` as a verified empty inbox. Without
-    // the explicit terminal-pagination signal we cannot prove the inbox was fully read, so the
-    // honest answer is "incomplete" rather than "empty".
+  it('recognizes an empty terminal connection only with explicit page_info', () => {
     expect(parseMessengerInboxGraphQLResponse(response([]))).toEqual({
-      kind: 'connection', threadIds: [], empty: false, malformed: false, incomplete: true
-    });
-    // A non-boolean `has_next_page` is not a terminal signal either.
-    expect(parseMessengerInboxGraphQLResponse(response([], { has_next_page: 'no' }))).toEqual({
-      kind: 'connection', threadIds: [], empty: false, malformed: false, incomplete: true
-    });
-    expect(parseMessengerInboxGraphQLResponse(response([], { has_next_page: null }))).toEqual({
-      kind: 'connection', threadIds: [], empty: false, malformed: false, incomplete: true
+      kind: 'connection', threadIds: [], empty: true, malformed: false, incomplete: false,
+      pageInfo: { hasNextPage: false, endCursor: null }
     });
   });
 
-  it('propagates the absent-page_info incomplete signal through the collector', () => {
-    const collector = new MessengerInboxGraphQLCollector();
-    collector.observe(response([]));
-    expect(collector.snapshot()).toEqual({
-      recognized: true,
-      malformed: false,
-      empty: false,
-      incomplete: true,
-      threadIds: []
+  it('marks empty and non-empty non-terminal pages as incomplete until the collector follows them', () => {
+    expect(parseMessengerInboxGraphQLResponse(response([], { has_next_page: true, end_cursor: 'cursor-one' }))).toEqual({
+      kind: 'connection', threadIds: [], empty: false, malformed: false, incomplete: true,
+      pageInfo: { hasNextPage: true, endCursor: 'cursor-one' }
     });
+    expect(parseMessengerInboxGraphQLResponse(response(edges(['12345678']), { has_next_page: true, end_cursor: 'cursor-one' })))
+      .toMatchObject({ kind: 'connection', threadIds: ['12345678'], incomplete: true });
   });
 
-  it('marks a non-empty connection with has_next_page incomplete even when edges were returned', () => {
-    // Regression for the previous `hasMorePages(connection) && threadIds.length === 0` guard,
-    // which made the flag unreachable whenever the current slice had any thread.
-    expect(parseMessengerInboxGraphQLResponse(response([edge('12345678')], { has_next_page: true }))).toEqual({
-      kind: 'connection', threadIds: ['12345678'], empty: false, malformed: false, incomplete: true
+  it('treats absent or malformed page_info as unverified', () => {
+    expect(parseMessengerInboxGraphQLResponse(response([], null))).toMatchObject({
+      kind: 'connection', empty: false, malformed: false, incomplete: true
+    });
+    expect(parseMessengerInboxGraphQLResponse(response([], { has_next_page: 'no' }))).toMatchObject({
+      kind: 'connection', empty: false, malformed: true, incomplete: true
+    });
+    expect(parseMessengerInboxGraphQLResponse(response([], { has_next_page: true }))).toMatchObject({
+      kind: 'connection', empty: false, malformed: true, incomplete: true
     });
   });
 
@@ -76,7 +103,9 @@ describe('Messenger inbox GraphQL response parsing', () => {
       edge('valid', { id: 'message_thread:valid:extra' }),
       edge(123)
     ]) {
-      expect(parseMessengerInboxGraphQLResponse(response([item]))).toMatchObject({ kind: 'connection', threadIds: [], malformed: true, incomplete: false });
+      expect(parseMessengerInboxGraphQLResponse(response([item]))).toMatchObject({
+        kind: 'connection', threadIds: [], malformed: true, incomplete: false
+      });
     }
   });
 
@@ -84,55 +113,104 @@ describe('Messenger inbox GraphQL response parsing', () => {
     expect(parseMessengerInboxGraphQLResponse(null)).toEqual({ kind: 'unrelated' });
     expect(parseMessengerInboxGraphQLResponse({ data: { viewer: {} } })).toEqual({ kind: 'unrelated' });
     expect(parseMessengerInboxGraphQLResponse({ data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: null } } } }))
-      .toMatchObject({ kind: 'connection', malformed: true });
-    expect(parseMessengerInboxGraphQLResponse(response([null, { node: null }]))).toMatchObject({ kind: 'connection', malformed: true });
+      .toMatchObject({ kind: 'connection', malformed: true, incomplete: true });
+    expect(parseMessengerInboxGraphQLResponse(response([null, { node: null }]))).toMatchObject({
+      kind: 'connection', malformed: true
+    });
   });
+});
 
-  it('bounds ids and tolerates hostile inputs in observe', () => {
-    const collector = new MessengerInboxGraphQLCollector({ maxThreads: 1 });
-    expect(() => {
-      collector.observe(response([edge('first'), edge('second')]));
-      collector.observe(Object.create(null));
-      collector.observe(new Proxy({}, { get: () => { throw new Error('hostile'); } }));
-    }).not.toThrow();
-    expect(collector.snapshot()).toEqual({ recognized: true, malformed: true, empty: false, incomplete: false, threadIds: ['first'] });
-  });
+describe('Messenger inbox GraphQL pagination coverage', () => {
+  it('proves coverage for two pages containing the observed 12 plus 12 thread shape', () => {
+    const firstPageIds = ids(1, 12);
+    const secondPageIds = ids(13, 12);
+    const collector = new MessengerInboxGraphQLCollector({ maxThreads: 40 });
 
-  it('does not report empty when an observed response is paginated but the current slice is empty', () => {
-    const collector = new MessengerInboxGraphQLCollector();
-    collector.observe(response([], { has_next_page: true }));
+    observe(collector, response(edges(firstPageIds), { has_next_page: true, end_cursor: 'cursor-one' }), null);
+    observe(collector, response(edges(secondPageIds), { has_next_page: false, end_cursor: 'cursor-two' }), 'cursor-one');
+
     expect(collector.snapshot()).toEqual({
       recognized: true,
       malformed: false,
       empty: false,
-      incomplete: true,
-      threadIds: []
+      incomplete: false,
+      threadIds: [...firstPageIds, ...secondPageIds]
     });
   });
 
-  it('does not let a later paginated empty response overwrite prior thread ids', () => {
-    const collector = new MessengerInboxGraphQLCollector();
-    collector.observe(response([edge('12345678')]));
-    collector.observe(response([], { has_next_page: true }));
+  it('orders pages by their request cursors when terminal response arrives first', () => {
+    const firstPageIds = ids(1, 12);
+    const secondPageIds = ids(13, 12);
+    const collector = new MessengerInboxGraphQLCollector({ maxThreads: 40 });
+
+    observe(collector, response(edges(secondPageIds), { has_next_page: false, end_cursor: 'cursor-two' }), 'cursor-one');
+    expect(collector.snapshot().incomplete).toBe(true);
+    observe(collector, response(edges(firstPageIds), { has_next_page: true, end_cursor: 'cursor-one' }), null);
+
     expect(collector.snapshot()).toMatchObject({
-      recognized: true,
+      malformed: false,
       empty: false,
-      incomplete: true,
-      threadIds: ['12345678']
+      incomplete: false,
+      threadIds: [...firstPageIds, ...secondPageIds]
     });
   });
 
-  it('reports incomplete for a non-empty paginated connection even without a follow-up empty slice', () => {
-    // Regression for the previous `hasMorePages && threadIds.length === 0` guard, which meant a
-    // single observed paginated-but-non-empty connection was reported as complete.
+  it('rejects a terminal page when the initial page is missing', () => {
     const collector = new MessengerInboxGraphQLCollector();
-    collector.observe(response([edge('12345678')], { has_next_page: true }));
+    observe(collector, response(edges(['12345678'])), 'cursor-one');
     expect(collector.snapshot()).toEqual({
-      recognized: true,
-      malformed: false,
-      empty: false,
-      incomplete: true,
-      threadIds: ['12345678']
+      recognized: true, malformed: false, empty: false, incomplete: true, threadIds: []
     });
+  });
+
+  it('rejects a chain with a missing middle page even when a later terminal page arrived', () => {
+    const collector = new MessengerInboxGraphQLCollector();
+    observe(collector, response(edges(['12345678']), { has_next_page: true, end_cursor: 'cursor-one' }), null);
+    observe(collector, response(edges(['12345680'])), 'cursor-two');
+    expect(collector.snapshot()).toEqual({
+      recognized: true, malformed: false, empty: false, incomplete: true, threadIds: ['12345678']
+    });
+  });
+
+  it('keeps a missing terminal page incomplete and does not allow an unknown request cursor to complete', () => {
+    const missingTerminal = new MessengerInboxGraphQLCollector();
+    observe(missingTerminal, response(edges(['12345678']), { has_next_page: true, end_cursor: 'cursor-one' }), null);
+    expect(missingTerminal.snapshot().incomplete).toBe(true);
+
+    const unknownRequest = new MessengerInboxGraphQLCollector();
+    unknownRequest.observe(response(edges(['12345678'])));
+    expect(unknownRequest.snapshot()).toMatchObject({ incomplete: true, threadIds: [] });
+  });
+
+  it('fails closed when a verified inbox request has no recognizable connection response', () => {
+    const collector = new MessengerInboxGraphQLCollector();
+    observe(collector, { errors: [{ message: 'unavailable' }] });
+    expect(collector.snapshot()).toEqual({
+      recognized: true, malformed: false, empty: false, incomplete: true, threadIds: []
+    });
+  });
+
+  it('fails closed when a known continuation request has an unusable cursor and no connection response', () => {
+    const collector = new MessengerInboxGraphQLCollector();
+    const request = parseMessengerInboxGraphQLRequest({
+      body: JSON.stringify({ operationName: MESSENGER_INBOX_OPERATIONS[1], variables: { count: 12 } })
+    });
+    collector.observe({ errors: [{ message: 'unavailable' }] }, request);
+    expect(collector.snapshot()).toEqual({
+      recognized: true, malformed: false, empty: false, incomplete: true, threadIds: []
+    });
+  });
+
+  it('deduplicates identical retries and fails closed on conflicting responses for one cursor', () => {
+    const page = response(edges(['12345678']));
+    const duplicate = new MessengerInboxGraphQLCollector();
+    observe(duplicate, page, null);
+    observe(duplicate, page, null);
+    expect(duplicate.snapshot()).toMatchObject({ malformed: false, incomplete: false, threadIds: ['12345678'] });
+
+    const conflict = new MessengerInboxGraphQLCollector();
+    observe(conflict, page, null);
+    observe(conflict, response(edges(['12345679'])), null);
+    expect(conflict.snapshot()).toMatchObject({ malformed: true, incomplete: true });
   });
 });

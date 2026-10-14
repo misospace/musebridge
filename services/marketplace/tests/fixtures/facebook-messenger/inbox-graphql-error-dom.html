@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Synthetic Messenger inbox with GraphQL error</title></head>
+<body>
+  <main role="main">
+    <header><span aria-label="Your account">Synthetic account</span></header>
+    <section aria-label="Conversations">
+      <a href="/messages/t/1684432532/">Synthetic Seller: Is the desk available?</a>
+    </section>
+  </main>
+  <script>
+    fetch('/api/graphql/inbox', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        operationName: 'CometMarketplaceInboxBuyerTabViewContainerQuery',
+        variables: { count: 12 }
+      })
+    });
+  </script>
+</body>
+</html>

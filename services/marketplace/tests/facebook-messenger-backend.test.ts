@@ -20,7 +20,8 @@ if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
 const fixtureDir = new URL('./fixtures/facebook-messenger/', import.meta.url);
 const fixtures = new Map([
   'inbox-normal.html', 'inbox-empty.html', 'inbox-login.html', 'inbox-checkpoint.html', 'inbox-layout-changed.html',
-  'inbox-buttons-graphql.html', 'inbox-buttons-graphql-delayed.html', 'inbox-buttons-graphql-stalled.html',
+  'inbox-buttons-graphql.html', 'inbox-buttons-graphql-delayed.html', 'inbox-buttons-graphql-paginated.html', 'inbox-buttons-graphql-stalled.html',
+  'inbox-graphql-error-dom.html',
   'thread-normal.html', 'thread-layout-changed.html', 'thread-articles-unattributed.html', 'thread-empty.html', 'thread-token-bounds.html',
   'thread-composer.html', 'thread-no-composer.html', 'thread-two-composers.html'
 ].map((name) => [name, readFileSync(new URL(name, fixtureDir), 'utf8')]));
@@ -31,7 +32,10 @@ let inboxFixture = 'inbox-normal.html';
 let threadFixture = 'thread-normal.html';
 let hangInbox = false;
 let hangThread = false;
-let graphqlPayload: unknown = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [] } } } };
+let graphqlPayload: unknown = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [], page_info: { has_next_page: false, end_cursor: null } } } } };
+let graphqlContentType = 'application/json; charset=utf-8';
+let graphqlPayloads: unknown[] | undefined;
+let graphqlResponseIndex = 0;
 const stalledResponses = new Set<ServerResponse<IncomingMessage>>();
 let inboxRedirectTarget: string | undefined;
 let threadRedirectTarget: string | undefined;
@@ -44,8 +48,9 @@ beforeAll(async () => {
     const pathname = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
     requests.push(request.url ?? pathname);
     if (pathname === '/api/graphql/inbox') {
-      const body = JSON.stringify(graphqlPayload);
-      response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+      const responsePayload = graphqlPayloads?.[graphqlResponseIndex++] ?? graphqlPayload;
+      const body = JSON.stringify(responsePayload);
+      response.writeHead(200, { 'content-type': graphqlContentType, 'content-length': Buffer.byteLength(body) });
       response.end(body);
       return;
     }
@@ -118,7 +123,10 @@ afterEach(async () => {
   hangThread = false;
   inboxRedirectTarget = undefined;
   threadRedirectTarget = undefined;
-  graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [] } } } };
+  graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [], page_info: { has_next_page: false, end_cursor: null } } } } };
+  graphqlContentType = 'application/json; charset=utf-8';
+  graphqlPayloads = undefined;
+  graphqlResponseIndex = 0;
 });
 
 function configure(nextInbox = 'inbox-normal.html', nextThread = 'thread-normal.html', nextHangInbox = false, nextHangThread = false): void {
@@ -126,6 +134,8 @@ function configure(nextInbox = 'inbox-normal.html', nextThread = 'thread-normal.
   threadFixture = nextThread;
   hangInbox = nextHangInbox;
   hangThread = nextHangThread;
+  graphqlPayloads = undefined;
+  graphqlResponseIndex = 0;
   requests.length = 0;
 }
 
@@ -248,7 +258,7 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
       { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654321' }, id: 'message_thread:87654321', snippet: 'OPAQUE-SNIPPET-SENTINEL' } },
       { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654321' }, id: 'message_thread:87654321' } },
       { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654322' } } }
-    ] } } } };
+    ], page_info: { has_next_page: false, end_cursor: null } } } } };
     const backend = createBackend();
     const threads = await backend.listThreads(listInput(), new AbortController().signal);
     expect(threads).toEqual([{ thread_id: '87654321' }, { thread_id: '87654322' }]);
@@ -262,11 +272,55 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
     expect(requests).toContain('/api/graphql/other');
   }, 15_000);
 
+  it('does not fall back to DOM links when a verified inbox response has no connection', async () => {
+    configure('inbox-graphql-error-dom.html');
+    graphqlPayload = { errors: [{ message: 'synthetic GraphQL failure' }] };
+    const backend = createBackend();
+    await expectProviderError(backend.listThreads(listInput(), new AbortController().signal), 'UPSTREAM_ERROR');
+  }, 15_000);
+
+  it('does not fall back to DOM links when a verified inbox response is not JSON', async () => {
+    configure('inbox-graphql-error-dom.html');
+    graphqlContentType = 'text/plain; charset=utf-8';
+    const backend = createBackend();
+    await expectProviderError(backend.listThreads(listInput(), new AbortController().signal), 'UPSTREAM_ERROR');
+  }, 15_000);
+
+  it('lists bounded IDs from a fully observed two-page cursor chain', async () => {
+    configure('inbox-buttons-graphql-paginated.html');
+    const firstPageIds = Array.from({ length: 12 }, (_value, index) => String(10000001 + index));
+    const secondPageIds = Array.from({ length: 12 }, (_value, index) => String(10000013 + index));
+    const payload = (threadIds: string[], hasNextPage: boolean, endCursor: string) => ({
+      data: { viewer: { marketplaceInboxBuyerMessageThreads: {
+        edges: threadIds.map((threadId) => ({ node: {
+          __typename: 'MessageThread', thread_key: { thread_fbid: threadId }, id: `message_thread:${threadId}`
+        } })),
+        page_info: { has_next_page: hasNextPage, end_cursor: endCursor }
+      } } }
+    });
+    const firstPage = payload(firstPageIds, true, 'cursor-one');
+    const secondPage = payload(secondPageIds, false, 'cursor-two');
+    // Session verification performs its own inbox navigation before the listing navigation.
+    graphqlPayloads = [firstPage, secondPage, firstPage, secondPage];
+    const backend = createBackend({ settleTimeoutMs: 500 });
+    let threads: Awaited<ReturnType<typeof backend.listThreads>> = [];
+    let listingError: unknown;
+    try {
+      threads = await backend.listThreads(listInput({ limit: 20 }), new AbortController().signal);
+    } catch (error) {
+      listingError = error;
+    }
+
+    expect(graphqlResponseIndex).toBe(4);
+    expect(listingError).toBeUndefined();
+    expect(threads.map(({ thread_id }) => thread_id)).toEqual([...firstPageIds, ...secondPageIds.slice(0, 8)]);
+  }, 15_000);
+
   it('captures a GraphQL response that lands after the first DOM read but within the settle budget', async () => {
     configure('inbox-buttons-graphql-delayed.html');
     graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [
       { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '55550000' }, id: 'message_thread:55550000' } }
-    ] } } } };
+    ], page_info: { has_next_page: false, end_cursor: null } } } } };
     const backend = createBackend({ settleTimeoutMs: 1_500 });
     const threads = await backend.listThreads(listInput(), new AbortController().signal);
     expect(threads).toEqual([{ thread_id: '55550000' }]);
@@ -283,7 +337,7 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
     await expectProviderError(backend.listThreads(listInput(), new AbortController().signal), 'UPSTREAM_ERROR');
 
     configure('inbox-buttons-graphql.html');
-    graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [{ node: { __typename: 'MessageThread', thread_key: { thread_fbid: 'bad id' } } }] } } } };
+    graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [{ node: { __typename: 'MessageThread', thread_key: { thread_fbid: 'bad id' } } }], page_info: { has_next_page: false, end_cursor: null } } } } };
     await expectProviderError(backend.listThreads(listInput(), new AbortController().signal), 'UPSTREAM_ERROR');
   }, 30_000);
 
@@ -297,7 +351,20 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
     await expectProviderError(
       backend.listThreads(listInput(), new AbortController().signal),
       'UPSTREAM_ERROR',
-      'The Facebook Marketplace inbox page only returned the first page of threads; pagination is not supported.'
+      'The Facebook Marketplace inbox pagination could not be verified; a complete thread list cannot be returned.'
+    );
+  }, 15_000);
+
+  it('fails closed for non-empty thread ids when terminal pagination is unverified', async () => {
+    configure('inbox-buttons-graphql.html');
+    const backend = createBackend({ settleTimeoutMs: 30 });
+    graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [
+      { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654321' }, id: 'message_thread:87654321' } }
+    ] } } } };
+    await expectProviderError(
+      backend.listThreads(listInput(), new AbortController().signal),
+      'UPSTREAM_ERROR',
+      'The Facebook Marketplace inbox pagination could not be verified; a complete thread list cannot be returned.'
     );
   }, 15_000);
 
@@ -309,11 +376,14 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
     // (3s by default) plus the navigation/settle budgets, not 10 × 2s serialized.
     const backend = createBackend({ settleTimeoutMs: 100 });
     const start = Date.now();
-    const threads = await backend.listThreads(listInput(), new AbortController().signal);
+    await expectProviderError(
+      backend.listThreads(listInput(), new AbortController().signal),
+      'UPSTREAM_ERROR',
+      'The Facebook Marketplace inbox pagination could not be verified; a complete thread list cannot be returned.'
+    );
     const elapsed = Date.now() - start;
     // Allow generous headroom for browser startup, navigation, and fixture load but well under
     // the old worst case of ~20s for ten serialized body reads.
-    expect(threads).toEqual([]);
     expect(elapsed).toBeLessThan(15_000);
     // The dispatched reads should still be in flight (or just settled) when the operation
     // returns; the listener cleanup must not hang waiting for the never-ending bodies.
