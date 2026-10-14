@@ -10,8 +10,8 @@
   <script>
     // Trigger many matching same-origin GraphQL inbox requests whose bodies never complete.
     // The dispatcher must bound the total flush deadline so the browser session does not stall
-    // behind serialized per-body reads. The DOM is intentionally a recognized empty inbox so the
-    // test can assert `[]` once the flush deadline fires without any verified GraphQL data.
+    // behind serialized per-body reads. The DOM looks empty, but an observed inbox query with an
+    // unreadable response must prevent the tool from claiming that the inbox is actually empty.
     for (let i = 0; i < 10; i += 1) {
       fetch('/api/graphql/inbox-stall', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ operationName: 'CometMarketplaceInboxBuyerTabViewContainerQuery', index: i }) });
     }

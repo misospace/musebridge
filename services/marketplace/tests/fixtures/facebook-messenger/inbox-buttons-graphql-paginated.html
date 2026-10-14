@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Synthetic paginated button inbox</title></head>
+<body>
+  <main role="main">
+    <header><span aria-label="Your account">Synthetic account</span></header>
+    <section aria-label="Conversations"><button type="button">Conversation button</button></section>
+  </main>
+  <script>
+    // Model the verified two-page flow with cursor-bearing requests; the synthetic server returns
+    // 12 MessageThread edges per response, first followed by a terminal second page.
+    const firstPage = fetch('/api/graphql/inbox', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ operationName: 'CometMarketplaceInboxBuyerTabViewContainerQuery', variables: { count: 12 } })
+    });
+    firstPage.then(() => fetch('/api/graphql/inbox', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ operationName: 'CometMarketplaceInboxBuyerTabViewPaginationQuery', variables: { cursor: 'cursor-one', count: 12 } })
+    }));
+  </script>
+</body>
+</html>

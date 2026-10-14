@@ -54,8 +54,9 @@ export function interpretMessengerInboxPage(input: {
   if (!atInbox) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox page was not reached at the expected address.' };
   const graphql = input.graphql;
   if (graphql?.malformed) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox threads could not be parsed.' };
-  // A valid-looking first slice is still incomplete without an explicit terminal pagination
-  // signal. Never return its ids as a complete inbox listing or fall through to DOM anchors.
+  // Thread ids are returned only after the collector follows the observed cursor chain from the
+  // initial request through an explicit terminal page. Missing, untracked, or unlinked pages stay
+  // a typed failure rather than a partial success.
   if (graphql?.incomplete) {
     return {
       kind: 'error',

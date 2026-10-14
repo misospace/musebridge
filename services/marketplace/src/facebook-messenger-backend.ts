@@ -33,7 +33,11 @@ import {
 } from './facebook-messenger-url.js';
 import { assertFacebookOrigin, FacebookSessionProbe, type FacebookProbeCode } from './facebook.js';
 import { FacebookCredentialLogin } from './facebook-login.js';
-import { MessengerInboxGraphQLCollector, MESSENGER_INBOX_OPERATIONS, type MessengerInboxGraphQLObservation } from './facebook-messenger-inbox-graphql.js';
+import {
+  MessengerInboxGraphQLCollector,
+  parseMessengerInboxGraphQLRequest,
+  type MessengerInboxGraphQLObservation
+} from './facebook-messenger-inbox-graphql.js';
 
 export interface FacebookMessengerBackendOptions {
   browser: BrowserSessionManager;
@@ -131,18 +135,35 @@ export class FacebookMessengerBackend implements ConversationBackend {
         const baseOrigin = new URL(this.probe.baseUrl).origin;
         const handler = (response: import('playwright').Response): void => {
           const work = (async () => {
+            let potentiallyRelevant = false;
             try {
               const url = new URL(response.url());
               if (url.origin !== baseOrigin || !url.pathname.startsWith('/api/graphql/')) return;
-              if (!isJsonContentType(response.headers()['content-type'])) return;
-              // Reject a response whose own request names a different GraphQL operation. When the
-              // request body is not observable the schema check below still has to agree.
-              if (matchInboxOperation(response.request()) === 'other') return;
-              if (dispatchedReads >= GRAPHQL_RESPONSE_READ_LIMIT) return;
+              const request = response.request();
+              let postData: string | null = null;
+              try {
+                postData = request.postData();
+              } catch {
+                // The response schema can still identify an inbox connection, but without its
+                // request cursor it cannot contribute to a verified pagination chain.
+              }
+              const requestObservation = parseMessengerInboxGraphQLRequest({ body: postData, url: request.url() });
+              if (requestObservation.kind === 'unrelated') return;
+              potentiallyRelevant = true;
+              if (!isJsonContentType(response.headers()['content-type'])) {
+                collector.markUnobservedResponse();
+                return;
+              }
+              if (dispatchedReads >= GRAPHQL_RESPONSE_READ_LIMIT) {
+                collector.markUnobservedResponse();
+                return;
+              }
               dispatchedReads += 1;
               const payload = await readResponseBody(response);
-              if (payload !== undefined) collector.observe(payload);
+              if (payload !== undefined) collector.observe(payload, requestObservation);
+              else collector.markUnobservedResponse();
             } catch {
+              if (potentiallyRelevant) collector.markUnobservedResponse();
               return;
             }
           })();
@@ -177,6 +198,7 @@ export class FacebookMessengerBackend implements ConversationBackend {
         } finally {
           page.off('response', handler);
           await waitForReadFlush(pendingReads, this.graphqlFlushTimeoutMs);
+          if (pendingReads.size > 0) collector.markUnobservedResponse();
           graphql = collector.snapshot();
         }
       });
@@ -508,30 +530,6 @@ function isJsonContentType(value: string | undefined): boolean {
   if (typeof value !== 'string') return false;
   const mediaType = value.split(';', 1)[0]?.trim().toLowerCase();
   return mediaType === 'application/json' || mediaType === 'text/json' || mediaType === 'application/graphql+json';
-}
-
-/**
- * Classifies the observed request against the verified inbox operations. `unavailable` means the
- * request body could not be read (e.g. a GET), in which case the response body schema remains the
- * only guard; `other` means a body was read and named a different operation.
- *
- * The match is a substring search against the raw request body for the verified operation names.
- * That is intentionally lenient: Facebook sometimes wraps the operation name inside form-encoded
- * `variables=` or `fb_api_req_friendly_name=` payloads where strict JSON parsing would miss it.
- * The same origin and verified operation-name list bound the blast radius, but a same-origin
- * request whose body happened to contain a verified name as free text would still match. If
- * field-uniqueness proves fragile in practice, a follow-up should switch to a parsed-JSON check
- * keyed on `variables` or `fb_api_req_friendly_name`.
- */
-function matchInboxOperation(request: import('playwright').Request): 'inbox' | 'other' | 'unavailable' {
-  let postData: string | null;
-  try {
-    postData = request.postData();
-  } catch {
-    return 'unavailable';
-  }
-  if (typeof postData !== 'string' || postData.length === 0) return 'unavailable';
-  return MESSENGER_INBOX_OPERATIONS.some((operation) => postData.includes(operation)) ? 'inbox' : 'other';
 }
 
 function waitForRequestBudget<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | undefined> {
