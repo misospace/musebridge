@@ -31,6 +31,22 @@ export interface ExtractedMarketplacePage {
   url: string;
   signals: ExtractedMarketplaceSignals;
   cards: ExtractedListingCard[];
+  /** Structural evidence only; never provider text, attributes, or identifiers. */
+  diagnostics?: MarketplaceExtractionDiagnostics;
+}
+
+export interface MarketplaceExtractionDiagnostics {
+  documentReadyComplete: boolean;
+  hasMainLandmark: boolean;
+  itemAnchorCount: number;
+  pageTextChars: number;
+  pageTextTruncated: boolean;
+  unfilteredTextTruncated: boolean;
+  unfilteredHasNoResultsNotice: boolean;
+  visibleBodyHasNoResults: boolean;
+  visibleMainHasNoResults: boolean;
+  englishLocale: boolean;
+  radius500Matched: boolean;
 }
 
 export interface ExtractMarketplaceOptions {
@@ -174,8 +190,25 @@ export function extractMarketplacePage(options: ExtractMarketplaceOptions): Extr
   });
 
   const cardRootSet = new Set(cardRoots);
+  const visibility = new WeakMap<Element, boolean>();
+  const participatesInLayout = (element: Element): boolean => {
+    const cached = visibility.get(element);
+    if (cached !== undefined) return cached;
+    const style = getComputedStyle(element);
+    const rendered = !element.matches('script, style, template, noscript, [hidden]')
+      && style.display !== 'none'
+      && (!element.parentElement || participatesInLayout(element.parentElement));
+    visibility.set(element, rendered);
+    return rendered;
+  };
+  const isRendered = (element: Element): boolean => {
+    const style = getComputedStyle(element);
+    // Visibility is inherited, but a child may override a hidden ancestor.
+    return participatesInLayout(element) && style.visibility !== 'hidden' && style.visibility !== 'collapse';
+  };
   // If the results grid is itself main/body/html, only that boundary can contain each item link, so card prose remains in signal text.
   const pageTextParts: string[] = [];
+  const unfilteredTextParts: string[] = [];
   const textWalker = document.createTreeWalker(document.body ?? document.documentElement, 4);
   let textNode: Node | null = textWalker.nextNode();
   while (textNode) {
@@ -188,10 +221,13 @@ export function extractMarketplacePage(options: ExtractMarketplaceOptions): Extr
       }
       ancestor = ancestor.parentElement;
     }
-    if (!insideCard && textNode.textContent) pageTextParts.push(textNode.textContent);
+    if (!insideCard && textNode.textContent) unfilteredTextParts.push(textNode.textContent);
+    if (!insideCard && textNode.parentElement && isRendered(textNode.parentElement) && textNode.textContent) pageTextParts.push(textNode.textContent);
     textNode = textWalker.nextNode();
   }
-  const bodyText = pageTextParts.join(' ').replace(/\s+/g, ' ').slice(0, 20000);
+  const unboundedBodyText = pageTextParts.join(' ').replace(/\s+/g, ' ');
+  const bodyText = unboundedBodyText.slice(0, 20000);
+  const unfilteredBodyText = unfilteredTextParts.join(' ').replace(/\s+/g, ' ');
   // Auth/interstitial selectors intentionally mirror the session probe in src/facebook.ts; duplication is deliberate because an in-page function cannot reference module scope.
   const signals: ExtractedMarketplaceSignals = {
     hasLoginForm: document.querySelector('input[type="password"], form[action*="/login"], input[name="pass"]') !== null,
@@ -204,7 +240,24 @@ export function extractMarketplacePage(options: ExtractMarketplaceOptions): Extr
     hasNoResultsNotice: /no results|no listings|no items found|nothing found|try a different search|no marketplace listings/i.test(bodyText)
   };
 
-  return { url: location.href.slice(0, 2048), signals, cards };
+  const noResultsPattern = /no results|no listings|no items found|nothing found|try a different search|no marketplace listings/i;
+  const visibleBody = document.body?.innerText ?? '';
+  const main = document.querySelector('main, [role="main"]');
+  const visibleMain = main ? (main as HTMLElement).innerText ?? '' : '';
+  const diagnostics: MarketplaceExtractionDiagnostics = {
+    documentReadyComplete: document.readyState === 'complete',
+    hasMainLandmark: main !== null,
+    itemAnchorCount: Array.from(anchors).filter((anchor) => itemIdFromHref((anchor as HTMLAnchorElement).href) !== null).length,
+    pageTextChars: bodyText.length,
+    pageTextTruncated: unboundedBodyText.length > bodyText.length,
+    unfilteredTextTruncated: unfilteredBodyText.length > 20000,
+    unfilteredHasNoResultsNotice: noResultsPattern.test(unfilteredBodyText.slice(0, 20000)),
+    visibleBodyHasNoResults: noResultsPattern.test(visibleBody),
+    visibleMainHasNoResults: noResultsPattern.test(visibleMain),
+    englishLocale: /^en(?:-|$)/i.test(document.documentElement.lang),
+    radius500Matched: /within 500 kilometers/i.test(visibleBody)
+  };
+  return { url: location.href.slice(0, 2048), signals, cards, diagnostics };
 }
 
 export const MARKETPLACE_ITEM_EXTRACT_LIMITS = {

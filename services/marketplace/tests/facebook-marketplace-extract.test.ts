@@ -136,6 +136,56 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace page extraction', () =>
     }
   });
 
+  it('ignores script, style and hidden copy when classifying an unknown page', async () => {
+    await page.setContent(`<main>Loading</main><script type="application/json">{"copy":"No listings found; security check; captcha; try again later"}</script><style>/* no listings */</style><div hidden>No results</div><div style="display:none">No listings</div><div style="visibility:hidden">No items found</div>`);
+    const extracted = await page.evaluate(extractMarketplacePage, { itemPath: MARKETPLACE_ITEM_PATH, limits: MARKETPLACE_EXTRACT_LIMITS });
+    expect(classifyMarketplacePage(extracted)).toBe('unknown');
+    expect(extracted.signals).toEqual({hasLoginForm: false, hasCheckpoint: false, hasCaptcha: false, hasRateLimitNotice: false, hasNoResultsNotice: false});
+  });
+
+  it('keeps visible auth copy when a child overrides a hidden ancestor', async () => {
+    await page.setContent('<main><div style="visibility:hidden"><p style="visibility:visible">Security check: confirm your identity</p></div><p>No listings found</p></main>');
+    const extracted = await page.evaluate(extractMarketplacePage, { itemPath: MARKETPLACE_ITEM_PATH, limits: MARKETPLACE_EXTRACT_LIMITS });
+    expect(extracted.signals).toMatchObject({hasCheckpoint: true, hasNoResultsNotice: true});
+    expect(classifyMarketplacePage(extracted)).toBe('checkpoint');
+  });
+
+  it('preserves a visible empty notice after a large script payload', async () => {
+    await page.setContent('<script type="application/json">' + 'x'.repeat(25_000) + '</script><main>No listings found within 500 kilometers.</main>');
+    const extracted = await page.evaluate(extractMarketplacePage, { itemPath: MARKETPLACE_ITEM_PATH, limits: MARKETPLACE_EXTRACT_LIMITS });
+    expect(classifyMarketplacePage(extracted)).toBe('no_results');
+    expect(extracted.diagnostics).toMatchObject({pageTextTruncated: false, visibleMainHasNoResults: true});
+  });
+
+  it('recognizes the exact Calgary empty notice with structural diagnostics', async () => {
+    await page.setContent(readFileSync(new URL('./fixtures/facebook-marketplace/no-listings-calgary.html', import.meta.url), 'utf8'));
+    const extracted = await page.evaluate(extractMarketplacePage, { itemPath: MARKETPLACE_ITEM_PATH, limits: MARKETPLACE_EXTRACT_LIMITS });
+    expect(classifyMarketplacePage(extracted)).toBe('no_results');
+    expect(extracted.diagnostics).toMatchObject({ itemAnchorCount: 0, visibleMainHasNoResults: true, visibleBodyHasNoResults: true, radius500Matched: true, englishLocale: true, pageTextTruncated: false });
+    expect(interpretMarketplacePage({ page: extracted, baseUrl: 'https://www.facebook.com', market: {slug: 'calgary', label: 'Calgary, AB', currency: 'CAD'}, limit: 5 }).kind).toBe('empty');
+  });
+
+  it('preserves nested heading-free cards, adjacent boundaries and duplicate links', async () => {
+    await page.setContent(readFileSync(new URL('./fixtures/facebook-marketplace/browse-nested.html', import.meta.url), 'utf8'));
+    const extracted = await page.evaluate(extractMarketplacePage, { itemPath: MARKETPLACE_ITEM_PATH, limits: MARKETPLACE_EXTRACT_LIMITS });
+    expect(extracted.diagnostics?.itemAnchorCount).toBe(4);
+    expect(extracted.cards).toHaveLength(2);
+    expect(extracted.cards.every(card => card.headingText === null)).toBe(true);
+    expect(extracted.cards[0]?.text).not.toContain('Synthetic monitor');
+    expect(extracted.cards[1]?.text).not.toContain('Synthetic desktop');
+    const outcome = interpretMarketplacePage({ page: extracted, baseUrl: 'https://www.facebook.com', market: {slug: 'calgary', label: 'Calgary, AB', currency: 'CAD'}, limit: 5 });
+    expect(outcome.kind === 'listings' ? outcome.listings.map(({title, price}) => ({title, price})) : outcome).toEqual([
+      {title: 'Synthetic desktop', price: 125}, {title: 'Synthetic monitor', price: 80}
+    ]);
+  });
+
+  it.each(['login', 'captcha', 'checkpoint'] as const)('never treats an empty notice beside %s as empty success', async (blocked) => {
+    const markers = { login: '<input type="password">', captcha: '<div id="captcha"></div>', checkpoint: '<form action="/checkpoint/"></form>' };
+    await page.setContent('<main><p>No listings found within 500 kilometers.</p>' + markers[blocked] + '</main>');
+    const extracted = await page.evaluate(extractMarketplacePage, { itemPath: MARKETPLACE_ITEM_PATH, limits: MARKETPLACE_EXTRACT_LIMITS });
+    expect(classifyMarketplacePage(extracted)).toBe(blocked);
+  });
+
   it('keeps card trigger text out of page-level interstitial signals', async () => {
     await page.setContent(`<!doctype html><html><body><main><div class="grid"><div class="card"><a href="/marketplace/item/123456789012345/"><h3>Bypass captcha service</h3></a><div>$25</div><div>Try again later - no results</div><div>Verify you are a human; I'm not a robot</div><div>Security check, confirm your identity</div></div><div class="card"><a href="/marketplace/item/123456789012346/"><h3>Ordinary listing</h3></a><div>$30</div></div></div></main></body></html>`, { waitUntil: 'domcontentloaded' });
     const extracted = await page.evaluate(extractMarketplacePage, {

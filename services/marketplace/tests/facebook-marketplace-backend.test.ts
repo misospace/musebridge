@@ -34,7 +34,7 @@ afterEach(async () => {
   synthetic.requests.length = 0;
 });
 
-function createBackend(options: { navigationTimeoutMs?: number; settleTimeoutMs?: number } = {}): {
+function createBackend(options: { navigationTimeoutMs?: number; settleTimeoutMs?: number; logger?: Pick<Console, 'error'> } = {}): {
   backend: FacebookMarketplaceBackend;
   browser: BrowserSessionManager;
 } {
@@ -56,7 +56,7 @@ function createBackend(options: { navigationTimeoutMs?: number; settleTimeoutMs?
       probe,
       navigationTimeoutMs: options.navigationTimeoutMs ?? 5_000,
       settleTimeoutMs: options.settleTimeoutMs ?? 50,
-      logger: { error: () => undefined }
+      logger: options.logger ?? { error: () => undefined }
     })
   };
 }
@@ -133,6 +133,27 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace backend', () => {
     synthetic.configure('results-normal.html', 'no-results.html');
     const { backend } = createBackend();
     await expect(backend.search(searchInput(), new AbortController().signal)).resolves.toEqual([]);
+  });
+
+  it('waits for the exact empty notice after DOMContentLoaded without logging content', async () => {
+    synthetic.configure('results-normal.html', 'no-listings-delayed.html');
+    const logger = { error: vi.fn() };
+    const { backend } = createBackend({ settleTimeoutMs: 1_000, logger });
+    await expect(backend.search(searchInput({ query: 'sensitive-query' }), new AbortController().signal)).resolves.toEqual([]);
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith('Facebook Marketplace search diagnostics:', expect.objectContaining({firstKind: 'unknown', finalKind: 'no_results', samples: expect.any(Number), hasNoResultsNotice: true, itemAnchorCount: 0, sameOrigin: true, samePath: true, queryMatches: true, settleExpired: false}));
+    const logged = JSON.stringify(logger.error.mock.calls);
+    expect(logged).not.toContain('sensitive-query');
+    expect(logged).not.toContain('Jetson');
+    expect(logged).not.toContain('http');
+  });
+
+  it('keeps delayed pages unknown when the bounded settle window expires', async () => {
+    synthetic.configure('results-normal.html', 'no-listings-delayed.html');
+    const logger = { error: vi.fn() };
+    const { backend } = createBackend({ settleTimeoutMs: 50, logger });
+    await expectProviderError(backend.search(searchInput(), new AbortController().signal), 'UPSTREAM_ERROR');
+    expect(logger.error).toHaveBeenCalledWith('Facebook Marketplace search diagnostics:', expect.objectContaining({firstKind: 'unknown', finalKind: 'unknown', settleExpired: true, hasNoResultsNotice: false}));
   });
 
   it('rejects all-malformed result cards but keeps good cards from mixed results', async () => {
