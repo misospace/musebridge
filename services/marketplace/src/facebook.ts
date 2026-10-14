@@ -56,6 +56,20 @@ export interface FacebookCaptchaSignals {
   mainLandmarkVisible: boolean;
 }
 
+export interface FacebookMessengerSessionDiagnostics extends FacebookCaptchaSignals {
+  captchaSignalMatched: boolean;
+  visibleCaptchaSignal: boolean;
+  hiddenOnlyCaptchaSignal: boolean;
+  hasLoginSignal: boolean;
+  loginRedirect: boolean;
+  hasCheckpointSignal: boolean;
+  checkpointRoute: boolean;
+  expectedInboxUrl: boolean;
+  sessionUsable: boolean;
+  classification: FacebookProbeOutcome;
+  sessionStatus: ProviderSessionAssessment;
+}
+
 export interface FacebookSessionProbeOptions {
   browser: BrowserSessionManager;
   baseUrl?: string;
@@ -119,17 +133,9 @@ export class FacebookSessionProbe {
     }
 
     const result = classifyFacebookSession(snapshot, this.baseUrl, this.surface);
-    if (this.surface === 'messenger' && snapshot.captchaSignals) {
-      this.logger.error('Facebook Messenger probe diagnostics:', {
-        ...snapshot.captchaSignals,
-        captchaSignalMatched: snapshot.hasCaptchaFrame || snapshot.mentionsCaptcha,
-        visibleCaptchaSignal: hasVisibleCaptcha(snapshot.captchaSignals),
-        hiddenOnlyCaptchaSignal: (snapshot.hasCaptchaFrame || snapshot.mentionsCaptcha) && !hasVisibleCaptcha(snapshot.captchaSignals),
-        hasLoginSignal: snapshot.hasPasswordInput || snapshot.hasLoginForm || snapshot.hasLoginPrompt,
-        hasCheckpointSignal: isCheckpointUrl(snapshot.url) || snapshot.hasCheckpointForm || snapshot.mentionsCheckpoint,
-        expectedInboxUrl: snapshot.url === this.probeUrl,
-        sessionUsable: result.status === 'session_usable'
-      });
+    if (this.surface === 'messenger') {
+      const diagnostics = facebookMessengerSessionDiagnostics(snapshot, result, this.probeUrl);
+      if (diagnostics) this.logger.error('Facebook Messenger probe diagnostics:', diagnostics);
     }
     this.browser.assessSession(result.status);
     return result;
@@ -253,6 +259,35 @@ export async function readFacebookCaptchaSignals(page: Page): Promise<FacebookCa
     verifyHumanMatched: verifyHuman.matched, verifyHumanVisible: verifyHuman.visible,
     authenticatedMarkerMatched: authenticated.matched, authenticatedMarkerVisible: authenticated.visible,
     mainLandmarkMatched: main.matched, mainLandmarkVisible: main.visible
+  };
+}
+
+/**
+ * Return only structural booleans and fixed classifier enums for Messenger session diagnostics.
+ * URLs, page text, attributes, credentials, and identifiers must never enter this object.
+ */
+export function facebookMessengerSessionDiagnostics(
+  snapshot: FacebookPageSnapshot,
+  result: FacebookSessionProbeResult,
+  expectedInboxUrl: string
+): FacebookMessengerSessionDiagnostics | undefined {
+  const signals = snapshot.captchaSignals;
+  if (!signals) return undefined;
+  const captchaSignalMatched = snapshot.hasCaptchaFrame || snapshot.mentionsCaptcha;
+  const visibleCaptchaSignal = hasVisibleCaptcha(signals);
+  return {
+    ...signals,
+    captchaSignalMatched,
+    visibleCaptchaSignal,
+    hiddenOnlyCaptchaSignal: captchaSignalMatched && !visibleCaptchaSignal,
+    hasLoginSignal: snapshot.hasPasswordInput || snapshot.hasLoginForm || snapshot.hasLoginPrompt,
+    loginRedirect: isLoginUrl(snapshot.url),
+    hasCheckpointSignal: isCheckpointUrl(snapshot.url) || snapshot.hasCheckpointForm || snapshot.mentionsCheckpoint,
+    checkpointRoute: isCheckpointUrl(snapshot.url),
+    expectedInboxUrl: snapshot.url === expectedInboxUrl,
+    sessionUsable: result.status === 'session_usable',
+    classification: result.outcome,
+    sessionStatus: result.status
   };
 }
 
