@@ -34,6 +34,7 @@ RUN ./node_modules/.bin/playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build --chown=node:node /app/services/marketplace/dist ./dist
 COPY --chown=node:node services/marketplace/package.json ./package.json
+COPY --chown=node:node services/marketplace/scripts/marketplace-search-smoke.mjs ./scripts/marketplace-search-smoke.mjs
 USER node
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

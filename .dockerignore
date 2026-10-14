@@ -7,5 +7,7 @@
 !services/marketplace/tsconfig.json
 !services/marketplace/src/
 !services/marketplace/src/**/*.ts
+!services/marketplace/scripts/
+!services/marketplace/scripts/marketplace-search-smoke.mjs
 !package.json
 !package-lock.json

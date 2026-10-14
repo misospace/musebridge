@@ -24,11 +24,23 @@ remains unverified until the corrected service's diagnostics are collected.
 
 ## Controlled deployed smoke
 
-Run `services/marketplace/scripts/marketplace-search-smoke.mjs` with Node inside
-the deployed container. It connects only to that container's loopback MCP
+The runtime image packages this script at a stable path. Inside the deployed
+container, run:
+
+```sh
+node /app/scripts/marketplace-search-smoke.mjs
+# Only after the live page confirms authentic emptiness:
+node /app/scripts/marketplace-search-smoke.mjs --expect-empty
+```
+
+It connects only to that container's loopback MCP
 endpoint and emits elapsed time, success, result count and allowlisted error
 code. Add `--expect-empty` only when the live page confirms authentic emptiness;
 available listings can change between runs.
+
+CI checks this packaged file's presence and JavaScript syntax inside the built
+image, with networking disabled. That check does not contact Facebook or replace
+the controlled live smoke test.
 
 Inspect only the static `Facebook Marketplace search diagnostics:` records.
 They contain first/final classifications, sample counts, navigation and settle
