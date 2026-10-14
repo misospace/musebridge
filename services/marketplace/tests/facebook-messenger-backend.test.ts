@@ -248,7 +248,7 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
       { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654321' }, id: 'message_thread:87654321', snippet: 'OPAQUE-SNIPPET-SENTINEL' } },
       { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654321' }, id: 'message_thread:87654321' } },
       { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654322' } } }
-    ] } } } };
+    ], page_info: { has_next_page: false, end_cursor: null } } } } };
     const backend = createBackend();
     const threads = await backend.listThreads(listInput(), new AbortController().signal);
     expect(threads).toEqual([{ thread_id: '87654321' }, { thread_id: '87654322' }]);
@@ -266,7 +266,7 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
     configure('inbox-buttons-graphql-delayed.html');
     graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [
       { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '55550000' }, id: 'message_thread:55550000' } }
-    ] } } } };
+    ], page_info: { has_next_page: false, end_cursor: null } } } } };
     const backend = createBackend({ settleTimeoutMs: 1_500 });
     const threads = await backend.listThreads(listInput(), new AbortController().signal);
     expect(threads).toEqual([{ thread_id: '55550000' }]);
@@ -283,7 +283,7 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
     await expectProviderError(backend.listThreads(listInput(), new AbortController().signal), 'UPSTREAM_ERROR');
 
     configure('inbox-buttons-graphql.html');
-    graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [{ node: { __typename: 'MessageThread', thread_key: { thread_fbid: 'bad id' } } }] } } } };
+    graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [{ node: { __typename: 'MessageThread', thread_key: { thread_fbid: 'bad id' } } }], page_info: { has_next_page: false, end_cursor: null } } } } };
     await expectProviderError(backend.listThreads(listInput(), new AbortController().signal), 'UPSTREAM_ERROR');
   }, 30_000);
 
@@ -297,7 +297,20 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
     await expectProviderError(
       backend.listThreads(listInput(), new AbortController().signal),
       'UPSTREAM_ERROR',
-      'The Facebook Marketplace inbox page only returned the first page of threads; pagination is not supported.'
+      'The Facebook Marketplace inbox pagination could not be verified; a complete thread list cannot be returned.'
+    );
+  }, 15_000);
+
+  it('fails closed for non-empty thread ids when terminal pagination is unverified', async () => {
+    configure('inbox-buttons-graphql.html');
+    const backend = createBackend({ settleTimeoutMs: 30 });
+    graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [
+      { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654321' }, id: 'message_thread:87654321' } }
+    ] } } } };
+    await expectProviderError(
+      backend.listThreads(listInput(), new AbortController().signal),
+      'UPSTREAM_ERROR',
+      'The Facebook Marketplace inbox pagination could not be verified; a complete thread list cannot be returned.'
     );
   }, 15_000);
 

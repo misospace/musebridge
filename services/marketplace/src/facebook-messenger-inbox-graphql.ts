@@ -22,20 +22,6 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Verified inbox connections are Relay-style paginated: `page_info.has_next_page` indicates
- * whether more slices remain on the server. The marketplace inbox is read-only over the first
- * slice, so a paginated connection cannot be claimed complete without that signal. We treat any
- * shape other than the explicit terminal `page_info: { has_next_page: false }` as "cannot verify
- * terminal pagination" — that includes `has_next_page: true` (more pages ahead) and an absent
- * `page_info` (we cannot tell which side of the pagination boundary we are on).
- */
-function hasMorePages(connection: Record<string, unknown>): boolean {
-  const pageInfo = connection.page_info;
-  if (!isObject(pageInfo)) return false;
-  return pageInfo.has_next_page === true;
-}
-
-/**
  * Positive terminal-pagination gate: only an explicit `page_info: { has_next_page: false }` is
  * accepted as the inbox being fully read. Absent `page_info` (or any non-`false` value) is
  * reported as incomplete rather than empty so a future caller can distinguish a verified empty
@@ -100,17 +86,15 @@ export function parseMessengerInboxGraphQLResponse(payload: unknown): ParsedResp
       threadIds.push(threadId);
     }
   }
-  // `incomplete` reflects the server's pagination signal, not the size of the current slice: any
-  // connection with `has_next_page: true` means we did not read the full inbox, whether the
-  // current slice happened to be empty or not. Earlier revisions gated the flag on
-  // `threadIds.length === 0`, which made it unreachable on the more common non-empty paginated
-  // response and silently mis-described the first slice as a complete inbox.
+  // Positive thread ids do not prove completeness. Treat every non-terminal shape as incomplete,
+  // including missing or malformed page_info, so callers cannot mistake a first slice for a full
+  // inbox listing.
   return {
     kind: 'connection',
     threadIds,
     empty: false,
     malformed,
-    incomplete: hasMorePages(connection)
+    incomplete: !isTerminalPagination(connection)
   };
 }
 
