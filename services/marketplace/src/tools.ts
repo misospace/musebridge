@@ -2,7 +2,7 @@ import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { ProviderError, SurfaceDisabledError, renderDeliveredMessage, type ConversationBackend, type EventsBackend, type MarketplaceBackend, type ShoppingBackend } from './backend.js';
+import { ProviderError, SurfaceDisabledError, renderDeliveredMessage, type ConversationBackend, type EventsBackend, type MarketplaceBackend, type ShoppingBackend, type ThreadsBackend } from './backend.js';
 import type { ProviderSessionAssessment } from './browser.js';
 import {
   authorizeAction,
@@ -41,13 +41,18 @@ import {
   eventsSearchInputSchema,
   eventsFetchInputSchema,
   eventsSearchOutputSchema,
-  eventsFetchOutputSchema
+  eventsFetchOutputSchema,
+  threadsPostsListInputSchema,
+  threadsRepliesListInputSchema,
+  threadsPostsListOutputSchema,
+  threadsRepliesListOutputSchema
 } from './domain.js';
 
 const marketplaceScope = { provider: 'facebook', account: 'default', surface: 'marketplace' } as const;
 const messengerScope = { provider: 'facebook', account: 'default', surface: 'messenger' } as const;
 const shoppingScope = { provider: 'ebay', account: 'default', surface: 'shopping' } as const;
 const eventsScope = { provider: 'ticketmaster', account: 'default', surface: 'events' } as const;
+const socialScope = { provider: 'threads', account: 'default', surface: 'social' } as const;
 
 const TOOLS = [
   {
@@ -126,6 +131,20 @@ const TOOLS = [
     inputSchema: threadSendInputSchema,
     outputSchema: sendOutputSchema,
     definition: { riskClass: 'send', scope: messengerScope }
+  },
+  {
+    name: 'threads_posts_list',
+    description: 'List the operator\'s own published Threads posts via the official Threads Graph API. Read-only; no DMs, no saved items, no keyword search, no external profile discovery.',
+    inputSchema: threadsPostsListInputSchema,
+    outputSchema: threadsPostsListOutputSchema,
+    definition: { riskClass: 'read', scope: socialScope }
+  },
+  {
+    name: 'threads_replies_list',
+    description: 'List the public reply tree for one verified Threads media (post) id via the official Threads Graph API. Read-only.',
+    inputSchema: threadsRepliesListInputSchema,
+    outputSchema: threadsRepliesListOutputSchema,
+    definition: { riskClass: 'read', scope: socialScope }
   }
 ] as const;
 
@@ -146,6 +165,7 @@ export interface MarketplaceToolOptions {
   conversations?: ConversationBackend;
   shopping?: ShoppingBackend;
   events?: EventsBackend;
+  threads?: ThreadsBackend;
 }
 
 export function assertWritableToolsHaveAuthorizer(
@@ -239,8 +259,12 @@ export function registerMarketplaceTools(
                       ? eventsSearchOutputSchema
                       : name === 'events_fetch'
                         ? eventsFetchOutputSchema
-                        : statusOutputSchema;
-    let validatedOutput: z.infer<typeof searchOutputSchema | typeof fetchOutputSchema | typeof statusOutputSchema | typeof threadsListOutputSchema | typeof threadReadOutputSchema | typeof prepareOutputSchema | typeof sendOutputSchema | typeof shoppingSearchOutputSchema | typeof shoppingFetchOutputSchema | typeof eventsSearchOutputSchema | typeof eventsFetchOutputSchema>;
+                        : name === 'threads_posts_list'
+                          ? threadsPostsListOutputSchema
+                          : name === 'threads_replies_list'
+                            ? threadsRepliesListOutputSchema
+                            : statusOutputSchema;
+    let validatedOutput: z.infer<typeof searchOutputSchema | typeof fetchOutputSchema | typeof statusOutputSchema | typeof threadsListOutputSchema | typeof threadReadOutputSchema | typeof prepareOutputSchema | typeof sendOutputSchema | typeof shoppingSearchOutputSchema | typeof shoppingFetchOutputSchema | typeof eventsSearchOutputSchema | typeof eventsFetchOutputSchema | typeof threadsPostsListOutputSchema | typeof threadsRepliesListOutputSchema>;
     if (!decision.ok) {
       // Refusals parse against the shared runtime failure schema so the uniform refusal shape
       // does not depend on each tool's success-oriented output schema.
@@ -388,6 +412,29 @@ export function registerMarketplaceTools(
           output = event === null
             ? runtimeFailure('NOT_FOUND', 'No event matched the supplied identifier.')
             : { ok: true, backend: events.name, event };
+        } else if (name === 'threads_posts_list') {
+          const threads = options.threads;
+          if (!threads) throw new ProviderError('UPSTREAM_ERROR', 'The Threads social surface is not configured on this deployment.');
+          const result = await runBackendOperation(
+            (signal) => threads.listOwnPosts(parsed.data as z.infer<typeof threadsPostsListInputSchema>, signal),
+            backendTimeoutMs,
+            extra.signal,
+            shutdownSignal
+          );
+          output = { ok: true, backend: threads.name, posts: result.posts, truncated: result.truncated };
+        } else if (name === 'threads_replies_list') {
+          const threads = options.threads;
+          if (!threads) throw new ProviderError('UPSTREAM_ERROR', 'The Threads social surface is not configured on this deployment.');
+          const repliesInput = parsed.data as z.infer<typeof threadsRepliesListInputSchema>;
+          const result = await runBackendOperation(
+            (signal) => threads.listReplies(repliesInput, signal),
+            backendTimeoutMs,
+            extra.signal,
+            shutdownSignal
+          );
+          output = result === null
+            ? runtimeFailure('NOT_FOUND', 'No Threads media matched the supplied identifier.')
+            : { ok: true, backend: threads.name, media_id: repliesInput.media_id, replies: result.replies, truncated: result.truncated };
         } else {
           const sessionAssessment = options.sessionAssessment;
           output = {
@@ -397,12 +444,14 @@ export function registerMarketplaceTools(
             backend: backendName,
             shopping_backend: options.shopping?.name,
             events_backend: options.events?.name,
+            threads_backend: options.threads?.name,
             ...(sessionAssessment ? { facebook_session: { status: sessionAssessment() } } : {}),
             capabilities: [
               { surface: marketplaceScope.surface, provider: marketplaceScope.provider, backend: backendName },
               { surface: shoppingScope.surface, provider: shoppingScope.provider, backend: options.shopping?.name ?? null },
               { surface: messengerScope.surface, provider: messengerScope.provider, backend: options.conversations?.name ?? null },
-              { surface: eventsScope.surface, provider: eventsScope.provider, backend: options.events?.name ?? null }
+              { surface: eventsScope.surface, provider: eventsScope.provider, backend: options.events?.name ?? null },
+              { surface: socialScope.surface, provider: socialScope.provider, backend: options.threads?.name ?? null }
             ]
           };
         }

@@ -1,5 +1,5 @@
-import { shoppingFetchInputSchema, shoppingSearchInputSchema, productOfferSchema, eventsFetchInputSchema, eventsSearchInputSchema, eventAvailabilitySchema, type ConversationMessage, type ConversationThread, type EventAvailability, type Listing, type ProductOffer } from './domain.js';
-import type { EventsBackend, ShoppingBackend } from './backend.js';
+import { shoppingFetchInputSchema, shoppingSearchInputSchema, productOfferSchema, eventsFetchInputSchema, eventsSearchInputSchema, eventAvailabilitySchema, MAX_THREADS_REPLY_COUNT, threadsPostSchema, threadsReplySchema, threadsPostsListInputSchema, threadsRepliesListInputSchema, type ConversationMessage, type ConversationThread, type EventAvailability, type Listing, type ProductOffer, type ThreadsPost, type ThreadsReply } from './domain.js';
+import type { EventsBackend, ShoppingBackend, ThreadsBackend, ThreadsPostPage, ThreadsReplyPage } from './backend.js';
 import { canonicalHttpUrl } from './backend.js';
 
 export const FIXTURE_CONVERSATIONS: readonly {
@@ -277,3 +277,105 @@ export const FIXTURE_LISTINGS: readonly Listing[] = [
     state: 'removed'
   }
 ];
+
+// Threads (Meta) social surface (#84). Read-only fixture data — synthetic identifiers,
+// synthetic timestamps, no real Threads content. The shape mirrors the live contract
+// (`threadsPostSchema` / `threadsReplySchema`) and is re-parsed through the schema so
+// fixtures cannot drift away from the documented contract.
+export const FIXTURE_THREADS_POSTS: readonly ThreadsPost[] = [
+  {
+    provider: 'threads',
+    id: 'synth-thread-001',
+    threads_user_id: 'synth-owner-id-1001',
+    permalink: 'https://www.threads.net/@synth_user/post/synth-thread-001',
+    text: 'Synthetic fixture thread: short text post about a sun lamp.',
+    media_type: 'TEXT_POST',
+    media_urls: [],
+    reply_count: 4,
+    like_count: 22,
+    posted_at: '2025-04-01T09:30:00.000Z'
+  },
+  {
+    provider: 'threads',
+    id: 'synth-thread-002',
+    threads_user_id: 'synth-owner-id-1001',
+    permalink: 'https://www.threads.net/@synth_user/post/synth-thread-002',
+    text: 'Synthetic fixture thread: image post with no caption counts.',
+    media_type: 'IMAGE',
+    media_urls: ['https://www.threads.net/synth-image-002.jpg'],
+    reply_count: null,
+    like_count: null,
+    posted_at: '2025-04-02T17:15:00.000Z'
+  },
+  {
+    provider: 'threads',
+    id: 'synth-thread-003',
+    threads_user_id: 'synth-owner-id-1001',
+    permalink: 'https://www.threads.net/@synth_user/post/synth-thread-003',
+    text: 'Synthetic fixture thread: video post with bounded media list.',
+    media_type: 'VIDEO',
+    media_urls: ['https://www.threads.net/synth-video-003.mp4', 'https://www.threads.net/synth-thumbnail-003.jpg'],
+    reply_count: 0,
+    like_count: 5,
+    posted_at: null
+  },
+  {
+    provider: 'threads',
+    id: 'synth-thread-004',
+    threads_user_id: 'synth-owner-id-1001',
+    permalink: 'https://www.threads.net/@synth_user/post/synth-thread-004',
+    text: 'Synthetic fixture thread: repost facade with unknown media type.',
+    media_type: 'REPOST_FACADE',
+    media_urls: [],
+    reply_count: 2,
+    like_count: 8,
+    posted_at: '2025-04-04T08:00:00.000Z'
+  }
+].map((post) => threadsPostSchema.parse(post));
+
+export const FIXTURE_THREADS_REPLIES: readonly ThreadsReply[] = [
+  {
+    provider: 'threads',
+    id: 'synth-reply-001',
+    media_id: 'synth-thread-001',
+    permalink: 'https://www.threads.net/@synth_user/reply/synth-reply-001',
+    threads_user_id: 'synth-owner-id-2001',
+    text: 'Synthetic fixture reply: this is the first reply on synth-thread-001.',
+    media_type: 'TEXT_POST',
+    media_urls: [],
+    posted_at: '2025-04-01T10:00:00.000Z'
+  },
+  {
+    provider: 'threads',
+    id: 'synth-reply-002',
+    media_id: 'synth-thread-001',
+    permalink: 'https://www.threads.net/@synth_friend/post/synth-reply-002',
+    threads_user_id: 'synth-owner-id-2002',
+    text: 'Synthetic fixture reply: image reply with one media url.',
+    media_type: 'IMAGE',
+    media_urls: ['https://www.threads.net/synth-reply-image-002.jpg'],
+    posted_at: '2025-04-01T10:30:00.000Z'
+  }
+].map((reply) => threadsReplySchema.parse(reply));
+
+export class FixtureThreadsBackend implements ThreadsBackend {
+  readonly name = 'fixture';
+
+  listOwnPosts(input: ReturnType<typeof threadsPostsListInputSchema.parse>, _signal: AbortSignal): ThreadsPostPage {
+    const since = input.since;
+    // Calendar-date compare is safe because `posted_at` is schema-validated ISO 8601 with an
+    // offset and `since` is regex-validated YYYY-MM-DD. Posts with no timestamp are excluded
+    // from a bounded query rather than assumed recent.
+    const matching = since === undefined
+      ? [...FIXTURE_THREADS_POSTS]
+      : FIXTURE_THREADS_POSTS.filter((post) => post.posted_at !== null && post.posted_at.slice(0, 10) >= since);
+    const posts = matching.slice(0, input.limit);
+    return { posts, truncated: matching.length > posts.length };
+  }
+
+  listReplies(input: ReturnType<typeof threadsRepliesListInputSchema.parse>, _signal: AbortSignal): ThreadsReplyPage {
+    const matching = FIXTURE_THREADS_REPLIES.filter((reply) => reply.media_id === input.media_id);
+    const replies = matching.slice(0, MAX_THREADS_REPLY_COUNT);
+    return { replies, truncated: matching.length > replies.length };
+  }
+}

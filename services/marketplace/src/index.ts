@@ -1,9 +1,11 @@
 import { facebookMarketsFilePath, loadFacebookMarkets } from './market-config.js';
 import { createMarketplaceService, installShutdownHandlers, listen } from './service.js';
 
-export { FixtureBackend, ProviderError, SurfaceDisabledError, type ConversationBackend, type EventsBackend, type MarketplaceBackend } from './backend.js';
+export { FixtureBackend, ProviderError, SurfaceDisabledError, type ConversationBackend, type EventsBackend, type MarketplaceBackend, type ShoppingBackend, type ThreadsBackend } from './backend.js';
 export { TicketmasterClient, TicketmasterHttpError, type TicketmasterClientOptions } from './ticketmaster.js';
 export { TicketmasterEventsBackend } from './ticketmaster-backend.js';
+export { ThreadsClient, ThreadsHttpError, type ThreadsClientOptions, type ThreadsPostsListOptions } from './threads.js';
+export { ThreadsApiBackend } from './threads-backend.js';
 export { FacebookMarketplaceBackend, type FacebookMarketplaceBackendOptions } from './facebook-marketplace-backend.js';
 export {
   BROWSER_SESSION_STATUSES,
@@ -30,7 +32,7 @@ export {
   type FacebookSessionProbeOptions,
   type FacebookPageSnapshot
 } from './facebook.js';
-export { FIXTURE_CONVERSATIONS, FIXTURE_EVENTS, FIXTURE_LISTINGS, FixtureEventsBackend } from './fixtures.js';
+export { FIXTURE_CONVERSATIONS, FIXTURE_EVENTS, FIXTURE_LISTINGS, FixtureEventsBackend, FIXTURE_THREADS_POSTS, FIXTURE_THREADS_REPLIES, FixtureThreadsBackend } from './fixtures.js';
 export {
   DEFAULT_FACEBOOK_MARKETS,
   MARKETPLACE_ITEM_PATH,
@@ -67,7 +69,7 @@ export {
   type MarketplaceSearchOutcome,
   type ParseMarketplaceInput
 } from './facebook-marketplace-parse.js';
-export { createMarketplaceService, installShutdownHandlers, listen, parseBackendKind, parseMessengerEnabled, type MarketplaceService, type ServiceOptions } from './service.js';
+export { createMarketplaceService, installShutdownHandlers, listen, parseBackendKind, parseEventsBackendKind, parseMessengerEnabled, parseShoppingBackendKind, parseThreadsBackendKind, type MarketplaceService, type ServiceOptions } from './service.js';
 export {
   ReauthManager,
   ProcessReauthRuntime,

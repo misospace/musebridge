@@ -3,12 +3,14 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { FixtureBackend, type ConversationBackend, type EventsBackend, type MarketplaceBackend, type ShoppingBackend } from './backend.js';
-import { FixtureEventsBackend, FixtureShoppingBackend } from './fixtures.js';
+import { FixtureBackend, type ConversationBackend, type EventsBackend, type MarketplaceBackend, type ShoppingBackend, type ThreadsBackend } from './backend.js';
+import { FixtureEventsBackend, FixtureShoppingBackend, FixtureThreadsBackend } from './fixtures.js';
 import { EbayClient } from './ebay.js';
 import { EbayShoppingBackend } from './ebay-backend.js';
 import { TicketmasterClient } from './ticketmaster.js';
 import { TicketmasterEventsBackend } from './ticketmaster-backend.js';
+import { ThreadsClient } from './threads.js';
+import { ThreadsApiBackend } from './threads-backend.js';
 import { FacebookMarketplaceBackend } from './facebook-marketplace-backend.js';
 import { FacebookMessengerBackend } from './facebook-messenger-backend.js';
 import type { FacebookMarket } from './facebook-marketplace-url.js';
@@ -48,6 +50,10 @@ export interface ServiceOptions {
   shopping?: ShoppingBackend;
   eventsBackendKind?: 'fixture' | 'ticketmaster';
   events?: EventsBackend;
+  threadsBackendKind?: 'fixture' | 'threads';
+  threads?: ThreadsBackend;
+  /** Explicit operator acknowledgement that the live Threads backend was validated against the current Meta reference; the live backend is refused unless this is true (or THREADS_LIVE_VALIDATED=1). */
+  threadsLiveValidated?: boolean;
   facebookMarkets?: readonly FacebookMarket[];
   host?: string;
   port?: number;
@@ -120,6 +126,7 @@ export interface MarketplaceService {
   readonly messengerAdmin?: ReauthAdminServer;
   readonly shopping: ShoppingBackend;
   readonly events: EventsBackend;
+  readonly threads: ThreadsBackend;
   close(): Promise<void>;
   address(): ReturnType<HttpServer['address']>;
 }
@@ -150,6 +157,31 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
   const events = options.events ?? (eventsBackendKind === 'ticketmaster'
     ? new TicketmasterEventsBackend(new TicketmasterClient({ apiKey: requiredEnv('TICKETMASTER_API_KEY') }))
     : new FixtureEventsBackend());
+  const threadsBackendKind = options.threadsBackendKind ?? parseThreadsBackendKind(process.env.THREADS_BACKEND);
+  if (options.threads !== undefined && options.threadsBackendKind !== undefined) {
+    throw new TypeError('threads and threadsBackendKind cannot both select a backend');
+  }
+  // The live Threads backend is gated on two parts, in order: (1) both THREADS_ACCESS_TOKEN
+  // and THREADS_USER_ID must be non-empty — a missing pair is a typed RangeError, not a
+  // silent empty success (#84), and this is checked first so a half-configured deployment
+  // still reports the missing credential; (2) the operator must explicitly acknowledge that
+  // the connector was validated against the current Meta reference (THREADS_LIVE_VALIDATED=1
+  // or the seam), because the endpoints and field shapes are documented but unverified.
+  // The fixture backend stays default, and the gate value is only parsed on the live path.
+  const liveThreadsBackend = (): ThreadsApiBackend => {
+    const client = new ThreadsClient({
+      accessToken: requiredEnv('THREADS_ACCESS_TOKEN'),
+      threadsUserId: requiredEnv('THREADS_USER_ID')
+    });
+    const threadsLiveValidated = options.threadsLiveValidated ?? parseThreadsLiveValidated(process.env.THREADS_LIVE_VALIDATED);
+    if (!threadsLiveValidated) {
+      throw new RangeError('THREADS_LIVE_VALIDATED=1 is required to select the live Threads backend; complete the operator live-validation checklist first.');
+    }
+    return new ThreadsApiBackend(client);
+  };
+  const threads = options.threads ?? (threadsBackendKind === 'threads'
+    ? liveThreadsBackend()
+    : new FixtureThreadsBackend());
   const loginWaitMs = options.facebookLoginWaitMs ?? parseLoginWaitMs(process.env.FACEBOOK_LOGIN_WAIT_SECONDS);
   if (!Number.isSafeInteger(loginWaitMs) || loginWaitMs <= 0) {
     throw new RangeError('facebookLoginWaitMs must be a positive safe integer');
@@ -430,6 +462,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
         conversations,
         shopping,
         events,
+        threads,
         authorizer,
         ...(options.approvalGrant !== undefined ? { approvalGrant: options.approvalGrant } : {})
       });
@@ -503,6 +536,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     ...(messengerAdmin !== undefined ? { messengerAdmin } : {}),
     shopping,
     events,
+    threads,
     address: () => httpServer.address(),
     close
   };
@@ -543,9 +577,31 @@ export function parseEventsBackendKind(value: string | undefined): 'fixture' | '
   throw new RangeError('EVENTS_BACKEND must be either "fixture" or "ticketmaster"');
 }
 
-function requiredEnv(name: 'EBAY_CLIENT_ID' | 'EBAY_CLIENT_SECRET' | 'TICKETMASTER_API_KEY'): string {
+export function parseThreadsBackendKind(value: string | undefined): 'fixture' | 'threads' {
+  if (value === undefined || value === 'fixture') return 'fixture';
+  if (value === 'threads') return 'threads';
+  throw new RangeError('THREADS_BACKEND must be either "fixture" or "threads"');
+}
+
+export function parseThreadsLiveValidated(value: string | undefined): boolean {
+  if (value === undefined || value === '0') return false;
+  if (value === '1') return true;
+  throw new RangeError('THREADS_LIVE_VALIDATED must be "0" or "1"');
+}
+
+function requiredEnv(name: 'EBAY_CLIENT_ID' | 'EBAY_CLIENT_SECRET' | 'TICKETMASTER_API_KEY' | 'THREADS_ACCESS_TOKEN' | 'THREADS_USER_ID'): string {
   const value = process.env[name];
-  if (!value) throw new RangeError(`${name} is required when ${name === 'TICKETMASTER_API_KEY' ? 'EVENTS_BACKEND=ticketmaster' : 'SHOPPING_BACKEND=ebay'}`);
+  // Whitespace-only is treated as absent: otherwise a blank `THREADS_ACCESS_TOKEN`/`THREADS_USER_ID`
+  // would pass here and fail later as a `TypeError` in the client, violating the typed-startup
+  // `RangeError` contract (#84 review).
+  if (!value || !value.trim()) {
+    const when = name === 'TICKETMASTER_API_KEY'
+      ? 'EVENTS_BACKEND=ticketmaster'
+      : name === 'THREADS_ACCESS_TOKEN' || name === 'THREADS_USER_ID'
+        ? 'THREADS_BACKEND=threads'
+        : 'SHOPPING_BACKEND=ebay';
+    throw new RangeError(`${name} is required when ${when}`);
+  }
   return value;
 }
 
