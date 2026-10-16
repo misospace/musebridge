@@ -116,7 +116,7 @@ Every step is recorded with user-visible status: authorization, grant consumptio
 
 ## Controlled dry runs before any automated send
 
-Issue #44's "Done when" requires **controlled end-to-end dry runs before any automated sends**. This document records the *plan* and the conditions under which those dry runs become a valid completion criterion; it does **not** claim the dry-run criterion has been satisfied. The dry-run gate is not closed in this PR: the production verifier (#43), the `messenger_prepare` and `messenger_send` tools (#62, #63), and the messenger-scope reauth target all remain to ship, so production `send` is still deny-all and no Phase 3 control path has been exercised end-to-end. #44 is intentionally **kept open** by this PR (`Addresses`, not `Closes`); closing it requires these dry runs to have actually been run and recorded, on a fixture backend, against a still-deny-all production path.
+Issue #44's "Done when" requires **controlled end-to-end dry runs before any automated sends**. This document records the *plan* and the conditions under which those dry runs become a valid completion criterion; it does **not** claim the dry-run criterion has been satisfied. The dry-run gate is not closed in this PR: `messenger_prepare` (#62) now ships in it, but the production verifier (#43), the `messenger_send` tool (#63), and the messenger-scope reauth target all remain to ship, so production `send` is still deny-all and no Phase 3 control path has been exercised end-to-end. #44 is intentionally **kept open** by this PR (`Addresses`, not `Closes`); closing it requires these dry runs to have actually been run and recorded, on a fixture backend, against a still-deny-all production path.
 
 The conditions for closing #44's dry-run gate are:
 

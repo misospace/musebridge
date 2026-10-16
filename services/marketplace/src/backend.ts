@@ -17,6 +17,7 @@ import {
   type ConversationMessage,
   type ConversationThread,
   type ConversationThreadMessages,
+  type ConversationDraft,
   type EventAvailability,
   type ProductOffer,
   type ProviderErrorCode,
@@ -37,6 +38,8 @@ export interface ConversationBackend {
   readonly name: string;
   listThreads(input: ReturnType<typeof threadsListInputSchema.parse>, signal: AbortSignal): Promise<ConversationThread[]> | ConversationThread[];
   readThread(input: ReturnType<typeof threadReadInputSchema.parse>, signal: AbortSignal): Promise<ConversationThreadMessages | null> | ConversationThreadMessages | null;
+  /** Conversation-scoped draft context for a proposed send, or null when no such thread exists. Never sends and never records a message. */
+  prepareDraft(input: ReturnType<typeof threadSendInputSchema.parse>, signal: AbortSignal): Promise<ConversationDraft | null> | ConversationDraft | null;
   sendThread(input: ReturnType<typeof threadSendInputSchema.parse>, signal: AbortSignal): Promise<void> | void;
 }
 
@@ -146,6 +149,19 @@ export class FixtureBackend implements MarketplaceBackend, ConversationBackend {
     return {
       thread_id: input.thread_id,
       messages: [...(conversation?.messages ?? []), ...(sent ?? [])]
+    };
+  }
+
+  prepareDraft(input: ReturnType<typeof threadSendInputSchema.parse>, _signal: AbortSignal): ConversationDraft | null {
+    const conversation = FIXTURE_CONVERSATIONS.find(({ thread }) => thread.thread_id === input.thread_id);
+    // An unknown thread is an absent resource, not a provider failure: it returns null so the tool
+    // reports NOT_FOUND exactly as messenger_thread_read does for the same thread id.
+    if (!conversation) return null;
+    // Search a reversed copy so drafting never mutates the shared fixture arrays, and never records
+    // a message: a prepared draft is not a send.
+    const lastCounterparty = [...conversation.messages].reverse().find(({ sender }) => sender === 'other');
+    return {
+      participant: lastCounterparty?.sender_name ?? conversation.thread.participants?.[0] ?? null
     };
   }
 

@@ -6,6 +6,7 @@ import {
   threadsListInputSchema,
   threadReadInputSchema,
   threadSendInputSchema,
+  type ConversationDraft,
   type ConversationThread,
   type ConversationThreadMessages,
   type ProviderErrorCode
@@ -279,6 +280,21 @@ export class FacebookMessengerBackend implements ConversationBackend {
     const outcome = interpretMessengerThreadPage({ page: extracted, baseUrl: this.probe.baseUrl, threadId: input.thread_id });
     if (outcome.kind === 'error') throw new MarketplaceProviderError(outcome.code, outcome.message);
     return { thread_id: input.thread_id, messages: [...outcome.messages] };
+  }
+
+  // A draft needs only the conversation context, so it reuses this same thread read — including
+  // the "Seen" side effect of opening the thread that messenger_thread_read already documents. It
+  // performs no send and no write, and adds no browser or session logic of its own.
+  async prepareDraft(
+    input: ReturnType<typeof threadSendInputSchema.parse>,
+    signal: AbortSignal
+  ): Promise<ConversationDraft | null> {
+    const thread = await this.readThread({ thread_id: input.thread_id }, signal);
+    if (thread === null) return null;
+    // Extraction drops message rows whose sender name is empty or over the bound rather than
+    // truncating it, so an unattributed conversation yields null rather than a fabricated handle.
+    const lastCounterparty = [...thread.messages].reverse().find(({ sender }) => sender === 'other');
+    return { participant: lastCounterparty?.sender_name ?? null };
   }
 
   async sendThread(

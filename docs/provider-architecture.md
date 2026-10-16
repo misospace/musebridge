@@ -2,7 +2,7 @@
 
 Parent: #38 (verticals). Issue: #40. Status: architecture and compatibility strategy documented; eBay shopping is the second capability shipped against it, proving #40's "done when" — a second provider added without copying Marketplace's runtime.
 
-This document is the reference for the provider/module layout of `services/marketplace/` and for the compatibility rules that keep existing consumers working. It is descriptive of the code as it exists (plus the schema `1.4.0` capability-discovery change that adds the `social` surface and `threads_backend`); recommendations and not-yet-implemented items are marked as follow-ups. For the enforcement contract on sessions, actions, and grants, see [`provider-action-boundaries.md`](provider-action-boundaries.md); for the shopping research behind the second provider, see [`shopping-provider-research.md`](shopping-provider-research.md).
+This document is the reference for the provider/module layout of `services/marketplace/` and for the compatibility rules that keep existing consumers working. It is descriptive of the code as it exists (plus the schema `1.5.0` contract: the `1.4.0` capability-discovery change added the `social` surface and `threads_backend`, and `1.5.0` adds the `messenger_prepare` output contract); recommendations and not-yet-implemented items are marked as follow-ups. For the enforcement contract on sessions, actions, and grants, see [`provider-action-boundaries.md`](provider-action-boundaries.md); for the shopping research behind the second provider, see [`shopping-provider-research.md`](shopping-provider-research.md).
 
 ## Purpose and non-goals
 
@@ -32,7 +32,7 @@ Today's five surfaces:
 |---|---|---|---|---|
 | `marketplace` | `facebook` | `MarketplaceBackend` | `marketplace_search`, `marketplace_fetch`, `marketplace_status` | Browser session scope |
 | `shopping` | `ebay` | `ShoppingBackend` | `shopping_search`, `shopping_fetch` | API token, no browser |
-| `messenger` | `facebook` | `ConversationBackend` | `messenger_threads_list`, `messenger_thread_read` | Separate browser session scope |
+| `messenger` | `facebook` | `ConversationBackend` | `messenger_threads_list`, `messenger_thread_read`, `messenger_prepare`, `messenger_send` | Separate browser session scope |
 | `events` | `ticketmaster` | `EventsBackend` | `events_search`, `events_fetch` | API token, no browser |
 | `social` | `threads` | `ThreadsBackend` | `threads_posts_list`, `threads_replies_list` | API token, no browser |
 
@@ -78,10 +78,10 @@ Zero Facebook imports. Only the composition root (`service.ts`) and the public `
 `domain.ts` is the single source of truth. Every tool input and output is a Zod schema; `tools.ts` converts them to MCP JSON Schema with `z.toJSONSchema(..., { target: 'draft-7', io })` in `toMcpObjectSchema`, so `ListTools` and dispatch share the same definitions.
 
 - **Inputs** are strict: `.strict()` rejects unknown keys, bounds are explicit, and cross-field refinements (for example `min_price <= max_price`, or exactly one of `id`/`url`) are part of the schema. Malformed arguments are validated at dispatch and returned as a JSON-RPC `InvalidParams` (`McpError` with `ErrorCode.InvalidParams`), **not** as a tool-error envelope.
-- **Outputs** are success/failure unions parsed before return (`searchOutputSchema`, `fetchOutputSchema`, `shoppingSearchOutputSchema`, `shoppingFetchOutputSchema`, `threadsListOutputSchema`, `threadReadOutputSchema`, `threadsPostsListOutputSchema`, `threadsRepliesListOutputSchema`, and `statusOutputSchema`). The parsed value is returned both as serialized text and as `structuredContent`, with `isError` set when `ok === false`.
+- **Outputs** are success/failure unions parsed before return (`searchOutputSchema`, `fetchOutputSchema`, `shoppingSearchOutputSchema`, `shoppingFetchOutputSchema`, `threadsListOutputSchema`, `threadReadOutputSchema`, `prepareOutputSchema`, `sendOutputSchema`, `threadsPostsListOutputSchema`, `threadsRepliesListOutputSchema`, and `statusOutputSchema`). The parsed value is returned both as serialized text and as `structuredContent`, with `isError` set when `ok === false`.
 - **Provider errors vs runtime failures.** `ProviderError` + `PROVIDER_ERROR_CODES` (`AUTH_EXPIRED`, `LOGIN_REQUIRED`, `CAPTCHA_REQUIRED`, `SESSION_INVALID`, `RATE_LIMITED`, `UPSTREAM_ERROR`, `TIMEOUT`) describe external provider state. The runtime failure envelope adds `NOT_FOUND` and `INTERNAL_ERROR`, and the policy codes `APPROVAL_REQUIRED` / `ACTION_FORBIDDEN` / `SURFACE_DISABLED`. Policy codes are deliberately **not** in `PROVIDER_ERROR_CODES`. `SURFACE_DISABLED` (thrown as `SurfaceDisabledError`) is the one policy code a registered tool can emit today: a backend configured to disable a surface, such as Messenger probe-only mode, reports it instead of a misleading provider session code, and it is surfaced without being logged as a service failure. Only validated `ProviderError` instances are surfaced; anything else is logged and reduced to `INTERNAL_ERROR`.
 
-**Versioned output contract.** `SCHEMA_VERSION` in `domain.ts` is the contract version (currently `1.4.0`; `SERVICE_VERSION` is separate). Additive output changes bump the minor version; the runtime failure code `SURFACE_DISABLED` was added additively in `1.3.0` and the `social` capability surface in `1.4.0`. `listing` (Facebook) and `productOffer` (shopping) are **siblings, not replacements**: `productOffer` preserves `listing` field names where they overlap so a later comparison layer can union them without remapping, while `listing` stays exactly as deployed for the Facebook tools.
+**Versioned output contract.** `SCHEMA_VERSION` in `domain.ts` is the contract version (currently `1.5.0`; `SERVICE_VERSION` is separate). Additive output changes bump the minor version; the runtime failure code `SURFACE_DISABLED` was added additively in `1.3.0`, the `social` capability surface shipped in `1.4.0`, and the `messenger_prepare` output contract ships in `1.5.0`. `listing` (Facebook) and `productOffer` (shopping) are **siblings, not replacements**: `productOffer` preserves `listing` field names where they overlap so a later comparison layer can union them without remapping, while `listing` stays exactly as deployed for the Facebook tools.
 
 ## Tool registry and single dispatch choke point
 
@@ -95,7 +95,7 @@ There is exactly one `CallToolRequestSchema` handler. It:
 4. On success, runs the backend through `runBackendOperation` and parses the output against the selected output schema.
 5. On refusal or failure, returns the uniform `runtimeFailureSchema` shape with `isError: true`.
 
-`assertWritableToolsHaveAuthorizer(TOOLS, options.authorizer)` runs at registration and throws before the tool is served if any `send` or `high_consequence` tool has no authorizer. Eleven of the twelve registered tools are `read`; the sole write-class tool, `messenger_send`, requires an authorizer, so when none is configured a `DenyAllAuthorizer` is installed and consulted for that tool (every send fails closed).
+`assertWritableToolsHaveAuthorizer(activeTools, options.authorizer)` runs at registration and throws before the tool is served if any registered `send` or `high_consequence` tool has no authorizer. `activeTools` is `TOOLS` after capability gating, so its size varies with the wired backends: the registry declares thirteen tools, eleven of them `read`; `messenger_prepare` is `prepare`-class and autonomous by design, so it consults no approval-grant seam. The sole write-class tool, `messenger_send`, requires an authorizer, so when none is configured a `DenyAllAuthorizer` is installed and consulted for that tool (every send fails closed).
 
 One caveat for new capabilities: the **output-schema selection is an explicit per-tool branch** (a nested ternary in the handler), as is the backend invocation branch. Adding a tool means touching both branches — there is no name-to-schema map yet. This is the concrete place a new capability must edit core dispatch.
 
@@ -107,7 +107,7 @@ Session scope is declared per tool, not inferred. Browser-backed scopes each own
 - `messenger` uses a distinct `MESSENGER_PROFILE_DIR` (default `$HOME/.marketplace/browser-profile-messenger`), its own probe, and its own credential-login instance; sharing the marketplace profile directory is a startup error. It has no interactive reauth target yet.
 - `shopping` has **no browser session**: the eBay token is application-scoped (`EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET`, read at call time, never logged). The "session" dimension is simply whether the API is configured.
 
-Optional surfaces fail closed. `messenger_threads_list` / `messenger_thread_read` throw a typed `ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured...')` when no `ConversationBackend` is wired; `shopping_*` does the same when no `ShoppingBackend` is wired. `marketplace_status` reports the assessment without doing browser work (`browser.getInfo()`), so status never launches a browser.
+Optional surfaces fail closed. `messenger_threads_list` / `messenger_thread_read` throw a typed `ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured...')` when no `ConversationBackend` is wired; `shopping_*` does the same when no `ShoppingBackend` is wired. The draft/send conversation tools are additionally gated per method — `messenger_prepare` is advertised only where the conversation backend implements `prepareDraft` and `messenger_send` only where it implements `sendThread` — so a backend that serves conversation reads without them is never advertised as capable of drafting or sending. `marketplace_status` reports the assessment without doing browser work (`browser.getInfo()`), so status never launches a browser.
 
 Isolation invariants — including the Messenger "Seen" read exception — are normative in `provider-action-boundaries.md` and are not restated here.
 
@@ -145,7 +145,7 @@ Distinguish identity surfaces by their stability to consumers:
 | Service package name | `marketplace-mcp` | `services/marketplace/package.json` | Internal build/runtime name; coordinate renames |
 | Container image | `ghcr.io/misospace/marketplace-mcp` | `.github/workflows/ci.yml`, README | Host-facing; legacy `ghcr.io/misospace/marketplace` has **no alias** |
 | MCP server identity | `marketplace` | `new Server({ name: 'marketplace', ... })` in `service.ts` | Consumer contract; do not rename silently |
-| Public tool names | the twelve above | `TOOLS` in `tools.ts` | **The stable consumer contract** |
+| Public tool names | the thirteen above | `TOOLS` in `tools.ts` | **The stable consumer contract** |
 | Deployment workload names | ToolHive / OpenClaw profiles | external, not in this repo | Not yet registered; hosts own them |
 
 Rules:
@@ -157,7 +157,7 @@ Rules:
 
 **Consumer compatibility checklist**
 
-- [ ] Tool names unchanged (`marketplace_search`, `marketplace_fetch`, `marketplace_status`, `shopping_search`, `shopping_fetch`, `events_search`, `events_fetch`, `messenger_threads_list`, `messenger_thread_read`, `messenger_send`, `threads_posts_list`, `threads_replies_list`).
+- [ ] Tool names unchanged (`marketplace_search`, `marketplace_fetch`, `marketplace_status`, `shopping_search`, `shopping_fetch`, `events_search`, `events_fetch`, `messenger_threads_list`, `messenger_thread_read`, `messenger_prepare`, `messenger_send`, `threads_posts_list`, `threads_replies_list`).
 - [ ] MCP server identity still `marketplace`.
 - [ ] `SCHEMA_VERSION` bumped only for additive output changes; existing fields keep their names and types.
 - [ ] New status fields are additive; `capabilities` entries are added, not reshaped.
