@@ -95,7 +95,7 @@ There is exactly one `CallToolRequestSchema` handler. It:
 4. On success, runs the backend through `runBackendOperation` and parses the output against the selected output schema.
 5. On refusal or failure, returns the uniform `runtimeFailureSchema` shape with `isError: true`.
 
-`assertWritableToolsHaveAuthorizer(TOOLS, options.authorizer)` runs at registration and throws before the tool is served if any `send` or `high_consequence` tool has no authorizer. Eleven of the thirteen registered tools are `read`; `messenger_prepare` is `prepare`-class and autonomous by design, so it consults no approval-grant seam. The sole write-class tool, `messenger_send`, requires an authorizer, so when none is configured a `DenyAllAuthorizer` is installed and consulted for that tool (every send fails closed).
+`assertWritableToolsHaveAuthorizer(activeTools, options.authorizer)` runs at registration and throws before the tool is served if any registered `send` or `high_consequence` tool has no authorizer. `activeTools` is `TOOLS` after capability gating, so its size varies with the wired backends: the registry declares thirteen tools, eleven of them `read`; `messenger_prepare` is `prepare`-class and autonomous by design, so it consults no approval-grant seam. The sole write-class tool, `messenger_send`, requires an authorizer, so when none is configured a `DenyAllAuthorizer` is installed and consulted for that tool (every send fails closed).
 
 One caveat for new capabilities: the **output-schema selection is an explicit per-tool branch** (a nested ternary in the handler), as is the backend invocation branch. Adding a tool means touching both branches — there is no name-to-schema map yet. This is the concrete place a new capability must edit core dispatch.
 

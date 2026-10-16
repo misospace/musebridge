@@ -191,13 +191,14 @@ export function registerMarketplaceTools(
   // instead of the InvalidParams unknown-tool refusal. messenger_prepare needs prepareDraft and
   // messenger_send needs sendThread; the read-only messenger tools keep today's surface behavior.
   const conversationBackend = options.conversations;
-  const conversationTools: ReadonlyArray<{ readonly name: string; readonly served: boolean }> = [
-    { name: 'messenger_prepare', served: typeof conversationBackend?.prepareDraft === 'function' },
-    { name: 'messenger_send', served: typeof conversationBackend?.sendThread === 'function' }
-  ];
-  const activeTools = !conversationBackend
-    ? TOOLS.filter((tool) => !conversationTools.some(({ name }) => name === tool.name))
-    : TOOLS.filter((tool) => conversationTools.every(({ name, served }) => name !== tool.name || served));
+  const conversationCapabilities = [
+    { tool: 'messenger_prepare', method: 'prepareDraft' },
+    { tool: 'messenger_send', method: 'sendThread' }
+  ] as const satisfies ReadonlyArray<{ readonly tool: ToolName; readonly method: keyof ConversationBackend }>;
+  const activeTools = TOOLS.filter((tool) => {
+    const required = conversationCapabilities.find(({ tool: gated }) => gated === tool.name);
+    return required === undefined || typeof conversationBackend?.[required.method] === 'function';
+  });
   assertWritableToolsHaveAuthorizer(activeTools, options.authorizer);
 
   const backendName = options.backendName ?? backend.name;

@@ -575,6 +575,33 @@ describe('fixture MCP service', () => {
     expect(structured(await client.callTool({ name: 'messenger_send', arguments: { thread_id: 't-synth-0001', message: 'Delivered now.', idempotency_token: 'idempotency-full-0001' } })).error.code).toBe('APPROVAL_REQUIRED');
   });
 
+  it('advertises prepare without send when the backend can draft but not send', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    // The two tools are gated independently: a backend that can draft but never send keeps the
+    // draft tool and loses only the send tool. Gating both on one method would drop prepare here.
+    const backend: MarketplaceBackend & Omit<ConversationBackend, 'sendThread'> = {
+      name: 'draft-only-conversations',
+      search: () => [],
+      fetch: () => null,
+      listThreads: () => FIXTURE_CONVERSATIONS.map(({ thread }) => thread),
+      readThread: (input) => {
+        const conversation = FIXTURE_CONVERSATIONS.find(({ thread }) => thread.thread_id === input.thread_id);
+        return conversation === undefined ? null : { thread_id: conversation.thread.thread_id, messages: conversation.messages };
+      },
+      prepareDraft: () => ({ participant: 'Synthetic Buyer' })
+    };
+    await startServiceWith(backend, { error: vi.fn() });
+    const client = await connectClient();
+    const listed = (await client.listTools()).tools.map(({ name }) => name);
+    expect(listed).toContain('messenger_prepare');
+    expect(listed).not.toContain('messenger_send');
+    expect(structured(await client.callTool({ name: 'messenger_prepare', arguments: { thread_id: 't-synth-0001', message: 'I can meet you Saturday.' } })))
+      .toMatchObject({ ok: true, status: 'draft', sent: false, participant: 'Synthetic Buyer' });
+    await expect(client.callTool({ name: 'messenger_send', arguments: { thread_id: 't-synth-0001', message: 'Delivered now.', idempotency_token: 'idempotency-draft-only-0001' } }))
+      .rejects.toMatchObject({ code: ErrorCode.InvalidParams, message: expect.stringContaining('Unknown tool: messenger_send') });
+  });
+
   it('parses FACEBOOK_LOGIN_WAIT_SECONDS as positive whole seconds', () => {
     expect(parseLoginWaitMs(undefined)).toBe(180_000);
     expect(() => createMarketplaceService({ facebookLoginWaitMs: 0 })).toThrow(RangeError);
