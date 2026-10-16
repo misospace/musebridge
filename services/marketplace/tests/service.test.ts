@@ -402,6 +402,44 @@ describe('fixture MCP service', () => {
     expect(z.toJSONSchema(z.object({ value: z.string() })).type).toBe('object');
   });
 
+  it('pairs every advertised tool with the output schema its handler validates (#91)', async () => {
+    // One real Client round trip per advertised tool. callTool validates the returned structured
+    // content against the outputSchema listTools advertised, so this catches drift in both
+    // directions: an advertised schema the handler does not emit, and a handler that parsed its
+    // result with an unrelated tool's schema.
+    // messenger_send is excluded on purpose: it requires a single-use HMAC approval grant, so the
+    // default deny-all authorizer refuses it and that refusal path parses against the shared
+    // runtimeFailureSchema instead of this tool's own output schema.
+    const minimalArguments: ReadonlyArray<{ name: string; arguments: Record<string, unknown> }> = [
+      { name: 'marketplace_search', arguments: { query: 'BIKE', location: 'portland' } },
+      { name: 'marketplace_fetch', arguments: { id: 'fixture-bike-001' } },
+      { name: 'marketplace_status', arguments: {} },
+      { name: 'shopping_search', arguments: { query: 'solar' } },
+      { name: 'shopping_fetch', arguments: { id: 'synth-meter-003' } },
+      { name: 'events_search', arguments: { query: 'jazz' } },
+      { name: 'events_fetch', arguments: { id: 'synth-event-001' } },
+      { name: 'messenger_threads_list', arguments: {} },
+      { name: 'messenger_thread_read', arguments: { thread_id: 't-synth-0001' } },
+      { name: 'messenger_prepare', arguments: { thread_id: 't-synth-0001', message: 'Is the bike still available?' } },
+      { name: 'threads_posts_list', arguments: {} },
+      { name: 'threads_replies_list', arguments: { media_id: 'synth-thread-001' } }
+    ];
+    const client = await connectClient();
+    const advertised = await client.listTools();
+    const coveredNames = advertised.tools.map(({ name }) => name).filter((name) => name !== 'messenger_send').sort();
+    expect(coveredNames).toEqual(minimalArguments.map(({ name }) => name).sort());
+    for (const { name, arguments: args } of minimalArguments) {
+      const result = await client.callTool({ name, arguments: args });
+      expect(result.isError, `${name} returned an error result`).toBe(false);
+      expect(structured(result).ok, `${name} did not report ok: true`).toBe(true);
+    }
+    // Per-tool identity: a copy-paste swap of two output schemas must not survive the round trips above.
+    const searchOutputSchema = advertised.tools.find(({ name }) => name === 'marketplace_search')?.outputSchema;
+    const fetchOutputSchema = advertised.tools.find(({ name }) => name === 'marketplace_fetch')?.outputSchema;
+    expect(searchOutputSchema).toBeDefined();
+    expect(searchOutputSchema).not.toEqual(fetchOutputSchema);
+  });
+
   it('exports ProviderError from the package entry for backend implementers', () => {
     expect(packageEntry.ProviderError).toBe(ProviderError);
   });

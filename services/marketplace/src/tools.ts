@@ -153,6 +153,8 @@ export const TOOL_DEFINITIONS: Readonly<Record<ToolName, ActionDefinition>> = Ob
 ) as Record<ToolName, ActionDefinition>;
 
 type ToolName = typeof TOOLS[number]['name'];
+/** The union of result shapes the TOOLS table declares, one per tool. */
+type ToolOutput = z.infer<(typeof TOOLS)[number]['outputSchema']>;
 
 export interface MarketplaceToolOptions {
   backendName?: string;
@@ -206,6 +208,11 @@ export function registerMarketplaceTools(
   const shutdownSignal = options.shutdownSignal;
   const authorizer = options.authorizer ?? new DenyAllAuthorizer();
   const inputSchemas = Object.fromEntries(activeTools.map(({ name, inputSchema }) => [name, inputSchema])) as unknown as Record<ToolName, z.ZodType>;
+  // The CallTool handler validates a tool's result with the very schema the TOOLS table declares
+  // and ListTools advertises, so the pairing cannot drift: a new or renamed tool is validated with
+  // its own schema instead of silently inheriting whichever schema an unrelated branch used to fall
+  // back to.
+  const outputSchemas = Object.fromEntries(activeTools.map(({ name, outputSchema }) => [name, outputSchema])) as unknown as Record<ToolName, z.ZodType<ToolOutput>>;
   server.registerCapabilities({ tools: {} });
   server.setRequestHandler(ListToolsRequestSchema, () => ({
     tools: activeTools.map(({ name, description, inputSchema, outputSchema }) => ({
@@ -249,32 +256,8 @@ export function registerMarketplaceTools(
     }
     const decision = authorizeAction(definition, actionRequest, authorizer, grant);
 
-    const outputSchema = name === 'marketplace_search'
-      ? searchOutputSchema
-      : name === 'marketplace_fetch'
-        ? fetchOutputSchema
-        : name === 'messenger_threads_list'
-          ? threadsListOutputSchema
-          : name === 'messenger_thread_read'
-            ? threadReadOutputSchema
-            : name === 'messenger_prepare'
-              ? prepareOutputSchema
-              : name === 'messenger_send'
-                ? sendOutputSchema
-                : name === 'shopping_search'
-                  ? shoppingSearchOutputSchema
-                  : name === 'shopping_fetch'
-                    ? shoppingFetchOutputSchema
-                    : name === 'events_search'
-                      ? eventsSearchOutputSchema
-                      : name === 'events_fetch'
-                        ? eventsFetchOutputSchema
-                        : name === 'threads_posts_list'
-                          ? threadsPostsListOutputSchema
-                          : name === 'threads_replies_list'
-                            ? threadsRepliesListOutputSchema
-                            : statusOutputSchema;
-    let validatedOutput: z.infer<typeof searchOutputSchema | typeof fetchOutputSchema | typeof statusOutputSchema | typeof threadsListOutputSchema | typeof threadReadOutputSchema | typeof prepareOutputSchema | typeof sendOutputSchema | typeof shoppingSearchOutputSchema | typeof shoppingFetchOutputSchema | typeof eventsSearchOutputSchema | typeof eventsFetchOutputSchema | typeof threadsPostsListOutputSchema | typeof threadsRepliesListOutputSchema>;
+    const outputSchema = outputSchemas[name];
+    let validatedOutput: ToolOutput;
     if (!decision.ok) {
       // Refusals parse against the shared runtime failure schema so the uniform refusal shape
       // does not depend on each tool's success-oriented output schema.
