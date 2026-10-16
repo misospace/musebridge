@@ -1,7 +1,7 @@
 import { errors } from 'playwright';
 import { BrowserSessionManager, BrowserUnavailableError, sleepUntilAbort } from './browser.js';
 import type { ConversationBackend } from './backend.js';
-import { ProviderError as MarketplaceProviderError, renderDeliveredMessage } from './backend.js';
+import { ProviderError as MarketplaceProviderError, SurfaceDisabledError, renderDeliveredMessage } from './backend.js';
 import {
   threadsListInputSchema,
   threadReadInputSchema,
@@ -385,8 +385,10 @@ export class FacebookMessengerBackend implements ConversationBackend {
     }
 
     if (this.probeOnly) {
-      const code = session.code ?? 'SESSION_INVALID';
-      throw new MarketplaceProviderError(code, session.code ? messengerSessionMessage(code) : 'Messenger probe-only diagnostics are enabled; conversation access is disabled.');
+      if (session.code) {
+        throw new MarketplaceProviderError(session.code, messengerSessionMessage(session.code));
+      }
+      throw new SurfaceDisabledError('Messenger probe-only diagnostics are enabled; conversation access is disabled.');
     }
     if (session.status === 'session_needs_reauth') {
       const recovery = await this.waitForCredentialLogin(session.code, signal);

@@ -92,6 +92,14 @@ export class ProviderError extends Error {
   }
 }
 
+export class SurfaceDisabledError extends Error {
+  readonly code = 'SURFACE_DISABLED' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'SurfaceDisabledError';
+  }
+}
+
 // The delivery form that binds the grant's idempotency token into the delivered text, so a
 // timed-out send can be reconciled against the thread (matched by the token substring).
 export function renderDeliveredMessage(input: ThreadSendInput): string {
