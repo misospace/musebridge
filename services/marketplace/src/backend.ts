@@ -8,6 +8,8 @@ import {
   shoppingSearchInputSchema,
   eventsFetchInputSchema,
   eventsSearchInputSchema,
+  threadsPostsListInputSchema,
+  threadsRepliesListInputSchema,
   providerErrorMetadataSchema,
   providerErrorSchema,
   searchInputSchema,
@@ -19,7 +21,9 @@ import {
   type ProductOffer,
   type ProviderErrorCode,
   type ProviderErrorMetadata,
-  type ThreadSendInput
+  type ThreadSendInput,
+  type ThreadsPost,
+  type ThreadsReply
 } from './domain.js';
 import { FIXTURE_CONVERSATIONS, FIXTURE_LISTINGS } from './fixtures.js';
 
@@ -50,6 +54,27 @@ export interface EventsBackend {
   readonly name: string;
   search(input: ReturnType<typeof eventsSearchInputSchema.parse>, signal: AbortSignal): Promise<EventAvailability[]> | EventAvailability[];
   fetch(input: ReturnType<typeof eventsFetchInputSchema.parse>, signal: AbortSignal): Promise<EventAvailability | null> | EventAvailability | null;
+}
+
+// Cross-site Threads (Meta) social surface (#84). HTTP-API-backed, strictly read-only;
+// `name` is the configured backend kind ('threads'), while each post/reply carries its
+// own `provider: 'threads'` value. No DMs, no saved items, no keyword search, no
+// external profile discovery, no browser session — fail closed on missing credentials
+// (#46/#38).
+export interface ThreadsPostPage {
+  posts: ThreadsPost[];
+  truncated: boolean;
+}
+
+export interface ThreadsReplyPage {
+  replies: ThreadsReply[];
+  truncated: boolean;
+}
+
+export interface ThreadsBackend {
+  readonly name: string;
+  listOwnPosts(input: ReturnType<typeof threadsPostsListInputSchema.parse>, signal: AbortSignal): Promise<ThreadsPostPage> | ThreadsPostPage;
+  listReplies(input: ReturnType<typeof threadsRepliesListInputSchema.parse>, signal: AbortSignal): Promise<ThreadsReplyPage | null> | ThreadsReplyPage | null;
 }
 
 export class ProviderError extends Error {
