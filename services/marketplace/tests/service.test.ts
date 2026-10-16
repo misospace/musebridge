@@ -320,7 +320,7 @@ describe('fixture MCP service', () => {
     expect(client.getServerVersion()).toEqual({ name: 'marketplace', version: packageVersion });
     const tools = await client.listTools();
     expect(tools.tools.map(({ name }) => name)).toEqual([
-      'marketplace_search', 'marketplace_fetch', 'marketplace_status', 'shopping_search', 'shopping_fetch', 'events_search', 'events_fetch', 'messenger_threads_list', 'messenger_thread_read', 'messenger_send'
+      'marketplace_search', 'marketplace_fetch', 'marketplace_status', 'shopping_search', 'shopping_fetch', 'events_search', 'events_fetch', 'messenger_threads_list', 'messenger_thread_read', 'messenger_prepare', 'messenger_send'
     ]);
     expect(tools.tools.map(({ description }) => description)).toEqual([
       'Search marketplace listings.',
@@ -332,6 +332,7 @@ describe('fixture MCP service', () => {
       "Fetch one event's read-only availability by canonical ID or URL from the configured events source. Read-only.",
       'List recent seller conversation threads from the Facebook Marketplace inbox. Read-only.',
       'Read the messages of one marketplace conversation thread by ID. Read-only, but opening the thread marks it "Seen" for the other participant.',
+      'Draft one seller reply for a conversation thread and return the exact send payload with its authorization digest. Sends nothing and grants no approval, but opening the thread marks it "Seen" for the other participant.',
       'Send one approval-grant-bound message into a conversation thread. Requires a single-use signed approval grant. Delivery is confirmed by reading the thread for the idempotency token; unconfirmed sends are reported as unknown and are never resent.'
     ]);
     for (const tool of tools.tools) {
@@ -607,7 +608,7 @@ describe('fixture MCP service', () => {
     expect(result).toEqual({
       ok: true,
       service_version: packageVersion,
-      schema_version: '1.3.0',
+      schema_version: '1.4.0',
       backend: 'status-only',
       facebook_session: { status: 'session_unknown' },
       shopping_backend: 'fixture',
@@ -681,7 +682,7 @@ describe('fixture MCP service', () => {
     expect(customSearch.backend).toBe('consumer-test');
     expect(customFetch.backend).toBe('consumer-test');
     expect(customStatus.backend).toBe('consumer-test');
-    expect(customStatus.schema_version).toBe('1.3.0');
+    expect(customStatus.schema_version).toBe('1.4.0');
     expect(customStatus.capabilities).toEqual([
       { surface: 'marketplace', provider: 'facebook', backend: 'consumer-test' },
       { surface: 'shopping', provider: 'ebay', backend: 'fixture' },
@@ -904,7 +905,7 @@ describe('fixture MCP service', () => {
     ]);
     expect(structured(first).listings[0].id).toBe('fixture-chair-002');
     expect(structured(second).listing.state).toBe('sold');
-    expect(structured(third).schema_version).toBe('1.3.0');
+    expect(structured(third).schema_version).toBe('1.4.0');
   });
 
   it('bounds shutdown with both an in-flight backend call and a partial request body', async () => {

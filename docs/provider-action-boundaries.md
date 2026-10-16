@@ -37,11 +37,11 @@ Every registered MCP tool declares exactly one risk class and the session scope 
 | Class | Meaning | Autonomy | Enforcement |
 |---|---|---|---|
 | `read` | No external side effect beyond a narrow, named exception: provider-side bookkeeping that is intrinsic to reading the caller's own data (today: Messenger read receipts — opening a thread marks it "Seen", which the other participant can see). Anything that discloses content, delivers a message, or changes state the counterpart observes beyond that bookkeeping is not `read`. | Autonomous | Declared scope; no grant. The scope selects the browser profile and probe the tool's backend uses, and each surface's backend validates its own session, failing closed on `session_unknown` (search/fetch and the conversation reads all do this) |
-| `prepare` | Builds a draft/artifact with no external effect (e.g. a message draft) | Autonomous, but its output is **not** authorization to send | Same as `read`; no grant |
+| `prepare` | Builds a draft/artifact with no external effect beyond the provider-side read receipt the `read` class already allows (e.g. a message draft) | Autonomous, but its output is **not** authorization to send | Same as `read`; no grant |
 | `send` | Delivers content to an external party (e.g. sends a seller message) | Never autonomous | Valid scope **and** a single-use, issuance-authenticated approval grant bound to the exact payload, verified and consumed atomically before execution (today: `messenger_send`, verified by the HMAC issuer-signature authorizer) |
 | `high_consequence` | Purchases, payments, sharing private data, hard commitments | Never | Refused unconditionally. No grant can enable it; enabling it later requires changing this gate explicitly, not presenting a better grant |
 
-Registered today: `marketplace_search`, `marketplace_fetch`, `marketplace_status` (scope `marketplace`) and `messenger_threads_list`, `messenger_thread_read` (scope `messenger`, opt-in `MARKETPLACE_MESSENGER=1`) as `read`, plus `messenger_send` (scope `messenger`, opt-in) as `send`. The registry is derived from the tool declarations themselves, so a tool cannot exist without a risk class.
+Registered today: `marketplace_search`, `marketplace_fetch`, `marketplace_status` (scope `marketplace`) and `messenger_threads_list`, `messenger_thread_read` (scope `messenger`, opt-in `MARKETPLACE_MESSENGER=1`) as `read`, plus `messenger_prepare` (scope `messenger`, opt-in) as `prepare` and `messenger_send` (scope `messenger`, opt-in) as `send`. The registry is derived from the tool declarations themselves, so a tool cannot exist without a risk class.
 
 ## Approval grants
 
@@ -94,4 +94,4 @@ Authorization refusals are normal, non-exceptional tool responses — `{ ok: fal
 
 ## Test invariants
 
-The suite pins: registry covers every registered tool and all are `read` today except the opt-in `messenger_send` (`send`); unknown/malformed grants fail closed; every grant field mismatch refuses; a signature that does not verify is refused while a correctly signed grant delivers and is single-use; expiry is exact; consumption is single-use and race-free; `high_consequence` refuses even a valid grant; digest is key-order independent and payload-sensitive; and existing search/fetch/status responses are unchanged.
+The suite pins: registry covers every registered tool; everything is `read` today except opt-in `messenger_prepare` (`prepare`, autonomous, needs no grant) and opt-in `messenger_send` (`send`); unknown/malformed grants fail closed; every grant field mismatch refuses; a signature that does not verify is refused while a correctly signed grant delivers and is single-use; expiry is exact; consumption is single-use and race-free; `high_consequence` refuses even a valid grant; digest is key-order independent and payload-sensitive; and existing search/fetch/status responses are unchanged.

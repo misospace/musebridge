@@ -1,7 +1,8 @@
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { ProviderError, SurfaceDisabledError, type ConversationBackend, type EventsBackend, type MarketplaceBackend, type ShoppingBackend } from './backend.js';
+import { ProviderError, SurfaceDisabledError, renderDeliveredMessage, type ConversationBackend, type EventsBackend, type MarketplaceBackend, type ShoppingBackend } from './backend.js';
 import type { ProviderSessionAssessment } from './browser.js';
 import {
   authorizeAction,
@@ -20,6 +21,8 @@ import {
   threadReadOutputSchema,
   threadSendInputSchema,
   sendOutputSchema,
+  threadPrepareInputSchema,
+  prepareOutputSchema,
   SCHEMA_VERSION,
   searchInputSchema,
   searchOutputSchema,
@@ -111,6 +114,13 @@ const TOOLS = [
     definition: { riskClass: 'read', scope: messengerScope }
   },
   {
+    name: 'messenger_prepare',
+    description: 'Draft one seller reply for a conversation thread and return the exact send payload with its authorization digest. Sends nothing and grants no approval, but opening the thread marks it "Seen" for the other participant.',
+    inputSchema: threadPrepareInputSchema,
+    outputSchema: prepareOutputSchema,
+    definition: { riskClass: 'prepare', scope: messengerScope }
+  },
+  {
     name: 'messenger_send',
     description: 'Send one approval-grant-bound message into a conversation thread. Requires a single-use signed approval grant. Delivery is confirmed by reading the thread for the idempotency token; unconfirmed sends are reported as unknown and are never resent.',
     inputSchema: threadSendInputSchema,
@@ -155,9 +165,10 @@ export function registerMarketplaceTools(
   logger: Pick<Console, 'error'> = console,
   options: MarketplaceToolOptions = {}
 ): void {
-  // messenger_send is only live where the conversation surface exists; elsewhere it is an
-  // unknown tool and a call fails InvalidParams like any unregistered tool.
-  const activeTools = options.conversations ? TOOLS : TOOLS.filter((tool) => tool.name !== 'messenger_send');
+  // The messenger conversation tools (draft and send) are only live where the conversation surface
+  // exists; elsewhere they are unknown tools and a call fails InvalidParams like any unregistered tool.
+  const conversationTools: readonly string[] = ['messenger_prepare', 'messenger_send'];
+  const activeTools = options.conversations ? TOOLS : TOOLS.filter((tool) => !conversationTools.includes(tool.name));
   assertWritableToolsHaveAuthorizer(activeTools, options.authorizer);
 
   const backendName = options.backendName ?? backend.name;
@@ -189,6 +200,9 @@ export function registerMarketplaceTools(
     if (!parsed.success) throw new McpError(ErrorCode.InvalidParams, formatValidationError(parsed.error));
 
     const definition = TOOL_DEFINITIONS[name];
+    // The digest here covers the tool's own input. For messenger_prepare that is deliberately the
+    // smaller {thread_id, message} input, not the published send digest: prepare is autonomous and
+    // consumes no grant, and no approval can ever be requested over this request.
     const actionRequest: ActionRequest = {
       ...definition.scope,
       action: name,
@@ -213,18 +227,20 @@ export function registerMarketplaceTools(
           ? threadsListOutputSchema
           : name === 'messenger_thread_read'
             ? threadReadOutputSchema
-            : name === 'messenger_send'
-              ? sendOutputSchema
-              : name === 'shopping_search'
-                ? shoppingSearchOutputSchema
-                : name === 'shopping_fetch'
-                  ? shoppingFetchOutputSchema
-                  : name === 'events_search'
-                    ? eventsSearchOutputSchema
-                    : name === 'events_fetch'
-                      ? eventsFetchOutputSchema
-                      : statusOutputSchema;
-    let validatedOutput: z.infer<typeof searchOutputSchema | typeof fetchOutputSchema | typeof statusOutputSchema | typeof threadsListOutputSchema | typeof threadReadOutputSchema | typeof sendOutputSchema | typeof shoppingSearchOutputSchema | typeof shoppingFetchOutputSchema | typeof eventsSearchOutputSchema | typeof eventsFetchOutputSchema>;
+            : name === 'messenger_prepare'
+              ? prepareOutputSchema
+              : name === 'messenger_send'
+                ? sendOutputSchema
+                : name === 'shopping_search'
+                  ? shoppingSearchOutputSchema
+                  : name === 'shopping_fetch'
+                    ? shoppingFetchOutputSchema
+                    : name === 'events_search'
+                      ? eventsSearchOutputSchema
+                      : name === 'events_fetch'
+                        ? eventsFetchOutputSchema
+                        : statusOutputSchema;
+    let validatedOutput: z.infer<typeof searchOutputSchema | typeof fetchOutputSchema | typeof statusOutputSchema | typeof threadsListOutputSchema | typeof threadReadOutputSchema | typeof prepareOutputSchema | typeof sendOutputSchema | typeof shoppingSearchOutputSchema | typeof shoppingFetchOutputSchema | typeof eventsSearchOutputSchema | typeof eventsFetchOutputSchema>;
     if (!decision.ok) {
       // Refusals parse against the shared runtime failure schema so the uniform refusal shape
       // does not depend on each tool's success-oriented output schema.
@@ -272,6 +288,43 @@ export function registerMarketplaceTools(
           output = thread === null
             ? runtimeFailure('NOT_FOUND', 'No conversation thread matched the supplied identifier.')
             : { ok: true, backend: backendName, thread_id: thread.thread_id, messages: thread.messages };
+        } else if (name === 'messenger_prepare') {
+          const conversations = options.conversations;
+          if (!conversations) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');
+          // Token first, complete validated send payload next, digest last: the published
+          // subject_digest is computed over that validated payload, so it is exactly what
+          // authorizeAction later checks for messenger_send against the same send_input. Digesting
+          // the smaller prepare input instead would mismatch every legitimate later send.
+          const sendInput = threadSendInputSchema.parse({ ...(parsed.data as z.infer<typeof threadPrepareInputSchema>), idempotency_token: randomUUID() });
+          const draft = await runBackendOperation((signal) => conversations.prepareDraft(sendInput, signal), backendTimeoutMs, extra.signal, shutdownSignal);
+          if (draft === null) {
+            // No thread means no draft: report the same NOT_FOUND messenger_thread_read reports for
+            // this thread id rather than a digest no later send could ever be authorized against.
+            output = runtimeFailure('NOT_FOUND', 'No conversation thread matched the supplied identifier.');
+          } else {
+            const renderedMessage = renderDeliveredMessage(sendInput);
+            output = {
+              ok: true,
+              backend: backendName,
+              thread_id: sendInput.thread_id,
+              status: 'draft',
+              sent: false,
+              participant: draft.participant,
+              draft_message: sendInput.message,
+              rendered_message: renderedMessage,
+              // Counted from the rendered text so the schema's literal(1) really enforces the
+              // exactly-once marker the reconciliation depends on.
+              counterparty_marker: {
+                included: true,
+                token: sendInput.idempotency_token,
+                occurrences: renderedMessage.split(sendInput.idempotency_token).length - 1,
+                disclosure: 'The rendered draft appends the idempotency token in brackets; the counterparty will see that marker when the message is sent.'
+              },
+              idempotency_token: sendInput.idempotency_token,
+              send_input: sendInput,
+              subject_digest: subjectDigest(sendInput)
+            };
+          }
         } else if (name === 'messenger_send') {
           const conversations = options.conversations;
           if (!conversations) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');

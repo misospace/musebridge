@@ -318,9 +318,11 @@ describe('registered tool action boundaries', () => {
     expect(ACTION_RISK_CLASSES).toEqual(['read', 'prepare', 'send', 'high_consequence']);
     expect(Object.values(TOOL_DEFINITIONS).every(({ riskClass }) => (ACTION_RISK_CLASSES as readonly string[]).includes(riskClass))).toBe(true);
     expect(TOOL_DEFINITIONS.messenger_send.riskClass).toBe('send');
+    expect(TOOL_DEFINITIONS.messenger_prepare.riskClass).toBe('prepare');
     expect(TOOL_DEFINITIONS.messenger_threads_list.riskClass).toBe('read');
     expect(TOOL_DEFINITIONS.messenger_thread_read.riskClass).toBe('read');
     expect(TOOL_DEFINITIONS.messenger_send.scope).toEqual({ provider: 'facebook', account: 'default', surface: 'messenger' });
+    expect(TOOL_DEFINITIONS.messenger_prepare.scope).toEqual({ provider: 'facebook', account: 'default', surface: 'messenger' });
     expect(TOOL_DEFINITIONS.messenger_threads_list.scope).toEqual({ provider: 'facebook', account: 'default', surface: 'messenger' });
     expect(TOOL_DEFINITIONS.messenger_thread_read.scope).toEqual({ provider: 'facebook', account: 'default', surface: 'messenger' });
 
@@ -333,9 +335,9 @@ describe('registered tool action boundaries', () => {
       await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
       const tools = await client.listTools();
       const registeredNames = tools.tools.map(({ name }) => name).sort();
-      // Without a configured conversation surface the send tool is not live, so the live
-      // listing is the declaration map minus messenger_send.
-      expect(registeredNames).toEqual(Object.keys(TOOL_DEFINITIONS).filter((name) => name !== 'messenger_send').sort());
+      // Without a configured conversation surface the draft and send tools are not live, so the
+      // live listing is the declaration map minus both conversation-gated tools.
+      expect(registeredNames).toEqual(Object.keys(TOOL_DEFINITIONS).filter((name) => name !== 'messenger_send' && name !== 'messenger_prepare').sort());
     } finally {
       await Promise.allSettled([client.close(), server.close()]);
     }

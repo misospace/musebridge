@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { PROVIDER_SESSION_ASSESSMENTS } from './browser.js';
 
-export const SCHEMA_VERSION = '1.3.0';
+export const SCHEMA_VERSION = '1.4.0';
 export const SERVICE_VERSION = '0.1.0'; // x-release-please-version
 export const MAX_QUERY_LENGTH = 256;
 export const MAX_LOCATION_LENGTH = 256;
@@ -159,15 +159,37 @@ export const threadReadInputSchema = z.object({
 export type ThreadsListInput = z.infer<typeof threadsListInputSchema>;
 export type ThreadReadInput = z.infer<typeof threadReadInputSchema>;
 
+// Shared outbound shapes so a prepared draft and a sent message can never drift apart.
+const outboundMessageSchema = z.string().min(1).max(2000).regex(/^[^\u0000-\u001F\u007F]+$/, 'message must not contain control characters');
+const idempotencyTokenSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/);
+
 // Messenger send contract (#63). The idempotency token is embedded in the sent message so a
 // timed-out send can be reconciled against the thread before any retry (never resent blindly).
 export const threadSendInputSchema = z.object({
   thread_id: conversationThreadIdSchema,
-  message: z.string().min(1).max(2000).regex(/^[^\u0000-\u001F\u007F]+$/, 'message must not contain control characters'),
-  idempotency_token: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/)
+  message: outboundMessageSchema,
+  idempotency_token: idempotencyTokenSchema
 }).strict();
 
 export type ThreadSendInput = z.infer<typeof threadSendInputSchema>;
+
+// Messenger prepare contract (#62). The tool mints the idempotency token first, builds and
+// validates the complete send payload, and only then digests that payload, so the published
+// subject_digest is exactly what a later messenger_send authorization is checked against. It
+// sends nothing and grants no approval.
+export const threadPrepareInputSchema = z.object({
+  thread_id: conversationThreadIdSchema,
+  message: outboundMessageSchema
+}).strict();
+
+export type ThreadPrepareInput = z.infer<typeof threadPrepareInputSchema>;
+
+/** Conversation-scoped draft context for a proposed send: the counterparty the draft would address,
+ * or null when no counterparty name is attributed. Deliberately carries no thread id — the send
+ * target is the caller's validated input, so a backend can never redirect a prepared send. */
+export interface ConversationDraft {
+  readonly participant: string | null;
+}
 
 export const runtimeErrorCodeSchema = z.enum([
   ...PROVIDER_ERROR_CODES,
@@ -334,6 +356,36 @@ export const sendSuccessSchema = z.object({
 }).strict();
 
 export const sendOutputSchema = z.union([sendSuccessSchema, runtimeFailureSchema]);
+
+// Prepared draft envelope (#62). `status: 'draft'` and `sent: false` are literals so no consumer
+// can read a prepared draft as a delivery or an authorization; `send_input` is the exact object a
+// later messenger_send will be authorized against, and `subject_digest` its digest. `rendered_message`
+// is bounded at 2131 — a 2000-character message plus one space, the opening bracket, a 128-character
+// token, and the closing bracket.
+export const prepareDraftCounterpartyMarkerSchema = z.object({
+  included: z.literal(true),
+  token: idempotencyTokenSchema,
+  // Exactly one bracketed marker, so a later reconciliation can never match an ambiguous text.
+  occurrences: z.literal(1),
+  disclosure: z.string().min(1).max(320)
+}).strict();
+
+export const prepareSuccessSchema = z.object({
+  ok: z.literal(true),
+  backend: backendNameSchema,
+  thread_id: conversationThreadIdSchema,
+  status: z.literal('draft'),
+  sent: z.literal(false),
+  participant: z.string().min(1).max(128).nullable(),
+  draft_message: outboundMessageSchema,
+  rendered_message: z.string().min(1).max(2131),
+  counterparty_marker: prepareDraftCounterpartyMarkerSchema,
+  idempotency_token: idempotencyTokenSchema,
+  send_input: threadSendInputSchema,
+  subject_digest: z.string().regex(/^[0-9a-f]{64}$/, 'subject_digest must be a lowercase sha-256 hex digest')
+}).strict();
+
+export const prepareOutputSchema = z.union([prepareSuccessSchema, runtimeFailureSchema]);
 export type RuntimeFailure = z.infer<typeof runtimeFailureSchema>;
 export type ProviderErrorCode = typeof PROVIDER_ERROR_CODES[number];
 export type ProviderErrorMetadata = z.infer<typeof providerErrorMetadataSchema>;

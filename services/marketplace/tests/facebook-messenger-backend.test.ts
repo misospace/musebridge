@@ -659,3 +659,45 @@ describe('Facebook Messenger backend send submit-triggered metadata', () => {
     expect(error.metadata).not.toHaveProperty('submit_triggered');
   });
 });
+
+describe('Facebook Messenger backend prepareDraft', () => {
+  const draftInput = sendInput();
+
+  it('names the last counterparty sender from the thread read and never sends', async () => {
+    const backend = createBackend();
+    const sendThread = vi.spyOn(backend, 'sendThread');
+    vi.spyOn(backend, 'readThread').mockResolvedValue({
+      thread_id: draftInput.thread_id,
+      messages: [
+        { sender: 'other' as const, sender_name: 'First Buyer', text: 'Is it available?' },
+        { sender: 'you' as const, text: 'Yes it is.' },
+        { sender: 'other' as const, sender_name: 'Second Buyer', text: 'Can you hold it?' }
+      ]
+    });
+
+    await expect(backend.prepareDraft(draftInput, new AbortController().signal))
+      .resolves.toEqual({ participant: 'Second Buyer' });
+    // Drafting reads the thread for conversation context only: it must never touch the send path.
+    expect(sendThread).not.toHaveBeenCalled();
+  });
+
+  it('reports a null participant rather than a fabricated handle when no counterparty is attributed', async () => {
+    const backend = createBackend();
+    // Extraction drops rows with an empty or over-bound sender name, so an unattributed thread is
+    // ordinary and must not be reported as though the counterparty were known.
+    vi.spyOn(backend, 'readThread').mockResolvedValue({
+      thread_id: draftInput.thread_id,
+      messages: [{ sender: 'you' as const, text: 'Yes it is.' }]
+    });
+
+    await expect(backend.prepareDraft(draftInput, new AbortController().signal))
+      .resolves.toEqual({ participant: null });
+  });
+
+  it('reports an absent thread as null so the tool can answer NOT_FOUND', async () => {
+    const backend = createBackend();
+    vi.spyOn(backend, 'readThread').mockResolvedValue(null);
+
+    await expect(backend.prepareDraft(draftInput, new AbortController().signal)).resolves.toBeNull();
+  });
+});

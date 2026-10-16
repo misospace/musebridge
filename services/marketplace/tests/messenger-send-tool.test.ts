@@ -96,6 +96,7 @@ function fakeConversations(send: SendBehavior, read: ReadBehavior, input: Thread
   const conversations = {
     name: 'fixture',
     listThreads: () => [],
+    prepareDraft: () => { throw new Error('messenger_send must never draft'); },
     readThread: () => {
       calls.readThread += 1;
       if (read === 'throws') throw new ProviderError('TIMEOUT', 'The backend operation exceeded its deadline.');
@@ -140,6 +141,7 @@ describe('surface-disabled tool envelope', () => {
     const conversations = {
       name: 'fixture',
       listThreads: () => { throw new SurfaceDisabledError(message); },
+      prepareDraft: () => { throw new SurfaceDisabledError(message); },
       readThread: () => { throw new SurfaceDisabledError(message); },
       sendThread: () => undefined
     } satisfies ConversationBackend;
@@ -154,6 +156,10 @@ describe('surface-disabled tool envelope', () => {
     const read = await invoke(handlers, 'messenger_thread_read', { thread_id: 't-synth-0001' });
     expect(read.isError).toBe(true);
     expect(read.structuredContent).toEqual({ ok: false, error: { code: 'SURFACE_DISABLED', message } });
+
+    const prepared = await invoke(handlers, 'messenger_prepare', { thread_id: 't-synth-0001', message: 'Yes, still available.' });
+    expect(prepared.isError).toBe(true);
+    expect(prepared.structuredContent).toEqual({ ok: false, error: { code: 'SURFACE_DISABLED', message } });
 
     expect(logger.error).not.toHaveBeenCalled();
   });
@@ -413,6 +419,7 @@ describe('messenger_send timeout reconciliation', () => {
     const conversations = {
       name: 'fixture',
       listThreads: () => [],
+      prepareDraft: () => { throw new Error('messenger_send must never draft'); },
       readThread: () => {
         readCalled = true;
         return readInFlight;
