@@ -155,19 +155,30 @@ function requireDataArray(payload: unknown): unknown[] | null {
 // Extracts the forward cursor without ever surfacing the raw `paging.next` URL: that URL
 // can carry the access token, so only the `after` value is ever returned. `cursors.after`
 // wins when present; otherwise the `after` search param of `next` is parsed out. A present
-// but unresolvable `next` is schema drift — throwing keeps a drifted cursor from silently
-// claiming the page set was exhausted.
+// cursor field we cannot read is schema drift — `next` unresolvable, or `cursors` sent in a
+// shape we do not recognize — and throwing keeps a drifted cursor from silently claiming
+// the page set was exhausted (a false `truncated: false`).
 function cursorAfter(payload: unknown): string | undefined {
   if (!payload || typeof payload !== 'object') return undefined;
   const paging = (payload as { paging?: unknown }).paging;
   if (!paging || typeof paging !== 'object') return undefined;
   const cursors = (paging as { cursors?: unknown }).cursors;
+  // A `cursors` field the provider sent that we cannot read as a forward cursor. `next` is a
+  // separate field that may still carry one, so this is only drift once `next` cannot help.
+  // `after: null`/`undefined` is the documented "no cursor" case and is not drift.
+  let cursorsUnreadable = cursors !== undefined && cursors !== null;
   if (cursors && typeof cursors === 'object') {
     const after = (cursors as { after?: unknown }).after;
     if (typeof after === 'string' && after !== '') return after;
+    cursorsUnreadable = after !== undefined && after !== null;
   }
   const next = (paging as { next?: unknown }).next;
-  if (next === undefined || next === null || next === '') return undefined;
+  if (next === undefined || next === null || next === '') {
+    if (cursorsUnreadable) {
+      throw new ProviderError('UPSTREAM_ERROR', 'The Threads response paging cursor was not recognized.');
+    }
+    return undefined;
+  }
   if (typeof next === 'string') {
     try {
       const after = new URL(next).searchParams.get('after');

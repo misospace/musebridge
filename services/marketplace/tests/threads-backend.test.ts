@@ -61,6 +61,16 @@ beforeAll(async () => {
           paging: { next: 'not-a-url' }
         });
       }
+      if (mode === 'posts-bad-cursor' || mode === 'posts-bad-cursors-shape' || mode === 'posts-null-cursor') {
+        const cursors =
+          mode === 'posts-bad-cursor' ? { after: 42 } :
+          mode === 'posts-bad-cursors-shape' ? 'cursor-2' :
+          { after: null };
+        return json(res, {
+          data: [{ id: 'synth-bad-cursor-001', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_user/post/synth-bad-cursor-001', text: 'Synthetic post.', username: 'synth_user' }],
+          paging: { cursors }
+        });
+      }
       if (mode === 'pagination') {
         const after = url.searchParams.get('after');
         seenAfters.push(after);
@@ -157,6 +167,25 @@ describe('ThreadsApiBackend', () => {
     await expect(backend().listOwnPosts(postsInput, signal())).rejects.toMatchObject({
       code: 'UPSTREAM_ERROR', message: 'The Threads response paging cursor was not recognized.'
     });
+  });
+
+  it('rejects a non-string cursors.after with no paging.next as schema drift instead of claiming completeness', async () => {
+    mode = 'posts-bad-cursor';
+    await expect(backend().listOwnPosts(postsInput, signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The Threads response paging cursor was not recognized.'
+    });
+  });
+
+  it('rejects an unreadable cursors field with no paging.next as schema drift', async () => {
+    mode = 'posts-bad-cursors-shape';
+    await expect(backend().listOwnPosts(postsInput, signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The Threads response paging cursor was not recognized.'
+    });
+  });
+
+  it('still reports an exhausted page when the provider sends a null cursors.after', async () => {
+    mode = 'posts-null-cursor';
+    await expect(backend().listOwnPosts(postsInput, signal())).resolves.toMatchObject({ truncated: false });
   });
 
   it('marks a page exhausted at the exact limit as complete, not truncated', async () => {
