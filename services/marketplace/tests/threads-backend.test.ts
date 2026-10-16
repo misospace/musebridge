@@ -61,10 +61,12 @@ beforeAll(async () => {
           paging: { next: 'not-a-url' }
         });
       }
-      if (mode === 'posts-bad-cursor' || mode === 'posts-bad-cursors-shape' || mode === 'posts-null-cursor') {
+      if (mode === 'posts-bad-cursor' || mode === 'posts-bad-cursors-shape' || mode === 'posts-array-cursors' || mode === 'posts-empty-cursor' || mode === 'posts-null-cursor') {
         const cursors =
           mode === 'posts-bad-cursor' ? { after: 42 } :
           mode === 'posts-bad-cursors-shape' ? 'cursor-2' :
+          mode === 'posts-array-cursors' ? ['cursor-2'] :
+          mode === 'posts-empty-cursor' ? { after: '' } :
           { after: null };
         return json(res, {
           data: [{ id: 'synth-bad-cursor-001', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_user/post/synth-bad-cursor-001', text: 'Synthetic post.', username: 'synth_user' }],
@@ -178,6 +180,20 @@ describe('ThreadsApiBackend', () => {
 
   it('rejects an unreadable cursors field with no paging.next as schema drift', async () => {
     mode = 'posts-bad-cursors-shape';
+    await expect(backend().listOwnPosts(postsInput, signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The Threads response paging cursor was not recognized.'
+    });
+  });
+
+  it('rejects an array cursors field with no paging.next as schema drift', async () => {
+    mode = 'posts-array-cursors';
+    await expect(backend().listOwnPosts(postsInput, signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The Threads response paging cursor was not recognized.'
+    });
+  });
+
+  it('rejects an empty cursors.after with no paging.next as schema drift', async () => {
+    mode = 'posts-empty-cursor';
     await expect(backend().listOwnPosts(postsInput, signal())).rejects.toMatchObject({
       code: 'UPSTREAM_ERROR', message: 'The Threads response paging cursor was not recognized.'
     });

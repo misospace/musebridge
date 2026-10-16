@@ -156,18 +156,19 @@ function requireDataArray(payload: unknown): unknown[] | null {
 // can carry the access token, so only the `after` value is ever returned. `cursors.after`
 // wins when present; otherwise the `after` search param of `next` is parsed out. A present
 // cursor field we cannot read is schema drift — `next` unresolvable, or `cursors` sent in a
-// shape we do not recognize — and throwing keeps a drifted cursor from silently claiming
-// the page set was exhausted (a false `truncated: false`).
+// shape we do not recognize (not an object, or an unusable `after`) — and throwing keeps a
+// drifted cursor from silently claiming the page set was exhausted (a false `truncated: false`).
 function cursorAfter(payload: unknown): string | undefined {
   if (!payload || typeof payload !== 'object') return undefined;
   const paging = (payload as { paging?: unknown }).paging;
   if (!paging || typeof paging !== 'object') return undefined;
   const cursors = (paging as { cursors?: unknown }).cursors;
-  // A `cursors` field the provider sent that we cannot read as a forward cursor. `next` is a
-  // separate field that may still carry one, so this is only drift once `next` cannot help.
+  // A `cursors` field the provider sent that we cannot read as a forward cursor — a non-object
+  // (including an array), or an `after` that is neither a non-empty string nor absent. `next` is
+  // a separate field that may still carry one, so this is only drift once `next` cannot help.
   // `after: null`/`undefined` is the documented "no cursor" case and is not drift.
   let cursorsUnreadable = cursors !== undefined && cursors !== null;
-  if (cursors && typeof cursors === 'object') {
+  if (cursors && typeof cursors === 'object' && !Array.isArray(cursors)) {
     const after = (cursors as { after?: unknown }).after;
     if (typeof after === 'string' && after !== '') return after;
     cursorsUnreadable = after !== undefined && after !== null;
