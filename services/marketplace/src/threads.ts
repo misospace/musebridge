@@ -51,8 +51,10 @@ export class ThreadsClient {
   async listOwnPosts(options: ThreadsPostsListOptions, signal?: AbortSignal): Promise<unknown> {
     const params = new URLSearchParams();
     // `fields` documents the only fields we can promise to map (#46); unrequested fields
-    // would silently widen the contract.
-    params.set('fields', 'id,media_type,media_url,permalink,text,thumbnail_url,timestamp,username,shortcode,is_quote_post,quoted_post,reposted_post,reply_count,like_count');
+    // would silently widen the contract. `owner` is requested because `threads_user_id` is
+    // mapped from `owner.id`: without it a live response carries no owner and every post
+    // would map to `threads_user_id: null`.
+    params.set('fields', 'id,media_type,media_url,permalink,text,thumbnail_url,timestamp,username,owner,shortcode,is_quote_post,quoted_post,reposted_post,reply_count,like_count');
     params.set('limit', String(options.limit));
     if (options.since !== undefined) {
       // Calendar date `since` is forwarded verbatim. The Threads API accepts the
@@ -71,7 +73,7 @@ export class ThreadsClient {
     const { mediaId, after } = input;
     if (typeof mediaId !== 'string' || !mediaId.trim()) throw new TypeError('mediaId must not be empty');
     const params = new URLSearchParams();
-    params.set('fields', 'id,media_type,media_url,permalink,text,thumbnail_url,timestamp,username,shortcode,is_quote_post,quoted_post,reposted_post');
+    params.set('fields', 'id,media_type,media_url,permalink,text,thumbnail_url,timestamp,username,owner,shortcode,is_quote_post,quoted_post,reposted_post');
     if (after !== undefined && after !== '') {
       params.set('after', after);
     }

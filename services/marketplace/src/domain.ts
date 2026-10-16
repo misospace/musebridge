@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { PROVIDER_SESSION_ASSESSMENTS } from './browser.js';
 
-export const SCHEMA_VERSION = '1.3.0';
+export const SCHEMA_VERSION = '1.4.0';
 export const SERVICE_VERSION = '0.1.0'; // x-release-please-version
 export const MAX_QUERY_LENGTH = 256;
 export const MAX_LOCATION_LENGTH = 256;
@@ -12,6 +12,9 @@ export const MAX_PROVIDER_ERROR_MESSAGE_LENGTH = 256;
 export const MAX_PROVIDER_ACTION_LENGTH = 128;
 export const MAX_THREADS_TEXT_LENGTH = 2000;
 export const MAX_THREADS_MEDIA_URLS = 6;
+// Per-URL length bound shared by the media-URL schema and the mapper's allowlist check, so
+// the two cannot drift. Internal: only the predicate is exported for the mapper.
+const MAX_THREADS_MEDIA_URL_LENGTH = 2048;
 export const MAX_THREADS_REPLY_COUNT = 20;
 
 export const PROVIDER_ERROR_CODES = [
@@ -323,8 +326,11 @@ export const eventsFetchOutputSchema = z.union([eventsFetchSuccessSchema, runtim
 // drift that would fail a whole page. `threads_user_id` is the provider's stable `owner.id`,
 // nullable when absent — never a mutable `username` handle relabelled as an id.
 // `media_urls` are bounded to `MAX_THREADS_MEDIA_URLS` and accepted only on the official
-// Threads hosts (`threads.net` / `threads.com`) — no fabricated values, no guessed navigation
-// targets, no cross-host URLs.
+// Threads web hosts or the official Meta media CDN hosts, over HTTPS — no fabricated
+// values, no guessed navigation targets, no cross-host URLs. The host policy is two layers:
+// permalinks stay on the strict exact-host allowlist (`isThreadsHost`), media URLs use the
+// wider display-URL allowlist (`isOfficialMediaHost`) and are dropped, never rewritten,
+// when the provider returns a host outside it.
 const threadsMediaTypeSchema = z.enum(['TEXT_POST', 'IMAGE', 'VIDEO', 'CAROUSEL_ALBUM', 'REPOST_FACADE', 'UNKNOWN']);
 const threadsDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Must be a YYYY-MM-DD date').refine((value) => {
   // A date-shaped string is not necessarily a calendar date: `2025-99-99` or `2025-02-30`
@@ -335,20 +341,8 @@ const threadsDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Must be a YYY
   return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
 }, 'Must be a valid calendar date');
 
-const threadsMediaUrlSchema = z.string().max(2048).url().regex(/^[Hh][Tt][Tt][Pp][Ss]?:\/\/[^\s/@]+(?:[/?#][^\s]*)?$/).meta({ format: 'uri' }).refine((value) => {
-  try {
-    const url = new URL(value);
-    if (url.protocol !== 'https:') return false;
-    if (url.username || url.password) return false;
-    const host = url.hostname.toLowerCase();
-    // Strict allowlist for the documented Threads media hosts and canonical permalink
-    // hosts, shared with `threadsPermalinkSchema` so the two never diverge.
-    // See `isThreadsHost` below.
-    return isThreadsHost(host);
-  } catch {
-    return false;
-  }
-}, 'Must be an https URL on threads.net or threads.com');
+const threadsMediaUrlSchema = z.string().max(MAX_THREADS_MEDIA_URL_LENGTH).url().regex(/^[Hh][Tt][Tt][Pp][Ss]?:\/\/[^\s/@]+(?:[/?#][^\s]*)?$/).meta({ format: 'uri' })
+  .refine(isOfficialThreadsMediaUrl, 'Must be an https URL on threads.net, threads.com, or an official Meta media CDN host');
 
 const threadsPermalinkSchema = z.string().max(2048).url().regex(/^[Hh][Tt][Tt][Pp][Ss]?:\/\/[^\s/@]+(?:[/?#][^\s]*)?$/).meta({ format: 'uri' }).refine((value) => {
   try {
@@ -366,12 +360,47 @@ const threadsPermalinkSchema = z.string().max(2048).url().regex(/^[Hh][Tt][Tt][P
 // `threads.net.attacker.example` must not pass. `threads.net` / `www.threads.net` are the
 // legacy roots and `threads.com` / `www.threads.com` are Meta's primary web hosts since April
 // 2025; both are accepted so an official permalink is never rejected for its host.
+// This is the *permalink* allowlist and it stays verbatim for `threadsPermalinkSchema`.
 // Validation only — the host is never rewritten, because rewriting would fabricate a
 // navigation target the provider did not return.
 function isThreadsHost(host: string): boolean {
   if (host === 'threads.net' || host === 'www.threads.net') return true;
   if (host === 'threads.com' || host === 'www.threads.com') return true;
   return false;
+}
+
+// The *media URL* allowlist, deliberately wider than `isThreadsHost`:
+//   * A permalink is a navigation target the provider published. It stays exact-host
+//     strict, because a permalink on a host we cannot vouch for is schema drift and fails
+//     the page.
+//   * A media URL is a display artifact, not a load-bearing fact, and real `media_url` /
+//     `thumbnail_url` values are expected to be served from Meta's media CDNs. Those roots
+//     are added on top of the exact Threads hosts; a media URL on any other host is dropped
+//     by the mapper (see `mapMediaUrls`) — never returned, rewritten, or substituted — while
+//     this strict schema keeps any unapproved URL out of the contract entirely.
+// The CDN match is a dotted-suffix match on a known root, so `notcdninstagram.com` and
+// `scontent.cdninstagram.com.evil.example` both fail it.
+function isOfficialMediaHost(host: string): boolean {
+  if (isThreadsHost(host)) return true;
+  if (host === 'cdninstagram.com' || host.endsWith('.cdninstagram.com')) return true;
+  if (host === 'fbcdn.net' || host.endsWith('.fbcdn.net')) return true;
+  return false;
+}
+
+// The single media-URL acceptance rule, shared by `threadsMediaUrlSchema` and the mapper's
+// filter so the two can never diverge: only the schema (which also pins the zod shape and
+// max-length contract) and this predicate — not the internal schema object itself — leave
+// this module.
+export function isOfficialThreadsMediaUrl(value: unknown): boolean {
+  if (typeof value !== 'string' || value.length > MAX_THREADS_MEDIA_URL_LENGTH) return false;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:') return false;
+    if (url.username || url.password) return false;
+    return isOfficialMediaHost(url.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
 }
 
 export const threadsPostSchema = z.object({

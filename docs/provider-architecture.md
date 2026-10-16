@@ -2,7 +2,7 @@
 
 Parent: #38 (verticals). Issue: #40. Status: architecture and compatibility strategy documented; eBay shopping is the second capability shipped against it, proving #40's "done when" — a second provider added without copying Marketplace's runtime.
 
-This document is the reference for the provider/module layout of `services/marketplace/` and for the compatibility rules that keep existing consumers working. It is descriptive of the code as it exists (plus the schema `1.3.0` capability-discovery change that adds the `social` surface and `threads_backend`); recommendations and not-yet-implemented items are marked as follow-ups. For the enforcement contract on sessions, actions, and grants, see [`provider-action-boundaries.md`](provider-action-boundaries.md); for the shopping research behind the second provider, see [`shopping-provider-research.md`](shopping-provider-research.md).
+This document is the reference for the provider/module layout of `services/marketplace/` and for the compatibility rules that keep existing consumers working. It is descriptive of the code as it exists (plus the schema `1.4.0` capability-discovery change that adds the `social` surface and `threads_backend`); recommendations and not-yet-implemented items are marked as follow-ups. For the enforcement contract on sessions, actions, and grants, see [`provider-action-boundaries.md`](provider-action-boundaries.md); for the shopping research behind the second provider, see [`shopping-provider-research.md`](shopping-provider-research.md).
 
 ## Purpose and non-goals
 
@@ -81,7 +81,7 @@ Zero Facebook imports. Only the composition root (`service.ts`) and the public `
 - **Outputs** are success/failure unions parsed before return (`searchOutputSchema`, `fetchOutputSchema`, `shoppingSearchOutputSchema`, `shoppingFetchOutputSchema`, `threadsListOutputSchema`, `threadReadOutputSchema`, `threadsPostsListOutputSchema`, `threadsRepliesListOutputSchema`, and `statusOutputSchema`). The parsed value is returned both as serialized text and as `structuredContent`, with `isError` set when `ok === false`.
 - **Provider errors vs runtime failures.** `ProviderError` + `PROVIDER_ERROR_CODES` (`AUTH_EXPIRED`, `LOGIN_REQUIRED`, `CAPTCHA_REQUIRED`, `SESSION_INVALID`, `RATE_LIMITED`, `UPSTREAM_ERROR`, `TIMEOUT`) describe external provider state. The runtime failure envelope adds `NOT_FOUND` and `INTERNAL_ERROR`, and the policy codes `APPROVAL_REQUIRED` / `ACTION_FORBIDDEN` / `SURFACE_DISABLED`. Policy codes are deliberately **not** in `PROVIDER_ERROR_CODES`. `SURFACE_DISABLED` (thrown as `SurfaceDisabledError`) is the one policy code a registered tool can emit today: a backend configured to disable a surface, such as Messenger probe-only mode, reports it instead of a misleading provider session code, and it is surfaced without being logged as a service failure. Only validated `ProviderError` instances are surfaced; anything else is logged and reduced to `INTERNAL_ERROR`.
 
-**Versioned output contract.** `SCHEMA_VERSION` in `domain.ts` is the contract version (currently `1.3.0`; `SERVICE_VERSION` is separate). Additive output changes bump the minor version; the runtime failure code `SURFACE_DISABLED` and the `social` capability surface were added additively in `1.3.0`. `listing` (Facebook) and `productOffer` (shopping) are **siblings, not replacements**: `productOffer` preserves `listing` field names where they overlap so a later comparison layer can union them without remapping, while `listing` stays exactly as deployed for the Facebook tools.
+**Versioned output contract.** `SCHEMA_VERSION` in `domain.ts` is the contract version (currently `1.4.0`; `SERVICE_VERSION` is separate). Additive output changes bump the minor version; the runtime failure code `SURFACE_DISABLED` was added additively in `1.3.0` and the `social` capability surface in `1.4.0`. `listing` (Facebook) and `productOffer` (shopping) are **siblings, not replacements**: `productOffer` preserves `listing` field names where they overlap so a later comparison layer can union them without remapping, while `listing` stays exactly as deployed for the Facebook tools.
 
 ## Tool registry and single dispatch choke point
 
@@ -125,7 +125,7 @@ It creates one internal `AbortController` and forwards its signal to the backend
 
 ## Capability discovery
 
-Shipped in schema `1.3.0`: `marketplace_status` returns `service_version`, `schema_version`, `backend`, optional `shopping_backend`, optional `events_backend`, optional `threads_backend`, optional `facebook_session`, and a **required** `capabilities` array. Each entry is `{ surface, provider, backend }`:
+Shipped in schema `1.4.0`: `marketplace_status` returns `service_version`, `schema_version`, `backend`, optional `shopping_backend`, optional `events_backend`, optional `threads_backend`, optional `facebook_session`, and a **required** `capabilities` array. Each entry is `{ surface, provider, backend }`:
 
 - `surface` is one of `marketplace`, `shopping`, `messenger`, `events`, `social` (closed enum in `capabilitySchema`).
 - `provider` is the declared session-scope provider (`facebook` for marketplace/messenger, `ebay` for shopping, `ticketmaster` for events, `threads` for social).
@@ -133,7 +133,7 @@ Shipped in schema `1.3.0`: `marketplace_status` returns `service_version`, `sche
 
 The array is non-empty and ordered marketplace, shopping, messenger, events, social. Today, `messenger` and `events` are the surfaces that can be `null` (Facebook backend selected but `MARKETPLACE_MESSENGER` off, or `EVENTS_BACKEND` left unset); `marketplace`, `shopping`, and `social` are always wired by the service (fixture default). The existing fields `backend`, `shopping_backend`, `events_backend`, and `facebook_session` are unchanged, and `threads_backend` is added alongside them.
 
-Why this is additive and non-breaking: the `social` surface and the optional `threads_backend` field were added additively in `SCHEMA_VERSION` `1.3.0` (the capability-discovery field itself shipped in `1.2.0`); no tool name, input, or existing field changes. A new surface extends the array with one more entry rather than reshaping the response. Because `ListTools` lists all registered tools regardless of configuration (a fixture deployment still advertises `shopping_*`, `events_*`, `messenger_*`, and `threads_*`), the capabilities array is what distinguishes **configured backends** without probing a session or calling a tool.
+Why this is additive and non-breaking: the `social` surface and the optional `threads_backend` field were added additively in `SCHEMA_VERSION` `1.4.0` (the capability-discovery field itself shipped in `1.2.0`); no tool name, input, or existing field changes. A new surface extends the array with one more entry rather than reshaping the response. Because `ListTools` lists all registered tools regardless of configuration (a fixture deployment still advertises `shopping_*`, `events_*`, `messenger_*`, and `threads_*`), the capabilities array is what distinguishes **configured backends** without probing a session or calling a tool.
 
 ## Compatibility strategy
 

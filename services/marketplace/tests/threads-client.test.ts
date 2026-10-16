@@ -22,6 +22,9 @@ describe('ThreadsClient', () => {
     expect(url.searchParams.get('fields')).toContain('permalink');
     expect(url.searchParams.get('fields')).toContain('text');
     expect(url.searchParams.get('fields')).toContain('timestamp');
+    // `threads_user_id` is mapped from `owner.id`, so `owner` must be requested or every
+    // live post would map to `threads_user_id: null`.
+    expect(url.searchParams.get('fields')).toContain('owner');
     expect(url.searchParams.get('fields')).toContain('reply_count');
     expect(url.searchParams.get('fields')).toContain('like_count');
     expect(url.searchParams.get('since')).toBeNull();
@@ -64,6 +67,8 @@ describe('ThreadsClient', () => {
     expect(url.searchParams.get('fields')).toContain('id');
     expect(url.searchParams.get('fields')).toContain('permalink');
     expect(url.searchParams.get('fields')).toContain('text');
+    // Same as the posts projection: a reply's `threads_user_id` comes from `owner.id`.
+    expect(url.searchParams.get('fields')).toContain('owner');
   });
 
   it('url-encodes path segments that contain reserved characters', async () => {

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { ProviderError, type ThreadsBackend, type ThreadsPostPage, type ThreadsReplyPage } from './backend.js';
-import { MAX_THREADS_REPLY_COUNT, threadsPostSchema, threadsReplySchema, type ThreadsPost, type ThreadsReply } from './domain.js';
+import { MAX_THREADS_MEDIA_URLS, MAX_THREADS_REPLY_COUNT, isOfficialThreadsMediaUrl, threadsPostSchema, threadsReplySchema, type ThreadsPost, type ThreadsReply } from './domain.js';
 import { ThreadsClient, ThreadsHttpError, type ThreadsClientOptions } from './threads.js';
 
 const isoOffsetSchema = z.string().datetime({ offset: true });
@@ -240,17 +240,24 @@ function postText(item: Record<string, any>): string | null {
   return null;
 }
 
+// Collect the candidate media URLs the item advertises, then keep only those the media-URL
+// allowlist accepts. A media URL is a display artifact, not a load-bearing fact: a URL on a
+// host outside the allowlist is DROPPED (never returned, never rewritten, never substituted)
+// rather than discarding an otherwise valid post and failing the whole upstream page. The
+// deliberate consequence: a suppressed media URL is indistinguishable in the output from a
+// post that carried none — `media_type` may still say `IMAGE` beside an empty `media_urls`.
+// The domain schema stays strict, so no unapproved URL can reach the contract either way.
 function mapMediaUrls(item: Record<string, any>): string[] {
-  const urls: string[] = [];
-  if (typeof item.media_url === 'string') urls.push(item.media_url);
-  if (typeof item.thumbnail_url === 'string') urls.push(item.thumbnail_url);
+  const candidates: string[] = [];
+  if (typeof item.media_url === 'string') candidates.push(item.media_url);
+  if (typeof item.thumbnail_url === 'string') candidates.push(item.thumbnail_url);
   if (Array.isArray(item.children)) {
     for (const child of item.children) {
-      if (typeof child?.media_url === 'string') urls.push(child.media_url);
-      if (typeof child?.thumbnail_url === 'string') urls.push(child.thumbnail_url);
+      if (typeof child?.media_url === 'string') candidates.push(child.media_url);
+      if (typeof child?.thumbnail_url === 'string') candidates.push(child.thumbnail_url);
     }
   }
-  return urls.slice(0, 6);
+  return candidates.filter(isOfficialThreadsMediaUrl).slice(0, MAX_THREADS_MEDIA_URLS);
 }
 
 function mapPost(value: unknown): ThreadsPost | null {

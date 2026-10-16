@@ -57,6 +57,8 @@ beforeAll(async () => {
       if (mode === 'posts-malformed-item') return json(res, { data: [{}] });
       if (mode === 'posts-mixed-captionless') return json(res, fixture('posts-mixed-captionless.json'));
       if (mode === 'posts-owner-id') return json(res, fixture('posts-owner-id.json'));
+      if (mode === 'posts-media-cdn-hosts') return json(res, fixture('posts-media-cdn-hosts.json'));
+      if (mode === 'posts-media-http-cdn') return json(res, fixture('posts-media-http-cdn.json'));
       if (mode === 'posts-lookalike-permalink') {
         // A captionless item whose permalink is a lookalike host: still schema drift, so the
         // permalink allowlist is not weakened by the captionless-text rule.
@@ -422,5 +424,91 @@ describe('ThreadsApiBackend', () => {
     await expect(backend().listOwnPosts(postsInput, signal())).rejects.toMatchObject({
       code: 'UPSTREAM_ERROR', message: 'The Threads posts response was not recognized.'
     });
+  });
+
+  it('accepts media URLs on the official Meta CDN hosts and preserves them in media_urls', async () => {
+    // Real `media_url` / `thumbnail_url` values are served from these roots, so rejecting
+    // them would fail an otherwise valid live page.
+    mode = 'posts-media-cdn-hosts';
+    const { posts, truncated } = await backend().listOwnPosts(postsInput, signal());
+    expect(truncated).toBe(false);
+    expect(posts[0]).toMatchObject({
+      id: 'synth-cdn-001',
+      permalink: 'https://www.threads.net/@synth_user/post/synth-cdn-001',
+      threads_user_id: 'synth-owner-id-1001',
+      media_urls: ['https://scontent-xx.cdninstagram.com/v/synth-image-001.jpg', 'https://scontent.xx.fbcdn.net/v/synth-thumb-001.jpg']
+    });
+    threadsPostSchema.parse(posts[0]);
+  });
+
+  it('returns both posts on a mixed page and drops a lookalike media host instead of failing the page', async () => {
+    // A media URL is a display artifact: a URL on an unapproved host is dropped, never
+    // returned and never rewritten, and it is not a reason to discard the whole page.
+    mode = 'posts-media-cdn-hosts';
+    const { posts } = await backend().listOwnPosts(postsInput, signal());
+    expect(posts.map((post) => post.id)).toEqual(['synth-cdn-001', 'synth-cdn-002']);
+    expect(posts[1]).toMatchObject({
+      permalink: 'https://www.threads.net/@synth_user/post/synth-cdn-002',
+      media_type: 'IMAGE',
+      media_urls: []
+    });
+    for (const post of posts) {
+      threadsPostSchema.parse(post);
+      for (const url of post.media_urls) expect(url).not.toContain('evil.example');
+    }
+  });
+
+  it('drops an http CDN media URL while keeping its https sibling', async () => {
+    // https-only holds on the CDN roots too: the insecure URL is dropped, not upgraded.
+    mode = 'posts-media-http-cdn';
+    const { posts } = await backend().listOwnPosts(postsInput, signal());
+    expect(posts).toHaveLength(1);
+    expect(posts[0]).toMatchObject({
+      id: 'synth-cdn-http-001',
+      text: null,
+      media_urls: ['https://scontent.xx.fbcdn.net/v/synth-thumb-001.jpg']
+    });
+  });
+
+  it('accepts official Meta CDN hosts in media_urls but rejects lookalikes, http, and non-https forms', () => {
+    const base = {
+      provider: 'threads' as const,
+      id: 'synth-media-host-001',
+      threads_user_id: null,
+      permalink: 'https://www.threads.com/@synth_user/post/synth-media-host-001',
+      text: 'Synthetic media host probe.',
+      media_type: 'IMAGE' as const,
+      reply_count: null,
+      like_count: null,
+      posted_at: null
+    };
+    for (const url of [
+      'https://cdninstagram.com/v/synth-image.jpg',
+      'https://scontent-xx.cdninstagram.com/v/synth-image.jpg',
+      'https://fbcdn.net/v/synth-image.jpg',
+      'https://scontent.xx.fbcdn.net/v/synth-image.jpg',
+      'https://www.threads.net/synth-image.jpg',
+      'https://www.threads.com/synth-image.jpg'
+    ]) {
+      const parsed = threadsPostSchema.safeParse({ ...base, media_urls: [url] });
+      expect(parsed.success, url).toBe(true);
+    }
+    for (const url of [
+      'https://scontent.cdninstagram.com.evil.example/v/synth-image.jpg',
+      'https://evil.example/v/synth-image.jpg',
+      'https://notcdninstagram.com/v/synth-image.jpg',
+      'https://notfbcdn.net/v/synth-image.jpg',
+      'https://cdninstagram.com.evil.example/v/synth-image.jpg',
+      'https://fbcdn.net.attacker.example/v/synth-image.jpg',
+      'http://scontent-xx.cdninstagram.com/v/synth-image.jpg',
+      'https://user:pass@scontent.xx.fbcdn.net/v/synth-image.jpg'
+    ]) {
+      const parsed = threadsPostSchema.safeParse({ ...base, media_urls: [url] });
+      expect(parsed.success, url).toBe(false);
+    }
+    // The CDN roots are a media-URL allowance only: a permalink still requires the exact
+    // Threads hosts, so the wider display allowlist never leaks into navigation targets.
+    const leak = threadsPostSchema.safeParse({ ...base, permalink: 'https://scontent.xx.fbcdn.net/v/synth-image.jpg' });
+    expect(leak.success).toBe(false);
   });
 });
