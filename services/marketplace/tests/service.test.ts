@@ -607,7 +607,7 @@ describe('fixture MCP service', () => {
     expect(result).toEqual({
       ok: true,
       service_version: packageVersion,
-      schema_version: '1.2.0',
+      schema_version: '1.3.0',
       backend: 'status-only',
       facebook_session: { status: 'session_unknown' },
       shopping_backend: 'fixture',
@@ -681,7 +681,7 @@ describe('fixture MCP service', () => {
     expect(customSearch.backend).toBe('consumer-test');
     expect(customFetch.backend).toBe('consumer-test');
     expect(customStatus.backend).toBe('consumer-test');
-    expect(customStatus.schema_version).toBe('1.2.0');
+    expect(customStatus.schema_version).toBe('1.3.0');
     expect(customStatus.capabilities).toEqual([
       { surface: 'marketplace', provider: 'facebook', backend: 'consumer-test' },
       { surface: 'shopping', provider: 'ebay', backend: 'fixture' },
@@ -904,7 +904,7 @@ describe('fixture MCP service', () => {
     ]);
     expect(structured(first).listings[0].id).toBe('fixture-chair-002');
     expect(structured(second).listing.state).toBe('sold');
-    expect(structured(third).schema_version).toBe('1.2.0');
+    expect(structured(third).schema_version).toBe('1.3.0');
   });
 
   it('bounds shutdown with both an in-flight backend call and a partial request body', async () => {

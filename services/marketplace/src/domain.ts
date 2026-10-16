@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { PROVIDER_SESSION_ASSESSMENTS } from './browser.js';
 
-export const SCHEMA_VERSION = '1.2.0';
+export const SCHEMA_VERSION = '1.3.0';
 export const SERVICE_VERSION = '0.1.0'; // x-release-please-version
 export const MAX_QUERY_LENGTH = 256;
 export const MAX_LOCATION_LENGTH = 256;
@@ -174,7 +174,8 @@ export const runtimeErrorCodeSchema = z.enum([
   'NOT_FOUND',
   'INTERNAL_ERROR',
   'APPROVAL_REQUIRED',
-  'ACTION_FORBIDDEN'
+  'ACTION_FORBIDDEN',
+  'SURFACE_DISABLED'
 ]);
 
 export const providerErrorMetadataSchema = z.object({

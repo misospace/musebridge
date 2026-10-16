@@ -2,9 +2,9 @@ import { createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { HmacGrantAuthorizer, canonicalActionInput, subjectDigest, type ActionRequest } from '../src/authorization.js';
+import { HmacGrantAuthorizer, DenyAllAuthorizer, canonicalActionInput, subjectDigest, type ActionRequest } from '../src/authorization.js';
 import { InMemoryGrantConsumptionStore } from '../src/grant-state.js';
-import { FixtureBackend, ProviderError, renderDeliveredMessage, type ConversationBackend } from '../src/backend.js';
+import { FixtureBackend, ProviderError, SurfaceDisabledError, renderDeliveredMessage, type ConversationBackend } from '../src/backend.js';
 import type { ConversationMessage, ConversationThreadMessages, ThreadSendInput } from '../src/domain.js';
 import { registerMarketplaceTools, type MarketplaceToolOptions } from '../src/tools.js';
 
@@ -133,6 +133,31 @@ function fakeConversations(send: SendBehavior, read: ReadBehavior, input: Thread
   } satisfies ConversationBackend;
   return { conversations, calls };
 }
+
+describe('surface-disabled tool envelope', () => {
+  it('reports SURFACE_DISABLED for list and read without logging a service failure', async () => {
+    const message = 'Messenger probe-only diagnostics are enabled; conversation access is disabled.';
+    const conversations = {
+      name: 'fixture',
+      listThreads: () => { throw new SurfaceDisabledError(message); },
+      readThread: () => { throw new SurfaceDisabledError(message); },
+      sendThread: () => undefined
+    } satisfies ConversationBackend;
+    const logger = { error: vi.fn() };
+    const { server, handlers } = captureHandlers();
+    registerMarketplaceTools(server, new FixtureBackend(), logger, { conversations, authorizer: new DenyAllAuthorizer() });
+
+    const listed = await invoke(handlers, 'messenger_threads_list', { limit: 10 });
+    expect(listed.isError).toBe(true);
+    expect(listed.structuredContent).toEqual({ ok: false, error: { code: 'SURFACE_DISABLED', message } });
+
+    const read = await invoke(handlers, 'messenger_thread_read', { thread_id: 't-synth-0001' });
+    expect(read.isError).toBe(true);
+    expect(read.structuredContent).toEqual({ ok: false, error: { code: 'SURFACE_DISABLED', message } });
+
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+});
 
 describe('messenger_send grant enforcement', () => {
   it('sends exactly once with a valid signed grant and confirms delivery through one thread read', async () => {
