@@ -8,8 +8,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { CallToolResultSchema, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { FIXTURE_LISTINGS, FIXTURE_OFFERS } from '../src/fixtures.js';
-import type { MarketplaceBackend } from '../src/backend.js';
+import { FIXTURE_CONVERSATIONS, FIXTURE_LISTINGS, FIXTURE_OFFERS } from '../src/fixtures.js';
+import type { ConversationBackend, MarketplaceBackend } from '../src/backend.js';
 import { chromium } from 'playwright';
 import { BrowserSessionManager } from '../src/browser.js';
 import { FACEBOOK_MESSENGER_INBOX_PATH } from '../src/facebook.js';
@@ -510,6 +510,69 @@ describe('fixture MCP service', () => {
     const backend: MarketplaceBackend = { name: 'injected', search: () => [], fetch: () => null };
     expect(() => createMarketplaceService({ backend, backendKind: 'facebook' }))
       .toThrow(new TypeError('backend and backendKind cannot both select a backend'));
+  });
+
+  it('advertises only the conversation reads a host-injected read-only backend can serve', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    // A host can inject a conversation backend that implements only the two reads. It satisfies the
+    // composition root's conversation capability check, so the draft and send tools must be gated per
+    // method: advertising them without a backend implementation fails as INTERNAL_ERROR instead of the
+    // InvalidParams unknown-tool refusal.
+    const backend: MarketplaceBackend & Partial<Pick<ConversationBackend, 'listThreads' | 'readThread'>> = {
+      name: 'read-only-conversations',
+      search: () => [],
+      fetch: () => null,
+      listThreads: (input) => FIXTURE_CONVERSATIONS.slice(0, input.limit).map(({ thread }) => thread),
+      readThread: (input) => {
+        const conversation = FIXTURE_CONVERSATIONS.find(({ thread }) => thread.thread_id === input.thread_id);
+        return conversation === undefined ? null : { thread_id: conversation.thread.thread_id, messages: conversation.messages };
+      }
+    };
+    await startServiceWith(backend, { error: vi.fn() });
+    const client = await connectClient();
+    const listed = (await client.listTools()).tools.map(({ name }) => name);
+    expect(listed).toContain('messenger_threads_list');
+    expect(listed).toContain('messenger_thread_read');
+    expect(listed).not.toContain('messenger_prepare');
+    expect(listed).not.toContain('messenger_send');
+    // The reads the backend does serve keep working through the composition root.
+    expect(structured(await client.callTool({ name: 'messenger_thread_read', arguments: { thread_id: 't-synth-0001' } })).ok).toBe(true);
+    expect(structured(await client.callTool({ name: 'messenger_threads_list', arguments: { limit: 1 } })).threads).toHaveLength(1);
+    // The unserved tools are unknown tools, never an INTERNAL_ERROR envelope.
+    await expect(client.callTool({ name: 'messenger_prepare', arguments: { thread_id: 't-synth-0001', message: 'Is the bike still available?' } }))
+      .rejects.toMatchObject({ code: ErrorCode.InvalidParams, message: expect.stringContaining('Unknown tool: messenger_prepare') });
+    await expect(client.callTool({ name: 'messenger_send', arguments: { thread_id: 't-synth-0001', message: 'Is the bike still available?', idempotency_token: 'idempotency-read-only-0001' } }))
+      .rejects.toMatchObject({ code: ErrorCode.InvalidParams, message: expect.stringContaining('Unknown tool: messenger_send') });
+  });
+
+  it('advertises the whole conversation surface for a backend that implements all of it', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    const backend: MarketplaceBackend & ConversationBackend = {
+      name: 'full-conversations',
+      search: () => [],
+      fetch: () => null,
+      listThreads: () => FIXTURE_CONVERSATIONS.map(({ thread }) => thread),
+      readThread: (input) => {
+        const conversation = FIXTURE_CONVERSATIONS.find(({ thread }) => thread.thread_id === input.thread_id);
+        return conversation === undefined ? null : { thread_id: conversation.thread.thread_id, messages: conversation.messages };
+      },
+      prepareDraft: () => ({ participant: 'Synthetic Buyer' }),
+      sendThread: () => undefined
+    };
+    await startServiceWith(backend, { error: vi.fn() });
+    const client = await connectClient();
+    const listed = (await client.listTools()).tools.map(({ name }) => name);
+    // No over-filtering: a fully capable backend still gets all four, and messenger_send still
+    // registers because the composition root always installs an authorizer (deny-all here).
+    expect(listed).toEqual(expect.arrayContaining([
+      'messenger_threads_list', 'messenger_thread_read', 'messenger_prepare', 'messenger_send'
+    ]));
+    expect(structured(await client.callTool({ name: 'messenger_prepare', arguments: { thread_id: 't-synth-0001', message: 'I can meet you Saturday.' } })))
+      .toMatchObject({ ok: true, status: 'draft', sent: false, participant: 'Synthetic Buyer' });
+    // The deny-all authorizer still refuses the send it advertised.
+    expect(structured(await client.callTool({ name: 'messenger_send', arguments: { thread_id: 't-synth-0001', message: 'Delivered now.', idempotency_token: 'idempotency-full-0001' } })).error.code).toBe('APPROVAL_REQUIRED');
   });
 
   it('parses FACEBOOK_LOGIN_WAIT_SECONDS as positive whole seconds', () => {

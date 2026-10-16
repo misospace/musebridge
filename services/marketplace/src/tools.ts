@@ -185,10 +185,19 @@ export function registerMarketplaceTools(
   logger: Pick<Console, 'error'> = console,
   options: MarketplaceToolOptions = {}
 ): void {
-  // The messenger conversation tools (draft and send) are only live where the conversation surface
-  // exists; elsewhere they are unknown tools and a call fails InvalidParams like any unregistered tool.
-  const conversationTools: readonly string[] = ['messenger_prepare', 'messenger_send'];
-  const activeTools = options.conversations ? TOOLS : TOOLS.filter((tool) => !conversationTools.includes(tool.name));
+  // The messenger conversation tools (draft and send) are gated per capability, not just per surface:
+  // a host-injected conversation backend that only serves reads must not be advertised as able to
+  // draft or send, because a registered tool whose backend method is absent fails as INTERNAL_ERROR
+  // instead of the InvalidParams unknown-tool refusal. messenger_prepare needs prepareDraft and
+  // messenger_send needs sendThread; the read-only messenger tools keep today's surface behavior.
+  const conversationBackend = options.conversations;
+  const conversationTools: ReadonlyArray<{ readonly name: string; readonly served: boolean }> = [
+    { name: 'messenger_prepare', served: typeof conversationBackend?.prepareDraft === 'function' },
+    { name: 'messenger_send', served: typeof conversationBackend?.sendThread === 'function' }
+  ];
+  const activeTools = !conversationBackend
+    ? TOOLS.filter((tool) => !conversationTools.some(({ name }) => name === tool.name))
+    : TOOLS.filter((tool) => conversationTools.every(({ name, served }) => name !== tool.name || served));
   assertWritableToolsHaveAuthorizer(activeTools, options.authorizer);
 
   const backendName = options.backendName ?? backend.name;
