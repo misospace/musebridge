@@ -607,7 +607,7 @@ describe('fixture MCP service', () => {
       expect(typeof post.threads_user_id).toBe('string');
     }
     const knownPost = posts.posts.find((post: { id: string }) => post.id === 'synth-thread-001');
-    expect(knownPost).toMatchObject({ id: 'synth-thread-001', threads_user_id: 'synth_user', media_type: 'TEXT_POST', reply_count: 4, like_count: 22 });
+    expect(knownPost).toMatchObject({ id: 'synth-thread-001', threads_user_id: 'synth-owner-id-1001', media_type: 'TEXT_POST', reply_count: 4, like_count: 22 });
     const limited = structured(await client.callTool({ name: 'threads_posts_list', arguments: { limit: 1 } }));
     expect(limited.posts).toHaveLength(1);
     expect(limited.truncated).toBe(true);

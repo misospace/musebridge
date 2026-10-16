@@ -286,7 +286,7 @@ export const FIXTURE_THREADS_POSTS: readonly ThreadsPost[] = [
   {
     provider: 'threads',
     id: 'synth-thread-001',
-    threads_user_id: 'synth_user',
+    threads_user_id: 'synth-owner-id-1001',
     permalink: 'https://www.threads.net/@synth_user/post/synth-thread-001',
     text: 'Synthetic fixture thread: short text post about a sun lamp.',
     media_type: 'TEXT_POST',
@@ -298,7 +298,7 @@ export const FIXTURE_THREADS_POSTS: readonly ThreadsPost[] = [
   {
     provider: 'threads',
     id: 'synth-thread-002',
-    threads_user_id: 'synth_user',
+    threads_user_id: 'synth-owner-id-1001',
     permalink: 'https://www.threads.net/@synth_user/post/synth-thread-002',
     text: 'Synthetic fixture thread: image post with no caption counts.',
     media_type: 'IMAGE',
@@ -310,7 +310,7 @@ export const FIXTURE_THREADS_POSTS: readonly ThreadsPost[] = [
   {
     provider: 'threads',
     id: 'synth-thread-003',
-    threads_user_id: 'synth_user',
+    threads_user_id: 'synth-owner-id-1001',
     permalink: 'https://www.threads.net/@synth_user/post/synth-thread-003',
     text: 'Synthetic fixture thread: video post with bounded media list.',
     media_type: 'VIDEO',
@@ -322,7 +322,7 @@ export const FIXTURE_THREADS_POSTS: readonly ThreadsPost[] = [
   {
     provider: 'threads',
     id: 'synth-thread-004',
-    threads_user_id: 'synth_user',
+    threads_user_id: 'synth-owner-id-1001',
     permalink: 'https://www.threads.net/@synth_user/post/synth-thread-004',
     text: 'Synthetic fixture thread: repost facade with unknown media type.',
     media_type: 'REPOST_FACADE',
@@ -339,7 +339,7 @@ export const FIXTURE_THREADS_REPLIES: readonly ThreadsReply[] = [
     id: 'synth-reply-001',
     media_id: 'synth-thread-001',
     permalink: 'https://www.threads.net/@synth_user/reply/synth-reply-001',
-    threads_user_id: 'synth_friend',
+    threads_user_id: 'synth-owner-id-2001',
     text: 'Synthetic fixture reply: this is the first reply on synth-thread-001.',
     media_type: 'TEXT_POST',
     media_urls: [],
@@ -350,7 +350,7 @@ export const FIXTURE_THREADS_REPLIES: readonly ThreadsReply[] = [
     id: 'synth-reply-002',
     media_id: 'synth-thread-001',
     permalink: 'https://www.threads.net/@synth_friend/post/synth-reply-002',
-    threads_user_id: 'synth_visitor',
+    threads_user_id: 'synth-owner-id-2002',
     text: 'Synthetic fixture reply: image reply with one media url.',
     media_type: 'IMAGE',
     media_urls: ['https://www.threads.net/synth-reply-image-002.jpg'],

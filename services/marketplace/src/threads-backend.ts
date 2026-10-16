@@ -223,12 +223,20 @@ function finiteCount(value: unknown): number | null {
   return null;
 }
 
-function usernameFromItem(item: Record<string, any>): string | null {
-  // The Threads API sometimes nests the owner under `username` and sometimes under
-  // `owner.username` depending on the endpoint — accept whichever is present, otherwise
-  // leave it null rather than fabricating.
-  if (typeof item.username === 'string' && item.username.trim()) return item.username;
-  if (typeof item.owner?.username === 'string' && item.owner.username.trim()) return item.owner.username;
+function ownerIdFromItem(item: Record<string, any>): string | null {
+  // `owner.id` is the stable Threads user id; `username`/`owner.username` is a mutable
+  // handle and must never be relabelled as an id. Absent owner is `null`, not a
+  // fabricated value — and never a reason to drop an otherwise valid item.
+  const ownerId = item.owner?.id;
+  if (typeof ownerId === 'string' && ownerId.trim() !== '') return ownerId;
+  return null;
+}
+
+function postText(item: Record<string, any>): string | null {
+  // Meta permits image/carousel posts with no caption, so an absent or blank caption is a
+  // legitimate `null` (same guard shape as `finiteCount`), not schema drift that would
+  // fail the whole upstream page. The text is otherwise returned verbatim.
+  if (typeof item.text === 'string' && item.text.trim() !== '') return item.text;
   return null;
 }
 
@@ -250,15 +258,13 @@ function mapPost(value: unknown): ThreadsPost | null {
   const item = value as Record<string, any>;
   const id = typeof item.id === 'string' ? item.id : '';
   const permalink = typeof item.permalink === 'string' ? item.permalink : '';
-  const username = usernameFromItem(item);
-  const text = typeof item.text === 'string' && item.text.length > 0 ? item.text : '';
-  if (!id || !permalink || !username || !text) return null;
+  if (!id || !permalink) return null;
   const post = {
     provider: 'threads' as const,
     id,
-    threads_user_id: username,
+    threads_user_id: ownerIdFromItem(item),
     permalink,
-    text,
+    text: postText(item),
     media_type: mediaTypeFromCode(item.media_type),
     media_urls: mapMediaUrls(item),
     reply_count: finiteCount(item.reply_count),
@@ -274,16 +280,14 @@ function mapReply(value: unknown, parentMediaId: string): ThreadsReply | null {
   const item = value as Record<string, any>;
   const id = typeof item.id === 'string' ? item.id : '';
   const permalink = typeof item.permalink === 'string' ? item.permalink : '';
-  const username = usernameFromItem(item);
-  const text = typeof item.text === 'string' && item.text.length > 0 ? item.text : '';
-  if (!id || !permalink || !username || !text) return null;
+  if (!id || !permalink) return null;
   const reply = {
     provider: 'threads' as const,
     id,
     media_id: parentMediaId,
     permalink,
-    threads_user_id: username,
-    text,
+    threads_user_id: ownerIdFromItem(item),
+    text: postText(item),
     media_type: mediaTypeFromCode(item.media_type),
     media_urls: mapMediaUrls(item),
     posted_at: isoWithOffset(item.timestamp)

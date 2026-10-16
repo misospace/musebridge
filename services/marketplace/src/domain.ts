@@ -317,9 +317,13 @@ export const eventsFetchOutputSchema = z.union([eventsFetchSuccessSchema, runtim
 // omits a parseable number — Number(null) and Number('') are both 0, so a missing or
 // empty bound must be rejected before coercion, not defaulted to "free" / zero.
 // `posted_at` accepts the documented ISO 8601-with-offset shape; a missing or
-// non-parseable timestamp is `null` rather than a guessed instant. `media_urls` are
-// bounded to `MAX_THREADS_MEDIA_URLS` and accepted only on the official Threads hosts
-// (`threads.net` / `threads.com`) — no fabricated values, no guessed navigation
+// non-parseable timestamp is `null` rather than a guessed instant. `text` follows the same
+// absence-is-null rule: Meta permits image/carousel posts with no caption, so a captionless
+// post is a legitimate record with `text: null` (never `''`, never a guess) rather than schema
+// drift that would fail a whole page. `threads_user_id` is the provider's stable `owner.id`,
+// nullable when absent — never a mutable `username` handle relabelled as an id.
+// `media_urls` are bounded to `MAX_THREADS_MEDIA_URLS` and accepted only on the official
+// Threads hosts (`threads.net` / `threads.com`) — no fabricated values, no guessed navigation
 // targets, no cross-host URLs.
 const threadsMediaTypeSchema = z.enum(['TEXT_POST', 'IMAGE', 'VIDEO', 'CAROUSEL_ALBUM', 'REPOST_FACADE', 'UNKNOWN']);
 const threadsDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Must be a YYYY-MM-DD date').refine((value) => {
@@ -337,10 +341,10 @@ const threadsMediaUrlSchema = z.string().max(2048).url().regex(/^[Hh][Tt][Tt][Pp
     if (url.protocol !== 'https:') return false;
     if (url.username || url.password) return false;
     const host = url.hostname.toLowerCase();
-    // Strict-suffix allowlist for the documented Threads media hosts and the canonical
-    // permalink host. The permalink host root (`threads.net`) is the source of truth for
-    // canonical post URLs — see `isThreadsMediaUrlHost` below.
-    return isThreadsMediaUrlHost(host);
+    // Strict allowlist for the documented Threads media hosts and canonical permalink
+    // hosts, shared with `threadsPermalinkSchema` so the two never diverge.
+    // See `isThreadsHost` below.
+    return isThreadsHost(host);
   } catch {
     return false;
   }
@@ -352,13 +356,19 @@ const threadsPermalinkSchema = z.string().max(2048).url().regex(/^[Hh][Tt][Tt][P
     if (url.protocol !== 'https:') return false;
     if (url.username || url.password) return false;
     const host = url.hostname.toLowerCase();
-    return host === 'threads.net' || host === 'www.threads.net';
+    return isThreadsHost(host);
   } catch {
     return false;
   }
-}, 'Must be an https URL on threads.net');
+}, 'Must be an https URL on threads.net or threads.com');
 
-function isThreadsMediaUrlHost(host: string): boolean {
+// Exact-match host allowlist, never a suffix match: `threads.com.evil.example` and
+// `threads.net.attacker.example` must not pass. `threads.net` / `www.threads.net` are the
+// legacy roots and `threads.com` / `www.threads.com` are Meta's primary web hosts since April
+// 2025; both are accepted so an official permalink is never rejected for its host.
+// Validation only — the host is never rewritten, because rewriting would fabricate a
+// navigation target the provider did not return.
+function isThreadsHost(host: string): boolean {
   if (host === 'threads.net' || host === 'www.threads.net') return true;
   if (host === 'threads.com' || host === 'www.threads.com') return true;
   return false;
@@ -367,9 +377,9 @@ function isThreadsMediaUrlHost(host: string): boolean {
 export const threadsPostSchema = z.object({
   provider: z.literal('threads'),
   id: listingIdSchema,
-  threads_user_id: z.string().min(1).max(64),
+  threads_user_id: z.string().min(1).max(64).nullable(),
   permalink: threadsPermalinkSchema,
-  text: z.string().min(1).max(MAX_THREADS_TEXT_LENGTH),
+  text: z.string().min(1).max(MAX_THREADS_TEXT_LENGTH).nullable(),
   media_type: threadsMediaTypeSchema,
   media_urls: z.array(threadsMediaUrlSchema).max(MAX_THREADS_MEDIA_URLS),
   reply_count: z.number().int().nonnegative().nullable(),
@@ -382,8 +392,8 @@ export const threadsReplySchema = z.object({
   id: listingIdSchema,
   media_id: listingIdSchema,
   permalink: threadsPermalinkSchema,
-  threads_user_id: z.string().min(1).max(64),
-  text: z.string().min(1).max(MAX_THREADS_TEXT_LENGTH),
+  threads_user_id: z.string().min(1).max(64).nullable(),
+  text: z.string().min(1).max(MAX_THREADS_TEXT_LENGTH).nullable(),
   media_type: threadsMediaTypeSchema,
   media_urls: z.array(threadsMediaUrlSchema).max(MAX_THREADS_MEDIA_URLS),
   posted_at: isoDateTimeSchema.nullable()
