@@ -15,7 +15,7 @@ import { BrowserSessionManager } from '../src/browser.js';
 import { FACEBOOK_MESSENGER_INBOX_PATH } from '../src/facebook.js';
 import { ProviderError } from '../src/index.js';
 import { facebookCredentialsFromEnv } from '../src/facebook-login.js';
-import { createMarketplaceService, type MarketplaceService, parseBackendKind, parseBackendTimeout, parseEventsBackendKind, parseLoginWaitMs, parseMessengerEnabled, parseMessengerProbeOnly, parseShoppingBackendKind } from '../src/service.js';
+import { createMarketplaceService, type MarketplaceService, parseBackendKind, parseBackendTimeout, parseEventsBackendKind, parseLoginWaitMs, parseMessengerEnabled, parseMessengerProbeOnly, parseShoppingBackendKind, parseThreadsBackendKind } from '../src/service.js';
 import * as packageEntry from '../src/index.js';
 import { runBackendOperation } from '../src/tools.js';
 import { threadsListInputSchema, threadReadInputSchema } from '../src/domain.js';
@@ -320,7 +320,7 @@ describe('fixture MCP service', () => {
     expect(client.getServerVersion()).toEqual({ name: 'marketplace', version: packageVersion });
     const tools = await client.listTools();
     expect(tools.tools.map(({ name }) => name)).toEqual([
-      'marketplace_search', 'marketplace_fetch', 'marketplace_status', 'shopping_search', 'shopping_fetch', 'events_search', 'events_fetch', 'messenger_threads_list', 'messenger_thread_read', 'messenger_send'
+      'marketplace_search', 'marketplace_fetch', 'marketplace_status', 'shopping_search', 'shopping_fetch', 'events_search', 'events_fetch', 'messenger_threads_list', 'messenger_thread_read', 'messenger_send', 'threads_posts_list', 'threads_replies_list'
     ]);
     expect(tools.tools.map(({ description }) => description)).toEqual([
       'Search marketplace listings.',
@@ -332,7 +332,9 @@ describe('fixture MCP service', () => {
       "Fetch one event's read-only availability by canonical ID or URL from the configured events source. Read-only.",
       'List recent seller conversation threads from the Facebook Marketplace inbox. Read-only.',
       'Read the messages of one marketplace conversation thread by ID. Read-only, but opening the thread marks it "Seen" for the other participant.',
-      'Send one approval-grant-bound message into a conversation thread. Requires a single-use signed approval grant. Delivery is confirmed by reading the thread for the idempotency token; unconfirmed sends are reported as unknown and are never resent.'
+      'Send one approval-grant-bound message into a conversation thread. Requires a single-use signed approval grant. Delivery is confirmed by reading the thread for the idempotency token; unconfirmed sends are reported as unknown and are never resent.',
+      'List the operator\'s own published Threads posts via the official Threads Graph API. Read-only; no DMs, no saved items, no keyword search, no external profile discovery.',
+      'List the public reply tree for one verified Threads media (post) id via the official Threads Graph API. Read-only.'
     ]);
     for (const tool of tools.tools) {
       expect(tool.outputSchema).toBeDefined();
@@ -388,11 +390,13 @@ describe('fixture MCP service', () => {
       .toEqual(FIXTURE_OFFERS[1]);
     expect(structured(await client.callTool({ name: 'marketplace_status', arguments: {} })).shopping_backend).toBe('fixture');
     expect(structured(await client.callTool({ name: 'marketplace_status', arguments: {} })).events_backend).toBe('fixture');
+    expect(structured(await client.callTool({ name: 'marketplace_status', arguments: {} })).threads_backend).toBe('fixture');
     expect(structured(await client.callTool({ name: 'marketplace_status', arguments: {} })).capabilities).toEqual([
       { surface: 'marketplace', provider: 'facebook', backend: 'fixture' },
       { surface: 'shopping', provider: 'ebay', backend: 'fixture' },
       { surface: 'messenger', provider: 'facebook', backend: 'fixture' },
-      { surface: 'events', provider: 'ticketmaster', backend: 'fixture' }
+      { surface: 'events', provider: 'ticketmaster', backend: 'fixture' },
+      { surface: 'social', provider: 'threads', backend: 'fixture' }
     ]);
     expect(z.toJSONSchema(z.object({ value: z.string() })).type).toBe('object');
   });
@@ -542,6 +546,54 @@ describe('fixture MCP service', () => {
     expect(() => createMarketplaceService()).toThrow(/TICKETMASTER_API_KEY/);
   });
 
+  it('parses Threads backend selection and requires both credentials only when selected', async () => {
+    expect(parseThreadsBackendKind(undefined)).toBe('fixture');
+    expect(parseThreadsBackendKind('threads')).toBe('threads');
+    expect(() => parseThreadsBackendKind('other')).toThrow(new RangeError('THREADS_BACKEND must be either "fixture" or "threads"'));
+    // Token missing → startup failure (typed RangeError, not a silent empty success).
+    vi.stubEnv('THREADS_BACKEND', 'threads');
+    vi.stubEnv('THREADS_ACCESS_TOKEN', '');
+    vi.stubEnv('THREADS_USER_ID', 'synthetic-user');
+    expect(() => createMarketplaceService()).toThrow(/THREADS_ACCESS_TOKEN/);
+    // User id missing while token is present → still startup failure.
+    vi.stubEnv('THREADS_ACCESS_TOKEN', 'synthetic-token');
+    vi.stubEnv('THREADS_USER_ID', '');
+    expect(() => createMarketplaceService()).toThrow(/THREADS_USER_ID/);
+    // Both configured → the live ThreadsApiBackend is selected with name 'threads'.
+    vi.stubEnv('THREADS_ACCESS_TOKEN', 'synthetic-token');
+    vi.stubEnv('THREADS_USER_ID', 'synthetic-user-id');
+    const threadsOnly = createMarketplaceService({ host: '127.0.0.1', port: 0, adminPort: 0 });
+    expect(threadsOnly.threads.name).toBe('threads');
+    await threadsOnly.close();
+  });
+
+  it('round-trips a known Threads post and reply tree through the fixture backend', async () => {
+    const client = await connectClient();
+    const posts = structured(await client.callTool({ name: 'threads_posts_list', arguments: {} }));
+    expect(posts.backend).toBe('fixture');
+    expect(posts.posts.length).toBeGreaterThan(0);
+    for (const post of posts.posts) {
+      expect(post.provider).toBe('threads');
+      expect(['TEXT_POST', 'IMAGE', 'VIDEO', 'CAROUSEL_ALBUM', 'REPOST_FACADE', 'UNKNOWN']).toContain(post.media_type);
+      expect(typeof post.permalink).toBe('string');
+      expect(typeof post.threads_user_id).toBe('string');
+    }
+    const knownPost = posts.posts.find((post: { id: string }) => post.id === 'synth-thread-001');
+    expect(knownPost).toMatchObject({ id: 'synth-thread-001', threads_user_id: 'synth_user', media_type: 'TEXT_POST', reply_count: 4, like_count: 22 });
+    const replies = structured(await client.callTool({ name: 'threads_replies_list', arguments: { media_id: 'synth-thread-001' } }));
+    expect(replies.backend).toBe('fixture');
+    expect(replies.media_id).toBe('synth-thread-001');
+    expect(replies.replies.map((reply: { id: string }) => reply.id)).toEqual(['synth-reply-001', 'synth-reply-002']);
+    for (const reply of replies.replies) {
+      expect(reply.media_id).toBe('synth-thread-001');
+      expect(reply.provider).toBe('threads');
+    }
+    // The fixture returns an empty array (not NOT_FOUND) for an id that exists in the
+    // schema but has no replies — a legitimate zero-result page.
+    const empty = structured(await client.callTool({ name: 'threads_replies_list', arguments: { media_id: 'synth-thread-003' } }));
+    expect(empty.replies).toEqual([]);
+  });
+
   it('serves read-only event availability through the fixture backend', async () => {
     const client = await connectClient();
     const search = structured(await client.callTool({ name: 'events_search', arguments: { query: 'synthetic' } }));
@@ -607,16 +659,18 @@ describe('fixture MCP service', () => {
     expect(result).toEqual({
       ok: true,
       service_version: packageVersion,
-      schema_version: '1.2.0',
+      schema_version: '1.3.0',
       backend: 'status-only',
       facebook_session: { status: 'session_unknown' },
       shopping_backend: 'fixture',
       events_backend: 'fixture',
+      threads_backend: 'fixture',
       capabilities: [
         { surface: 'marketplace', provider: 'facebook', backend: 'status-only' },
         { surface: 'shopping', provider: 'ebay', backend: 'fixture' },
         { surface: 'messenger', provider: 'facebook', backend: null },
-        { surface: 'events', provider: 'ticketmaster', backend: 'fixture' }
+        { surface: 'events', provider: 'ticketmaster', backend: 'fixture' },
+        { surface: 'social', provider: 'threads', backend: 'fixture' }
       ]
     });
     expect(service.browser.getInfo().browserStarted).toBe(false);
@@ -681,12 +735,13 @@ describe('fixture MCP service', () => {
     expect(customSearch.backend).toBe('consumer-test');
     expect(customFetch.backend).toBe('consumer-test');
     expect(customStatus.backend).toBe('consumer-test');
-    expect(customStatus.schema_version).toBe('1.2.0');
+    expect(customStatus.schema_version).toBe('1.3.0');
     expect(customStatus.capabilities).toEqual([
       { surface: 'marketplace', provider: 'facebook', backend: 'consumer-test' },
       { surface: 'shopping', provider: 'ebay', backend: 'fixture' },
       { surface: 'messenger', provider: 'facebook', backend: null },
-      { surface: 'events', provider: 'ticketmaster', backend: 'fixture' }
+      { surface: 'events', provider: 'ticketmaster', backend: 'fixture' },
+      { surface: 'social', provider: 'threads', backend: 'fixture' }
     ]);
   });
 
@@ -904,7 +959,7 @@ describe('fixture MCP service', () => {
     ]);
     expect(structured(first).listings[0].id).toBe('fixture-chair-002');
     expect(structured(second).listing.state).toBe('sold');
-    expect(structured(third).schema_version).toBe('1.2.0');
+    expect(structured(third).schema_version).toBe('1.3.0');
   });
 
   it('bounds shutdown with both an in-flight backend call and a partial request body', async () => {
