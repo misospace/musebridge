@@ -37,6 +37,24 @@ describe('ThreadsClient', () => {
     expect(url.searchParams.get('since')).toBe('2025-04-01');
   });
 
+  it('forwards the optional after cursor for posts and replies', async () => {
+    let seenUrl = '';
+    const client = new ThreadsClient({ ...options, fetchImpl: async (input) => { seenUrl = String(input); return ok({ data: [] }); } });
+    await client.listOwnPosts({ limit: 5, after: 'cursor-abc' });
+    expect(new URL(seenUrl).searchParams.get('after')).toBe('cursor-abc');
+    await client.listReplies({ mediaId: 'synth-thread-001', after: 'cursor-xyz' });
+    expect(new URL(seenUrl).searchParams.get('after')).toBe('cursor-xyz');
+  });
+
+  it('omits an empty after cursor', async () => {
+    let seenUrl = '';
+    const client = new ThreadsClient({ ...options, fetchImpl: async (input) => { seenUrl = String(input); return ok({ data: [] }); } });
+    await client.listOwnPosts({ limit: 5, after: '' });
+    expect(new URL(seenUrl).searchParams.get('after')).toBeNull();
+    await client.listReplies({ mediaId: 'synth-thread-001', after: '' });
+    expect(new URL(seenUrl).searchParams.get('after')).toBeNull();
+  });
+
   it('fetches a replies tree by media id with the documented fields list', async () => {
     let seenUrl = '';
     const client = new ThreadsClient({ ...options, fetchImpl: async (input) => { seenUrl = String(input); return ok({ data: [] }); } });

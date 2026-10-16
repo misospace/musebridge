@@ -399,14 +399,16 @@ export type ThreadsRepliesListInput = z.infer<typeof threadsRepliesListInputSche
 export const threadsPostsListSuccessSchema = z.object({
   ok: z.literal(true),
   backend: backendNameSchema,
-  posts: z.array(threadsPostSchema).max(MAX_THREADS_REPLY_COUNT)
+  posts: z.array(threadsPostSchema).max(MAX_THREADS_REPLY_COUNT),
+  truncated: z.boolean()
 }).strict();
 
 export const threadsRepliesListSuccessSchema = z.object({
   ok: z.literal(true),
   backend: backendNameSchema,
   media_id: listingIdSchema,
-  replies: z.array(threadsReplySchema).max(MAX_THREADS_REPLY_COUNT)
+  replies: z.array(threadsReplySchema).max(MAX_THREADS_REPLY_COUNT),
+  truncated: z.boolean()
 }).strict();
 
 export const threadsPostsListOutputSchema = z.union([threadsPostsListSuccessSchema, runtimeFailureSchema]);

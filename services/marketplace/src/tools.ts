@@ -362,26 +362,26 @@ export function registerMarketplaceTools(
         } else if (name === 'threads_posts_list') {
           const threads = options.threads;
           if (!threads) throw new ProviderError('UPSTREAM_ERROR', 'The Threads social surface is not configured on this deployment.');
-          const posts = await runBackendOperation(
+          const result = await runBackendOperation(
             (signal) => threads.listOwnPosts(parsed.data as z.infer<typeof threadsPostsListInputSchema>, signal),
             backendTimeoutMs,
             extra.signal,
             shutdownSignal
           );
-          output = { ok: true, backend: threads.name, posts };
+          output = { ok: true, backend: threads.name, posts: result.posts, truncated: result.truncated };
         } else if (name === 'threads_replies_list') {
           const threads = options.threads;
           if (!threads) throw new ProviderError('UPSTREAM_ERROR', 'The Threads social surface is not configured on this deployment.');
           const repliesInput = parsed.data as z.infer<typeof threadsRepliesListInputSchema>;
-          const replies = await runBackendOperation(
+          const result = await runBackendOperation(
             (signal) => threads.listReplies(repliesInput, signal),
             backendTimeoutMs,
             extra.signal,
             shutdownSignal
           );
-          output = replies === null
+          output = result === null
             ? runtimeFailure('NOT_FOUND', 'No Threads media matched the supplied identifier.')
-            : { ok: true, backend: threads.name, media_id: repliesInput.media_id, replies };
+            : { ok: true, backend: threads.name, media_id: repliesInput.media_id, replies: result.replies, truncated: result.truncated };
         } else {
           const sessionAssessment = options.sessionAssessment;
           output = {

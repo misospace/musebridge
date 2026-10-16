@@ -1,9 +1,14 @@
 import { z } from 'zod';
-import { ProviderError, type ThreadsBackend } from './backend.js';
-import { threadsPostSchema, threadsReplySchema, type ThreadsPost, type ThreadsReply } from './domain.js';
+import { ProviderError, type ThreadsBackend, type ThreadsPostPage, type ThreadsReplyPage } from './backend.js';
+import { MAX_THREADS_REPLY_COUNT, threadsPostSchema, threadsReplySchema, type ThreadsPost, type ThreadsReply } from './domain.js';
 import { ThreadsClient, ThreadsHttpError, type ThreadsClientOptions } from './threads.js';
 
 const isoOffsetSchema = z.string().datetime({ offset: true });
+
+// Bounded cursor following: each call may walk at most this many upstream pages, so a
+// pathological provider cannot make one tool call unbounded. Reaching the bound with a
+// live cursor marks the page truncated rather than silently claiming completeness.
+const MAX_THREADS_PAGES = 5;
 
 export class ThreadsApiBackend implements ThreadsBackend {
   readonly name = 'threads';
@@ -16,49 +21,89 @@ export class ThreadsApiBackend implements ThreadsBackend {
     validateTimeout(this.requestTimeoutMs, 'requestTimeoutMs');
   }
 
-  async listOwnPosts(input: Parameters<ThreadsBackend['listOwnPosts']>[0], signal: AbortSignal): Promise<ThreadsPost[]> {
+  async listOwnPosts(input: Parameters<ThreadsBackend['listOwnPosts']>[0], signal: AbortSignal): Promise<ThreadsPostPage> {
     return this.withDeadline(signal, async (requestSignal) => {
       try {
-        const payload = await this.client.listOwnPosts({
-          limit: input.limit,
-          ...(input.since !== undefined ? { since: input.since } : {})
-        }, requestSignal) as { data?: unknown };
-        const data = payload?.data;
-        if (Array.isArray(data)) {
-          const posts: ThreadsPost[] = [];
-          for (const item of data) {
-            const post = mapPost(item);
-            if (post) posts.push(post);
-            if (posts.length >= input.limit) break;
+        const seen = new Set<string>();
+        const posts: ThreadsPost[] = [];
+        let after: string | undefined;
+        let truncated = false;
+        for (let page = 0; page < MAX_THREADS_PAGES; page++) {
+          const payload = await this.client.listOwnPosts({
+            limit: input.limit,
+            ...(input.since !== undefined ? { since: input.since } : {}),
+            ...(after !== undefined ? { after } : {})
+          }, requestSignal);
+          const data = requireDataArray(payload);
+          // A non-array `data` is schema drift, never a silent empty page; `{data: []}` is
+          // the documented legitimate zero-result page and returns [].
+          if (data === null) throw new ProviderError('UPSTREAM_ERROR', 'The Threads posts response was not recognized.');
+          const next = cursorAfter(payload);
+          // Only unconsumed items in *this* page (or a live cursor) mean more results may
+          // exist; hitting the limit on the final item of an exhausted page is complete.
+          let moreInPage = false;
+          for (let index = 0; index < data.length; index++) {
+            const post = mapPost(data[index]);
+            if (!post) throw new ProviderError('UPSTREAM_ERROR', 'The Threads posts response was not recognized.');
+            if (seen.has(post.id)) continue;
+            seen.add(post.id);
+            posts.push(post);
+            if (posts.length >= input.limit) { moreInPage = index < data.length - 1; break; }
           }
-          return posts;
+          if (posts.length >= input.limit) {
+            truncated = moreInPage || next !== undefined;
+            break;
+          }
+          if (next === undefined) {
+            truncated = false;
+            break;
+          }
+          after = next;
+          if (page === MAX_THREADS_PAGES - 1) truncated = true;
         }
-        // The Threads API omits `data` on legitimate zero-result pages; any other shape is
-        // schema drift — a typed error, never a silent empty page.
-        if (payload !== undefined && payload !== null && !('data' in payload)) throw new ProviderError('UPSTREAM_ERROR', 'The Threads posts response was not recognized.');
-        if (payload !== undefined && payload !== null && 'data' in payload && (payload as { data?: unknown }).data === undefined) return [];
-        throw new ProviderError('UPSTREAM_ERROR', 'The Threads posts response was not recognized.');
+        return { posts, truncated };
       } catch (error) { throw mapError(error); }
     });
   }
 
-  async listReplies(input: Parameters<ThreadsBackend['listReplies']>[0], signal: AbortSignal): Promise<ThreadsReply[] | null> {
+  async listReplies(input: Parameters<ThreadsBackend['listReplies']>[0], signal: AbortSignal): Promise<ThreadsReplyPage | null> {
     return this.withDeadline(signal, async (requestSignal) => {
       try {
-        const payload = await this.client.listReplies({ mediaId: input.media_id }, requestSignal) as { data?: unknown };
-        const data = payload?.data;
-        if (Array.isArray(data)) {
-          const replies: ThreadsReply[] = [];
-          for (const item of data) {
-            const reply = mapReply(item, input.media_id);
-            if (reply) replies.push(reply);
-            if (replies.length >= 20) break;
+        const seen = new Set<string>();
+        const replies: ThreadsReply[] = [];
+        let after: string | undefined;
+        let truncated = false;
+        for (let page = 0; page < MAX_THREADS_PAGES; page++) {
+          const payload = await this.client.listReplies({
+            mediaId: input.media_id,
+            ...(after !== undefined ? { after } : {})
+          }, requestSignal);
+          const data = requireDataArray(payload);
+          if (data === null) throw new ProviderError('UPSTREAM_ERROR', 'The Threads replies response was not recognized.');
+          const next = cursorAfter(payload);
+          // Only unconsumed items in *this* page (or a live cursor) mean more results may
+          // exist; hitting the cap on the final item of an exhausted page is complete.
+          let moreInPage = false;
+          for (let index = 0; index < data.length; index++) {
+            const reply = mapReply(data[index], input.media_id);
+            if (!reply) throw new ProviderError('UPSTREAM_ERROR', 'The Threads replies response was not recognized.');
+            if (seen.has(reply.id)) continue;
+            seen.add(reply.id);
+            replies.push(reply);
+            if (replies.length >= MAX_THREADS_REPLY_COUNT) { moreInPage = index < data.length - 1; break; }
           }
-          return replies;
+          if (replies.length >= MAX_THREADS_REPLY_COUNT) {
+            truncated = moreInPage || next !== undefined;
+            break;
+          }
+          if (next === undefined) {
+            truncated = false;
+            break;
+          }
+          after = next;
+          if (page === MAX_THREADS_PAGES - 1) truncated = true;
         }
-        if (payload !== undefined && payload !== null && !('data' in payload)) throw new ProviderError('UPSTREAM_ERROR', 'The Threads replies response was not recognized.');
-        if (payload !== undefined && payload !== null && 'data' in payload && (payload as { data?: unknown }).data === undefined) return [];
-        throw new ProviderError('UPSTREAM_ERROR', 'The Threads replies response was not recognized.');
+        return { replies, truncated };
       } catch (error) {
         // A missing media is the house "no result" case: return null and let the tool layer
         // report NOT_FOUND, mirroring the other backends.
@@ -95,6 +140,43 @@ function mapError(error: unknown): ProviderError {
     return new ProviderError('UPSTREAM_ERROR', 'The Threads request failed.');
   }
   return new ProviderError('UPSTREAM_ERROR', 'The Threads request failed.');
+}
+
+// Returns the array-valued `data` field, or null when the payload is not a recognized
+// page shape. Callers throw their own distinct drift message so posts and replies stay
+// distinguishable; `{data: []}` is a legitimate zero-result page and returns [].
+function requireDataArray(payload: unknown): unknown[] | null {
+  if (payload && typeof payload === 'object' && Array.isArray((payload as { data?: unknown }).data)) {
+    return (payload as { data: unknown[] }).data;
+  }
+  return null;
+}
+
+// Extracts the forward cursor without ever surfacing the raw `paging.next` URL: that URL
+// can carry the access token, so only the `after` value is ever returned. `cursors.after`
+// wins when present; otherwise the `after` search param of `next` is parsed out. A present
+// but unresolvable `next` is schema drift — throwing keeps a drifted cursor from silently
+// claiming the page set was exhausted.
+function cursorAfter(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const paging = (payload as { paging?: unknown }).paging;
+  if (!paging || typeof paging !== 'object') return undefined;
+  const cursors = (paging as { cursors?: unknown }).cursors;
+  if (cursors && typeof cursors === 'object') {
+    const after = (cursors as { after?: unknown }).after;
+    if (typeof after === 'string' && after !== '') return after;
+  }
+  const next = (paging as { next?: unknown }).next;
+  if (next === undefined || next === null || next === '') return undefined;
+  if (typeof next === 'string') {
+    try {
+      const after = new URL(next).searchParams.get('after');
+      if (after) return after;
+    } catch {
+      // Fall through to the drift error below.
+    }
+  }
+  throw new ProviderError('UPSTREAM_ERROR', 'The Threads response paging cursor was not recognized.');
 }
 
 // The documented media_type enum. Anything else maps to `UNKNOWN` rather than guessed;

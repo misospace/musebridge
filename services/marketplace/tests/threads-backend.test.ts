@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { createServer, type Server } from 'node:http';
+import { createServer, type Server, type ServerResponse } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ThreadsApiBackend } from '../src/threads-backend.js';
 import { ProviderError } from '../src/backend.js';
@@ -9,35 +9,76 @@ const fixture = (name: string) => JSON.parse(readFileSync(new URL(`./fixtures/th
 let server: Server;
 let origin = '';
 let mode = 'normal';
+const seenAfters: Array<string | null> = [];
+
+const postsPageOne = {
+  data: [
+    { id: 'synth-page1-001', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_user/post/synth-page1-001', text: 'Synthetic page-one post A.', timestamp: '2025-04-01T09:30:00.000Z', username: 'synth_user' },
+    { id: 'synth-page1-002', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_user/post/synth-page1-002', text: 'Synthetic page-one post B.', timestamp: '2025-04-02T09:30:00.000Z', username: 'synth_user' }
+  ],
+  paging: { cursors: { after: 'cursor-2' } }
+};
+const postsPageTwo = {
+  data: [
+    { id: 'synth-page1-002', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_user/post/synth-page1-002', text: 'Synthetic page-one post B.', timestamp: '2025-04-02T09:30:00.000Z', username: 'synth_user' },
+    { id: 'synth-page1-003', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_user/post/synth-page1-003', text: 'Synthetic page-two post C.', timestamp: '2025-04-03T09:30:00.000Z', username: 'synth_user' }
+  ]
+};
+const repliesPageOne = {
+  data: [
+    { id: 'synth-reply-p1-001', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_friend/post/synth-reply-p1-001', text: 'Synthetic reply page one A.', timestamp: '2025-04-01T10:00:00.000Z', username: 'synth_friend' },
+    { id: 'synth-reply-p1-002', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_friend/post/synth-reply-p1-002', text: 'Synthetic reply page one B.', timestamp: '2025-04-01T10:10:00.000Z', username: 'synth_friend' }
+  ],
+  paging: { cursors: { after: 'replies-cursor-2' } }
+};
+const repliesPageTwo = {
+  data: [
+    { id: 'synth-reply-p1-002', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_friend/post/synth-reply-p1-002', text: 'Synthetic reply page one B.', timestamp: '2025-04-01T10:10:00.000Z', username: 'synth_friend' },
+    { id: 'synth-reply-p2-003', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_friend/post/synth-reply-p2-003', text: 'Synthetic reply page two C.', timestamp: '2025-04-01T10:20:00.000Z', username: 'synth_friend' }
+  ]
+};
+
+const json = (response: ServerResponse, body: unknown, status = 200): void => {
+  response.writeHead(status, { 'content-type': 'application/json' });
+  response.end(JSON.stringify(body));
+};
 
 beforeAll(async () => {
   server = createServer((req, res) => {
-    const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const pathname = url.pathname;
     if (mode === 'hang') return;
+    if (mode === 'unauthorized') { res.writeHead(401); res.end(); return; }
+    if (mode === 'forbidden') { res.writeHead(403); res.end(); return; }
+    if (mode === 'rate-limited') { res.writeHead(429, { 'retry-after': '7' }); res.end(); return; }
     if (pathname.endsWith('/threads')) {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(
-        mode === 'empty' ? fixture('posts-empty.json')
-          : mode === 'malformed' ? fixture('posts-malformed.json')
-            : fixture('posts-success.json')
-      ));
-      return;
+      if (mode === 'empty') return json(res, fixture('posts-empty.json'));
+      if (mode === 'malformed') return json(res, fixture('posts-malformed.json'));
+      if (mode === 'posts-malformed-item') return json(res, { data: [{}] });
+      if (mode === 'posts-bad-paging') {
+        return json(res, {
+          data: [{ id: 'synth-bad-paging-001', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_user/post/synth-bad-paging-001', text: 'Synthetic post.', username: 'synth_user' }],
+          paging: { next: 'not-a-url' }
+        });
+      }
+      if (mode === 'pagination') {
+        const after = url.searchParams.get('after');
+        seenAfters.push(after);
+        return json(res, after === 'cursor-2' ? postsPageTwo : postsPageOne);
+      }
+      return json(res, fixture('posts-success.json'));
     }
     if (pathname.endsWith('/replies')) {
-      if (mode === 'replies-empty') {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify(fixture('posts-empty.json')));
-        return;
+      if (mode === 'replies-empty') return json(res, fixture('posts-empty.json'));
+      if (mode === 'replies-malformed') return json(res, fixture('replies-malformed.json'));
+      if (mode === 'replies-malformed-item') return json(res, { data: [{}] });
+      if (mode === 'replies-pagination') {
+        const after = url.searchParams.get('after');
+        seenAfters.push(after);
+        return json(res, after === 'replies-cursor-2' ? repliesPageTwo : repliesPageOne);
       }
-      if (mode === 'replies-malformed') {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify(fixture('replies-malformed.json')));
-        return;
-      }
-      if (mode === 'not-found') { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify(fixture('replies-404.json'))); return; }
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(fixture('replies-success.json')));
-      return;
+      if (mode === 'not-found') { json(res, fixture('replies-404.json'), 404); return; }
+      return json(res, fixture('replies-success.json'));
     }
     res.writeHead(404).end();
   });
@@ -48,15 +89,19 @@ beforeAll(async () => {
 });
 afterAll(async () => { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); });
 
-function backend() { return new ThreadsApiBackend({ accessToken: 'synthetic', threadsUserId: 'synthetic-user-id', baseUrl: origin }); }
+function backend(options: { requestTimeoutMs?: number } = {}) {
+  return new ThreadsApiBackend({ accessToken: 'synthetic', threadsUserId: 'synthetic-user-id', baseUrl: origin }, options);
+}
 const signal = () => new AbortController().signal;
 const postsInput = threadsPostsListInputSchema.parse({ limit: 10 });
+const repliesInput = threadsRepliesListInputSchema.parse({ media_id: 'synth-thread-001' });
 
 describe('ThreadsApiBackend', () => {
   it('maps a full posts page into a valid ThreadsPost list', async () => {
     mode = 'normal';
-    const posts = await backend().listOwnPosts(postsInput, signal());
+    const { posts, truncated } = await backend().listOwnPosts(postsInput, signal());
     expect(posts).toHaveLength(3);
+    expect(truncated).toBe(false);
     for (const post of posts) {
       threadsPostSchema.parse(post);
     }
@@ -88,9 +133,9 @@ describe('ThreadsApiBackend', () => {
     });
   });
 
-  it('returns an empty list when data is the documented zero-result page', async () => {
+  it('returns an empty page when data is the documented zero-result page', async () => {
     mode = 'empty';
-    await expect(backend().listOwnPosts(postsInput, signal())).resolves.toEqual([]);
+    await expect(backend().listOwnPosts(postsInput, signal())).resolves.toEqual({ posts: [], truncated: false });
   });
 
   it('rejects a posts response without an array data field as schema drift', async () => {
@@ -100,24 +145,50 @@ describe('ThreadsApiBackend', () => {
     });
   });
 
+  it('rejects a malformed item inside an array posts data as schema drift', async () => {
+    mode = 'posts-malformed-item';
+    await expect(backend().listOwnPosts(postsInput, signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The Threads posts response was not recognized.'
+    });
+  });
+
+  it('rejects an unresolvable paging cursor as schema drift instead of claiming completeness', async () => {
+    mode = 'posts-bad-paging';
+    await expect(backend().listOwnPosts(postsInput, signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The Threads response paging cursor was not recognized.'
+    });
+  });
+
+  it('marks a page exhausted at the exact limit as complete, not truncated', async () => {
+    // posts-success.json holds exactly three posts with no paging cursor.
+    mode = 'normal';
+    const exact = await backend().listOwnPosts(threadsPostsListInputSchema.parse({ limit: 3 }), signal());
+    expect(exact.posts).toHaveLength(3);
+    expect(exact.truncated).toBe(false);
+    const capped = await backend().listOwnPosts(threadsPostsListInputSchema.parse({ limit: 2 }), signal());
+    expect(capped.posts).toHaveLength(2);
+    expect(capped.truncated).toBe(true);
+  });
+
   it('maps a full replies page into a valid ThreadsReply list and pins media_id to the parent', async () => {
     mode = 'normal';
-    const replies = await backend().listReplies(threadsRepliesListInputSchema.parse({ media_id: 'synth-thread-001' }), signal());
-    expect(replies).not.toBeNull();
-    expect(replies).toHaveLength(2);
-    for (const reply of replies!) {
+    const result = await backend().listReplies(repliesInput, signal());
+    expect(result).not.toBeNull();
+    expect(result!.truncated).toBe(false);
+    expect(result!.replies).toHaveLength(2);
+    for (const reply of result!.replies) {
       threadsReplySchema.parse(reply);
       expect(reply.media_id).toBe('synth-thread-001');
       expect(reply.provider).toBe('threads');
     }
-    expect(replies![0]).toMatchObject({
+    expect(result!.replies[0]).toMatchObject({
       id: 'synth-reply-001',
       threads_user_id: 'synth_friend',
       media_type: 'TEXT_POST',
       media_urls: [],
       posted_at: '2025-04-01T10:00:00.000Z'
     });
-    expect(replies![1]).toMatchObject({
+    expect(result!.replies[1]).toMatchObject({
       id: 'synth-reply-002',
       threads_user_id: 'synth_visitor',
       media_type: 'IMAGE',
@@ -127,20 +198,74 @@ describe('ThreadsApiBackend', () => {
 
   it('maps a 404 replies response to the house no-result case so the tool layer reports NOT_FOUND', async () => {
     mode = 'not-found';
-    await expect(backend().listReplies(threadsRepliesListInputSchema.parse({ media_id: 'missing' }), signal())).resolves.toBeNull();
+    await expect(backend().listReplies(repliesInput, signal())).resolves.toBeNull();
   });
 
   it('rejects a replies response without an array data field as schema drift', async () => {
     mode = 'replies-malformed';
-    await expect(backend().listReplies(threadsRepliesListInputSchema.parse({ media_id: 'synth-thread-001' }), signal())).rejects.toMatchObject({
+    await expect(backend().listReplies(repliesInput, signal())).rejects.toMatchObject({
       code: 'UPSTREAM_ERROR', message: 'The Threads replies response was not recognized.'
     });
+  });
+
+  it('rejects a malformed item inside an array replies data as schema drift', async () => {
+    mode = 'replies-malformed-item';
+    await expect(backend().listReplies(repliesInput, signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The Threads replies response was not recognized.'
+    });
+  });
+
+  it('maps 401 and 403 to AUTH_EXPIRED', async () => {
+    mode = 'unauthorized';
+    await expect(backend().listOwnPosts(postsInput, signal())).rejects.toMatchObject({ code: 'AUTH_EXPIRED' });
+    mode = 'forbidden';
+    await expect(backend().listOwnPosts(postsInput, signal())).rejects.toMatchObject({ code: 'AUTH_EXPIRED' });
+  });
+
+  it('maps 429 with a retry-after hint to RATE_LIMITED carrying retry_after', async () => {
+    mode = 'rate-limited';
+    await expect(backend().listOwnPosts(postsInput, signal())).rejects.toMatchObject({
+      code: 'RATE_LIMITED', metadata: { retry_after: 7 }
+    });
+  });
+
+  it('follows the paging cursor, dedupes repeated ids, and preserves order', async () => {
+    mode = 'pagination';
+    seenAfters.length = 0;
+    const { posts, truncated } = await backend().listOwnPosts(threadsPostsListInputSchema.parse({ limit: 10 }), signal());
+    expect(posts.map((post) => post.id)).toEqual(['synth-page1-001', 'synth-page1-002', 'synth-page1-003']);
+    expect(truncated).toBe(false);
+    expect(seenAfters).toEqual([null, 'cursor-2']);
+  });
+
+  it('marks the result truncated when the limit is reached mid-page with more pages available', async () => {
+    mode = 'pagination';
+    seenAfters.length = 0;
+    const { posts, truncated } = await backend().listOwnPosts(threadsPostsListInputSchema.parse({ limit: 1 }), signal());
+    expect(posts.map((post) => post.id)).toEqual(['synth-page1-001']);
+    expect(truncated).toBe(true);
+    expect(seenAfters).toEqual([null]);
+  });
+
+  it('follows the replies paging cursor and dedupes repeated ids', async () => {
+    mode = 'replies-pagination';
+    seenAfters.length = 0;
+    const result = await backend().listReplies(repliesInput, signal());
+    expect(result).not.toBeNull();
+    expect(result!.replies.map((reply) => reply.id)).toEqual(['synth-reply-p1-001', 'synth-reply-p1-002', 'synth-reply-p2-003']);
+    expect(result!.truncated).toBe(false);
+    expect(seenAfters).toEqual([null, 'replies-cursor-2']);
   });
 
   it('honors an already-aborted signal as TIMEOUT', async () => {
     mode = 'hang';
     const controller = new AbortController(); controller.abort(new Error('caller aborted'));
     await expect(backend().listOwnPosts(postsInput, controller.signal)).rejects.toMatchObject({ code: 'TIMEOUT' });
+  });
+
+  it('reports a real deadline expiry as TIMEOUT against a hanging server', async () => {
+    mode = 'hang';
+    await expect(backend({ requestTimeoutMs: 25 }).listOwnPosts(postsInput, signal())).rejects.toMatchObject({ code: 'TIMEOUT' });
   });
 
   it('reports its backend name as "threads"', () => {

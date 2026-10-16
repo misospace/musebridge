@@ -15,7 +15,7 @@ import { BrowserSessionManager } from '../src/browser.js';
 import { FACEBOOK_MESSENGER_INBOX_PATH } from '../src/facebook.js';
 import { ProviderError } from '../src/index.js';
 import { facebookCredentialsFromEnv } from '../src/facebook-login.js';
-import { createMarketplaceService, type MarketplaceService, parseBackendKind, parseBackendTimeout, parseEventsBackendKind, parseLoginWaitMs, parseMessengerEnabled, parseMessengerProbeOnly, parseShoppingBackendKind, parseThreadsBackendKind } from '../src/service.js';
+import { createMarketplaceService, type MarketplaceService, parseBackendKind, parseBackendTimeout, parseEventsBackendKind, parseLoginWaitMs, parseMessengerEnabled, parseMessengerProbeOnly, parseShoppingBackendKind, parseThreadsBackendKind, parseThreadsLiveValidated } from '../src/service.js';
 import * as packageEntry from '../src/index.js';
 import { runBackendOperation } from '../src/tools.js';
 import { threadsListInputSchema, threadReadInputSchema } from '../src/domain.js';
@@ -546,10 +546,16 @@ describe('fixture MCP service', () => {
     expect(() => createMarketplaceService()).toThrow(/TICKETMASTER_API_KEY/);
   });
 
-  it('parses Threads backend selection and requires both credentials only when selected', async () => {
+  it('parses Threads backend selection and requires both credentials and the live-validation gate only when selected', async () => {
     expect(parseThreadsBackendKind(undefined)).toBe('fixture');
     expect(parseThreadsBackendKind('threads')).toBe('threads');
     expect(() => parseThreadsBackendKind('other')).toThrow(new RangeError('THREADS_BACKEND must be either "fixture" or "threads"'));
+    expect(parseThreadsLiveValidated(undefined)).toBe(false);
+    expect(parseThreadsLiveValidated('0')).toBe(false);
+    expect(parseThreadsLiveValidated('1')).toBe(true);
+    for (const invalid of ['', 'true', 'yes', '2']) {
+      expect(() => parseThreadsLiveValidated(invalid)).toThrow(RangeError);
+    }
     // Token missing → startup failure (typed RangeError, not a silent empty success).
     vi.stubEnv('THREADS_BACKEND', 'threads');
     vi.stubEnv('THREADS_ACCESS_TOKEN', '');
@@ -559,7 +565,18 @@ describe('fixture MCP service', () => {
     vi.stubEnv('THREADS_ACCESS_TOKEN', 'synthetic-token');
     vi.stubEnv('THREADS_USER_ID', '');
     expect(() => createMarketplaceService()).toThrow(/THREADS_USER_ID/);
-    // Both configured → the live ThreadsApiBackend is selected with name 'threads'.
+    // Both credentials present but the live-validation gate is disabled/empty → startup failure.
+    vi.stubEnv('THREADS_ACCESS_TOKEN', 'synthetic-token');
+    vi.stubEnv('THREADS_USER_ID', 'synthetic-user-id');
+    vi.stubEnv('THREADS_LIVE_VALIDATED', '0');
+    expect(() => createMarketplaceService()).toThrow(/THREADS_LIVE_VALIDATED/);
+    vi.stubEnv('THREADS_LIVE_VALIDATED', '');
+    expect(() => createMarketplaceService()).toThrow(/THREADS_LIVE_VALIDATED/);
+    // A missing credential still wins over the gate, so the operator sees the credential error.
+    vi.stubEnv('THREADS_LIVE_VALIDATED', '1');
+    vi.stubEnv('THREADS_ACCESS_TOKEN', '');
+    expect(() => createMarketplaceService()).toThrow(/THREADS_ACCESS_TOKEN/);
+    // Both configured and the gate acknowledged → the live ThreadsApiBackend is selected with name 'threads'.
     vi.stubEnv('THREADS_ACCESS_TOKEN', 'synthetic-token');
     vi.stubEnv('THREADS_USER_ID', 'synthetic-user-id');
     const threadsOnly = createMarketplaceService({ host: '127.0.0.1', port: 0, adminPort: 0 });
@@ -572,6 +589,7 @@ describe('fixture MCP service', () => {
     const posts = structured(await client.callTool({ name: 'threads_posts_list', arguments: {} }));
     expect(posts.backend).toBe('fixture');
     expect(posts.posts.length).toBeGreaterThan(0);
+    expect(typeof posts.truncated).toBe('boolean');
     for (const post of posts.posts) {
       expect(post.provider).toBe('threads');
       expect(['TEXT_POST', 'IMAGE', 'VIDEO', 'CAROUSEL_ALBUM', 'REPOST_FACADE', 'UNKNOWN']).toContain(post.media_type);
@@ -580,6 +598,9 @@ describe('fixture MCP service', () => {
     }
     const knownPost = posts.posts.find((post: { id: string }) => post.id === 'synth-thread-001');
     expect(knownPost).toMatchObject({ id: 'synth-thread-001', threads_user_id: 'synth_user', media_type: 'TEXT_POST', reply_count: 4, like_count: 22 });
+    const limited = structured(await client.callTool({ name: 'threads_posts_list', arguments: { limit: 1 } }));
+    expect(limited.posts).toHaveLength(1);
+    expect(limited.truncated).toBe(true);
     const replies = structured(await client.callTool({ name: 'threads_replies_list', arguments: { media_id: 'synth-thread-001' } }));
     expect(replies.backend).toBe('fixture');
     expect(replies.media_id).toBe('synth-thread-001');

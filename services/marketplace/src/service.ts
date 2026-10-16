@@ -52,6 +52,8 @@ export interface ServiceOptions {
   events?: EventsBackend;
   threadsBackendKind?: 'fixture' | 'threads';
   threads?: ThreadsBackend;
+  /** Explicit operator acknowledgement that the live Threads backend was validated against the current Meta reference; the live backend is refused unless this is true (or THREADS_LIVE_VALIDATED=1). */
+  threadsLiveValidated?: boolean;
   facebookMarkets?: readonly FacebookMarket[];
   host?: string;
   port?: number;
@@ -159,15 +161,26 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
   if (options.threads !== undefined && options.threadsBackendKind !== undefined) {
     throw new TypeError('threads and threadsBackendKind cannot both select a backend');
   }
-  // The live Threads backend requires both THREADS_ACCESS_TOKEN and THREADS_USER_ID.
-  // A missing pair is a startup failure — a typed RangeError, not a silent empty
-  // success (#84: no fabricated values, no silent empty success on missing credentials).
-  // The fixture backend stays default.
-  const threads = options.threads ?? (threadsBackendKind === 'threads'
-    ? new ThreadsApiBackend(new ThreadsClient({
+  // The live Threads backend is gated on two parts, in order: (1) both THREADS_ACCESS_TOKEN
+  // and THREADS_USER_ID must be non-empty — a missing pair is a typed RangeError, not a
+  // silent empty success (#84), and this is checked first so a half-configured deployment
+  // still reports the missing credential; (2) the operator must explicitly acknowledge that
+  // the connector was validated against the current Meta reference (THREADS_LIVE_VALIDATED=1
+  // or the seam), because the endpoints and field shapes are documented but unverified.
+  // The fixture backend stays default, and the gate value is only parsed on the live path.
+  const liveThreadsBackend = (): ThreadsApiBackend => {
+    const client = new ThreadsClient({
       accessToken: requiredEnv('THREADS_ACCESS_TOKEN'),
       threadsUserId: requiredEnv('THREADS_USER_ID')
-    }))
+    });
+    const threadsLiveValidated = options.threadsLiveValidated ?? parseThreadsLiveValidated(process.env.THREADS_LIVE_VALIDATED);
+    if (!threadsLiveValidated) {
+      throw new RangeError('THREADS_LIVE_VALIDATED=1 is required to select the live Threads backend; complete the operator live-validation checklist first.');
+    }
+    return new ThreadsApiBackend(client);
+  };
+  const threads = options.threads ?? (threadsBackendKind === 'threads'
+    ? liveThreadsBackend()
     : new FixtureThreadsBackend());
   const loginWaitMs = options.facebookLoginWaitMs ?? parseLoginWaitMs(process.env.FACEBOOK_LOGIN_WAIT_SECONDS);
   if (!Number.isSafeInteger(loginWaitMs) || loginWaitMs <= 0) {
@@ -568,6 +581,12 @@ export function parseThreadsBackendKind(value: string | undefined): 'fixture' | 
   if (value === undefined || value === 'fixture') return 'fixture';
   if (value === 'threads') return 'threads';
   throw new RangeError('THREADS_BACKEND must be either "fixture" or "threads"');
+}
+
+export function parseThreadsLiveValidated(value: string | undefined): boolean {
+  if (value === undefined || value === '0') return false;
+  if (value === '1') return true;
+  throw new RangeError('THREADS_LIVE_VALIDATED must be "0" or "1"');
 }
 
 function requiredEnv(name: 'EBAY_CLIENT_ID' | 'EBAY_CLIENT_SECRET' | 'TICKETMASTER_API_KEY' | 'THREADS_ACCESS_TOKEN' | 'THREADS_USER_ID'): string {

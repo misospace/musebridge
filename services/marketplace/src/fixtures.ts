@@ -1,5 +1,5 @@
-import { shoppingFetchInputSchema, shoppingSearchInputSchema, productOfferSchema, eventsFetchInputSchema, eventsSearchInputSchema, eventAvailabilitySchema, threadsPostSchema, threadsReplySchema, threadsPostsListInputSchema, threadsRepliesListInputSchema, type ConversationMessage, type ConversationThread, type EventAvailability, type Listing, type ProductOffer, type ThreadsPost, type ThreadsReply } from './domain.js';
-import type { EventsBackend, ShoppingBackend, ThreadsBackend } from './backend.js';
+import { shoppingFetchInputSchema, shoppingSearchInputSchema, productOfferSchema, eventsFetchInputSchema, eventsSearchInputSchema, eventAvailabilitySchema, MAX_THREADS_REPLY_COUNT, threadsPostSchema, threadsReplySchema, threadsPostsListInputSchema, threadsRepliesListInputSchema, type ConversationMessage, type ConversationThread, type EventAvailability, type Listing, type ProductOffer, type ThreadsPost, type ThreadsReply } from './domain.js';
+import type { EventsBackend, ShoppingBackend, ThreadsBackend, ThreadsPostPage, ThreadsReplyPage } from './backend.js';
 import { canonicalHttpUrl } from './backend.js';
 
 export const FIXTURE_CONVERSATIONS: readonly {
@@ -361,11 +361,21 @@ export const FIXTURE_THREADS_REPLIES: readonly ThreadsReply[] = [
 export class FixtureThreadsBackend implements ThreadsBackend {
   readonly name = 'fixture';
 
-  listOwnPosts(_input: ReturnType<typeof threadsPostsListInputSchema.parse>, _signal: AbortSignal): ThreadsPost[] {
-    return [...FIXTURE_THREADS_POSTS];
+  listOwnPosts(input: ReturnType<typeof threadsPostsListInputSchema.parse>, _signal: AbortSignal): ThreadsPostPage {
+    const since = input.since;
+    // Calendar-date compare is safe because `posted_at` is schema-validated ISO 8601 with an
+    // offset and `since` is regex-validated YYYY-MM-DD. Posts with no timestamp are excluded
+    // from a bounded query rather than assumed recent.
+    const matching = since === undefined
+      ? [...FIXTURE_THREADS_POSTS]
+      : FIXTURE_THREADS_POSTS.filter((post) => post.posted_at !== null && post.posted_at.slice(0, 10) >= since);
+    const posts = matching.slice(0, input.limit);
+    return { posts, truncated: matching.length > posts.length };
   }
 
-  listReplies(input: ReturnType<typeof threadsRepliesListInputSchema.parse>, _signal: AbortSignal): ThreadsReply[] {
-    return FIXTURE_THREADS_REPLIES.filter((reply) => reply.media_id === input.media_id);
+  listReplies(input: ReturnType<typeof threadsRepliesListInputSchema.parse>, _signal: AbortSignal): ThreadsReplyPage {
+    const matching = FIXTURE_THREADS_REPLIES.filter((reply) => reply.media_id === input.media_id);
+    const replies = matching.slice(0, MAX_THREADS_REPLY_COUNT);
+    return { replies, truncated: matching.length > replies.length };
   }
 }

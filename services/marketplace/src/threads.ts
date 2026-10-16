@@ -8,6 +8,7 @@ export interface ThreadsClientOptions {
 export interface ThreadsPostsListOptions {
   limit: number;
   since?: string;
+  after?: string;
 }
 
 export class ThreadsHttpError extends Error {
@@ -59,15 +60,21 @@ export class ThreadsClient {
       // timestamp; we forward it as-is rather than inventing an offset.
       params.set('since', options.since);
     }
+    if (options.after !== undefined && options.after !== '') {
+      params.set('after', options.after);
+    }
     return this.apiRequest(`/${encodeURIComponent(this.threadsUserId)}/threads?${params}`, signal);
   }
 
-  async listReplies(input: { mediaId: string }, signal?: AbortSignal): Promise<unknown> {
+  async listReplies(input: { mediaId: string; after?: string }, signal?: AbortSignal): Promise<unknown> {
     if (!input || typeof input !== 'object') throw new TypeError('input must be an object');
-    const { mediaId } = input;
+    const { mediaId, after } = input;
     if (typeof mediaId !== 'string' || !mediaId.trim()) throw new TypeError('mediaId must not be empty');
     const params = new URLSearchParams();
     params.set('fields', 'id,media_type,media_url,permalink,text,thumbnail_url,timestamp,username,shortcode,is_quote_post,quoted_post,reposted_post');
+    if (after !== undefined && after !== '') {
+      params.set('after', after);
+    }
     return this.apiRequest(`/${encodeURIComponent(mediaId)}/replies?${params}`, signal);
   }
 

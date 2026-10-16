@@ -61,10 +61,20 @@ export interface EventsBackend {
 // own `provider: 'threads'` value. No DMs, no saved items, no keyword search, no
 // external profile discovery, no browser session — fail closed on missing credentials
 // (#46/#38).
+export interface ThreadsPostPage {
+  posts: ThreadsPost[];
+  truncated: boolean;
+}
+
+export interface ThreadsReplyPage {
+  replies: ThreadsReply[];
+  truncated: boolean;
+}
+
 export interface ThreadsBackend {
   readonly name: string;
-  listOwnPosts(input: ReturnType<typeof threadsPostsListInputSchema.parse>, signal: AbortSignal): Promise<ThreadsPost[]> | ThreadsPost[];
-  listReplies(input: ReturnType<typeof threadsRepliesListInputSchema.parse>, signal: AbortSignal): Promise<ThreadsReply[] | null> | ThreadsReply[] | null;
+  listOwnPosts(input: ReturnType<typeof threadsPostsListInputSchema.parse>, signal: AbortSignal): Promise<ThreadsPostPage> | ThreadsPostPage;
+  listReplies(input: ReturnType<typeof threadsRepliesListInputSchema.parse>, signal: AbortSignal): Promise<ThreadsReplyPage | null> | ThreadsReplyPage | null;
 }
 
 export class ProviderError extends Error {
