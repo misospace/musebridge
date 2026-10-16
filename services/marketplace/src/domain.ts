@@ -321,7 +321,14 @@ export const eventsFetchOutputSchema = z.union([eventsFetchSuccessSchema, runtim
 // (`threads.net` / `threads.com`) — no fabricated values, no guessed navigation
 // targets, no cross-host URLs.
 const threadsMediaTypeSchema = z.enum(['TEXT_POST', 'IMAGE', 'VIDEO', 'CAROUSEL_ALBUM', 'REPOST_FACADE', 'UNKNOWN']);
-const threadsDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Must be a YYYY-MM-DD date');
+const threadsDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Must be a YYYY-MM-DD date').refine((value) => {
+  // A date-shaped string is not necessarily a calendar date: `2025-99-99` or `2025-02-30`
+  // must be rejected rather than forwarded to the provider. Round-trip through UTC and
+  // require every component to survive, so rollover dates fail closed.
+  const [year, month, day] = value.split('-').map(Number) as [number, number, number];
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}, 'Must be a valid calendar date');
 
 const threadsMediaUrlSchema = z.string().max(2048).url().regex(/^[Hh][Tt][Tt][Pp][Ss]?:\/\/[^\s/@]+(?:[/?#][^\s]*)?$/).meta({ format: 'uri' }).refine((value) => {
   try {

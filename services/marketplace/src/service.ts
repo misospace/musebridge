@@ -591,7 +591,10 @@ export function parseThreadsLiveValidated(value: string | undefined): boolean {
 
 function requiredEnv(name: 'EBAY_CLIENT_ID' | 'EBAY_CLIENT_SECRET' | 'TICKETMASTER_API_KEY' | 'THREADS_ACCESS_TOKEN' | 'THREADS_USER_ID'): string {
   const value = process.env[name];
-  if (!value) {
+  // Whitespace-only is treated as absent: otherwise a blank `THREADS_ACCESS_TOKEN`/`THREADS_USER_ID`
+  // would pass here and fail later as a `TypeError` in the client, violating the typed-startup
+  // `RangeError` contract (#84 review).
+  if (!value || !value.trim()) {
     const when = name === 'TICKETMASTER_API_KEY'
       ? 'EVENTS_BACKEND=ticketmaster'
       : name === 'THREADS_ACCESS_TOKEN' || name === 'THREADS_USER_ID'

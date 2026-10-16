@@ -565,6 +565,16 @@ describe('fixture MCP service', () => {
     vi.stubEnv('THREADS_ACCESS_TOKEN', 'synthetic-token');
     vi.stubEnv('THREADS_USER_ID', '');
     expect(() => createMarketplaceService()).toThrow(/THREADS_USER_ID/);
+    // Whitespace-only credentials are treated as missing: the startup failure is the typed
+    // RangeError naming the variable, not a later client TypeError.
+    vi.stubEnv('THREADS_ACCESS_TOKEN', '   ');
+    vi.stubEnv('THREADS_USER_ID', 'synthetic-user');
+    expect(() => createMarketplaceService()).toThrow(RangeError);
+    expect(() => createMarketplaceService()).toThrow(/THREADS_ACCESS_TOKEN/);
+    vi.stubEnv('THREADS_ACCESS_TOKEN', 'synthetic-token');
+    vi.stubEnv('THREADS_USER_ID', '\t\n ');
+    expect(() => createMarketplaceService()).toThrow(RangeError);
+    expect(() => createMarketplaceService()).toThrow(/THREADS_USER_ID/);
     // Both credentials present but the live-validation gate is disabled/empty → startup failure.
     vi.stubEnv('THREADS_ACCESS_TOKEN', 'synthetic-token');
     vi.stubEnv('THREADS_USER_ID', 'synthetic-user-id');
@@ -879,7 +889,19 @@ describe('fixture MCP service', () => {
       ['shopping_search', { query: 'solar', unexpected: true }],
       ['shopping_fetch', {}],
       ['shopping_fetch', { id: 'bad/id' }],
-      ['shopping_fetch', { url: 'javascript:alert(1)' }]
+      ['shopping_fetch', { url: 'javascript:alert(1)' }],
+      ['threads_posts_list', { limit: 0 }],
+      ['threads_posts_list', { limit: 21 }],
+      ['threads_posts_list', { limit: 1.5 }],
+      ['threads_posts_list', { since: 'not-a-date' }],
+      ['threads_posts_list', { since: '2025-99-99' }],
+      ['threads_posts_list', { since: '2025-02-30' }],
+      ['threads_posts_list', { since: '2025-13-01' }],
+      ['threads_posts_list', { extra: true }],
+      ['threads_replies_list', undefined],
+      ['threads_replies_list', {}],
+      ['threads_replies_list', { media_id: '' }],
+      ['threads_replies_list', { media_id: 'synth-thread-001', extra: true }]
     ];
     for (const [name, argumentsValue] of invalidArguments) {
       let response: { status: number; body: any };
