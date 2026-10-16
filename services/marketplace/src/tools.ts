@@ -1,7 +1,7 @@
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { ProviderError, type ConversationBackend, type EventsBackend, type MarketplaceBackend, type ShoppingBackend } from './backend.js';
+import { ProviderError, SurfaceDisabledError, type ConversationBackend, type EventsBackend, type MarketplaceBackend, type ShoppingBackend } from './backend.js';
 import type { ProviderSessionAssessment } from './browser.js';
 import {
   authorizeAction,
@@ -356,14 +356,18 @@ export function registerMarketplaceTools(
         validatedOutput = outputSchema.parse(output);
       } catch (error) {
         if (extra.signal.aborted || shutdownSignal?.aborted) throw error;
-        const providerFailure = getProviderFailure(error);
-        if (providerFailure && name !== 'marketplace_status') {
-          validatedOutput = { ok: false, error: providerFailure };
+        if (error instanceof SurfaceDisabledError) {
+          validatedOutput = runtimeFailureSchema.parse({ ok: false, error: { code: error.code, message: error.message } });
         } else {
-          const requestId = (request as { id?: unknown }).id;
-          const idSuffix = requestId !== undefined ? ` [request id: ${String(requestId)}]` : '';
-          logger.error(`Marketplace service failure (tool: ${name})${idSuffix}:`, error);
-          validatedOutput = runtimeFailure('INTERNAL_ERROR', 'The backend could not complete the request.');
+          const providerFailure = getProviderFailure(error);
+          if (providerFailure && name !== 'marketplace_status') {
+            validatedOutput = { ok: false, error: providerFailure };
+          } else {
+            const requestId = (request as { id?: unknown }).id;
+            const idSuffix = requestId !== undefined ? ` [request id: ${String(requestId)}]` : '';
+            logger.error(`Marketplace service failure (tool: ${name})${idSuffix}:`, error);
+            validatedOutput = runtimeFailure('INTERNAL_ERROR', 'The backend could not complete the request.');
+          }
         }
       }
     }

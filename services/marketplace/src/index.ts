@@ -1,7 +1,7 @@
 import { facebookMarketsFilePath, loadFacebookMarkets } from './market-config.js';
 import { createMarketplaceService, installShutdownHandlers, listen } from './service.js';
 
-export { FixtureBackend, ProviderError, type ConversationBackend, type EventsBackend, type MarketplaceBackend } from './backend.js';
+export { FixtureBackend, ProviderError, SurfaceDisabledError, type ConversationBackend, type EventsBackend, type MarketplaceBackend } from './backend.js';
 export { TicketmasterClient, TicketmasterHttpError, type TicketmasterClientOptions } from './ticketmaster.js';
 export { TicketmasterEventsBackend } from './ticketmaster-backend.js';
 export { FacebookMarketplaceBackend, type FacebookMarketplaceBackendOptions } from './facebook-marketplace-backend.js';

@@ -174,7 +174,8 @@ export const runtimeErrorCodeSchema = z.enum([
   'NOT_FOUND',
   'INTERNAL_ERROR',
   'APPROVAL_REQUIRED',
-  'ACTION_FORBIDDEN'
+  'ACTION_FORBIDDEN',
+  'SURFACE_DISABLED'
 ]);
 
 export const providerErrorMetadataSchema = z.object({

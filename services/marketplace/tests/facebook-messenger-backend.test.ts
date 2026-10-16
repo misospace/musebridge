@@ -213,25 +213,36 @@ function driveSendWithPage(backend: FacebookMessengerBackend, page: Record<strin
 }
 
 describe('Messenger probe-only diagnostics', () => {
-  it.each(['login', 'authenticated', 'captcha', 'ambiguous'] as const)(
+  it.each(['login', 'authenticated', 'captcha', 'checkpoint', 'ambiguous'] as const)(
     'never attempts login or opens a thread after a %s probe', async (state) => {
       const backend = createBackend();
       const result = state === 'login'
         ? { status: 'session_needs_reauth', outcome: 'login_required', code: 'LOGIN_REQUIRED' } as const
         : state === 'captcha'
           ? { status: 'session_needs_reauth', outcome: 'captcha', code: 'CAPTCHA_REQUIRED' } as const
-          : state === 'authenticated'
-            ? { status: 'session_usable', outcome: 'messages_authenticated' } as const
-            : { status: 'session_unknown', outcome: 'ambiguous' } as const;
+          : state === 'checkpoint'
+            ? { status: 'session_needs_reauth', outcome: 'checkpoint', code: 'SESSION_INVALID' } as const
+            : state === 'authenticated'
+              ? { status: 'session_usable', outcome: 'messages_authenticated' } as const
+              : { status: 'session_unknown', outcome: 'ambiguous' } as const;
       const probe = vi.spyOn(backend['probe'], 'probeSession').mockResolvedValue(result);
       const login = new FacebookCredentialLogin({ browser: backend['browser'], username: 'synthetic-user', password: 'synthetic-password' });
       const attempt = vi.spyOn(login, 'attempt');
       const diagnosticBackend = new FacebookMessengerBackend({
         browser: backend['browser'], probe: backend['probe'], login, probeOnly: true
       });
-      const code = ('code' in result ? result.code : undefined) ?? 'SESSION_INVALID';
-      await expectProviderError(diagnosticBackend.listThreads(listInput(), new AbortController().signal), code);
-      await expectProviderError(diagnosticBackend.readThread(readInput(), new AbortController().signal), code);
+      const sessionCode = 'code' in result ? result.code : undefined;
+      if (sessionCode !== undefined) {
+        // A genuinely unusable session still reports its provider session code; probe-only only
+        // changes the code for a usable (or unverifiable) session, whose surface is config-disabled.
+        await expectProviderError(diagnosticBackend.listThreads(listInput(), new AbortController().signal), sessionCode);
+        await expectProviderError(diagnosticBackend.readThread(readInput(), new AbortController().signal), sessionCode);
+      } else {
+        await expect(diagnosticBackend.listThreads(listInput(), new AbortController().signal))
+          .rejects.toMatchObject({ name: 'SurfaceDisabledError', code: 'SURFACE_DISABLED' });
+        await expect(diagnosticBackend.readThread(readInput(), new AbortController().signal))
+          .rejects.toMatchObject({ name: 'SurfaceDisabledError', code: 'SURFACE_DISABLED' });
+      }
       expect(probe).toHaveBeenCalledTimes(2);
       expect(attempt).not.toHaveBeenCalled();
       expect(requests).toEqual([]);

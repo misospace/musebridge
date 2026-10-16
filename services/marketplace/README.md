@@ -97,7 +97,7 @@ Playwright's error text from the credential step is deliberately not surfaced: a
 For a session-classification investigation, set `FACEBOOK_MESSENGER_PROBE_ONLY=1`.
 Both conversation tools then run only the isolated Messenger session probe: no credential
 login, inbox extraction, or conversation navigation follows, even if the probe is authenticated.
-The tool returns a typed error while this setting is enabled. Remove it only after the
+The tool returns a typed error with code `SURFACE_DISABLED` while this setting is enabled. Remove it only after the
 classification is understood. The setting accepts `0` or `1`; other values fail startup.
 
 Messenger probes emit one `Facebook Messenger probe diagnostics:` record containing only
