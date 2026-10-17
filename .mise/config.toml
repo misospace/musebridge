@@ -1,0 +1,44 @@
+# Repository development bootstrap for Musebridge (misospace/musebridge#110).
+# Contract: misospace/courier#414 — `.mise/config.toml` plus committed lock data,
+# with idempotent `bootstrap` and explicit `check`/`test` tasks.
+# This config declares no hooks, environment mutation, or credential access:
+# nothing here runs implicitly on install, and tasks never touch live providers.
+
+[settings]
+# Refresh `.mise/mise.lock` automatically when a pin below is intentionally upgraded.
+lockfile = true
+
+# Install strictly from the committed lock: a pin missing from `.mise/mise.lock`
+# fails the install loudly instead of silently resolving or rewriting the lock.
+[tool_config]
+locked = true
+
+# Runtime tool: exact Node pin satisfying the package.json `engines` field
+# (the canonical version range; do not restate it here).
+# Optional contributor conveniences are kept out of [tools]; see tasks below.
+[tools]
+node = "24.22.0"
+
+[tasks.bootstrap]
+description = "Install workspace dependencies from the committed lockfile (idempotent, no lifecycle scripts, no credentials)"
+run = "npm ci --ignore-scripts"
+
+[tasks.check]
+description = "CI-equivalent static validation: typecheck, lint, build (no tests, no browser)"
+run = """
+npm run typecheck
+npm run lint
+npm run build
+"""
+
+[tasks.test]
+description = "Run the test suite (fixture backend by default; never contacts live providers)"
+run = "npm test"
+
+# Optional contributor convenience, deliberately separate from bootstrap:
+# only needed for the CI-parity browser pass (REQUIRE_BROWSER_TESTS=1
+# npm run test -- --fileParallelism=false). Downloads Chromium outside the
+# pinned tool set; review before running in restricted environments.
+[tasks."browser-install"]
+description = "Optional: install Playwright Chromium for the CI-parity browser test pass"
+run = "npx playwright install chromium"
