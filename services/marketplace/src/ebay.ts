@@ -3,7 +3,14 @@ export interface EbayClientOptions {
   clientSecret: string;
   baseUrl?: string;
   fetchImpl?: typeof fetch;
+  tokenRequestTimeoutMs?: number;
 }
+
+// The shared OAuth refresh runs on its own clock, independent of any caller's deadline, and
+// shorter than the backend request deadline (default 15s) so a stalled token exchange fails
+// with a real token error before callers give up — and the cached in-flight state is already
+// cleared for the next call (#115).
+const DEFAULT_TOKEN_REQUEST_TIMEOUT_MS = 10_000;
 
 export interface EbaySearchOptions {
   limit: number;
@@ -48,14 +55,20 @@ export class EbayClient {
     if (parsed.username || parsed.password || parsed.search || parsed.hash || (!isEbayHost && !(isLoopback && ['http:', 'https:'].includes(parsed.protocol)))) {
       throw new TypeError('baseUrl must be https://api.ebay.com, https://api.sandbox.ebay.com, or a loopback test address');
     }
+    if (options.tokenRequestTimeoutMs !== undefined
+      && (!Number.isInteger(options.tokenRequestTimeoutMs) || options.tokenRequestTimeoutMs <= 0)) {
+      throw new TypeError('tokenRequestTimeoutMs must be a positive integer');
+    }
     this.baseUrl = base.replace(/\/$/, '');
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.tokenRequestTimeoutMs = options.tokenRequestTimeoutMs ?? DEFAULT_TOKEN_REQUEST_TIMEOUT_MS;
     this.clientId = options.clientId;
     this.clientSecret = options.clientSecret;
   }
 
   private readonly clientId: string;
   private readonly clientSecret: string;
+  private readonly tokenRequestTimeoutMs: number;
 
   async searchItems(query: string, options: EbaySearchOptions, signal?: AbortSignal): Promise<unknown> {
     const params = new URLSearchParams({ q: query, limit: String(options.limit) });
@@ -101,23 +114,39 @@ export class EbayClient {
     // in-flight refresh rather than starting a second one: simultaneous 401s share a single
     // fetch. The shared refresh is deliberately NOT bound to the first caller's signal —
     // cancelling one request must not fail unrelated waiters — so each caller races its own
-    // signal against the shared promise below.
+    // signal against the shared promise below. The refresh does carry its own deadline, bound
+    // to no caller: it covers response headers and body consumption, aborts the underlying
+    // request, and clears the cached in-flight promise on expiry so a permanently stalled
+    // token response cannot poison every later caller (#115).
     if (force) { this.token = undefined; this.tokenExpiresAt = 0; }
     if (this.token && Date.now() < this.tokenExpiresAt) return this.token;
     if (!this.tokenRequest) {
+      const controller = new AbortController();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      // One timer for the whole exchange. Racing the same rejection at each await covers a
+      // stalled body even when a fetch implementation ignores its signal; the abort covers
+      // real fetch (headers and body alike).
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          const reason = new Error('eBay OAuth token request timed out');
+          controller.abort(reason);
+          reject(reason);
+        }, this.tokenRequestTimeoutMs);
+      });
       let request: Promise<string> | undefined;
       request = (async () => {
         try {
-          const response = await this.fetchImpl(`${this.baseUrl}/identity/v2/oauth2/token`, {
+          const response = await Promise.race([this.fetchImpl(`${this.baseUrl}/identity/v2/oauth2/token`, {
             method: 'POST',
             headers: {
               Authorization: `Basic ${Buffer.from(`${this.clientId}:${this.clientSecret}`).toString('base64')}`,
               'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json'
             },
-            body: 'grant_type=client_credentials&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope'
-          });
+            body: 'grant_type=client_credentials&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope',
+            signal: controller.signal
+          }), deadline]);
           if (!response.ok) throw await responseError(response);
-          const payload = await response.json() as TokenResponse;
+          const payload = await Promise.race([response.json() as Promise<TokenResponse>, deadline]);
           if (typeof payload.access_token !== 'string' || !payload.access_token || typeof payload.expires_in !== 'number' || !Number.isFinite(payload.expires_in)) {
             throw new Error('Invalid eBay OAuth token response');
           }
@@ -125,6 +154,7 @@ export class EbayClient {
           this.tokenExpiresAt = Date.now() + Math.max(0, payload.expires_in - 60) * 1000;
           return this.token;
         } finally {
+          clearTimeout(timer);
           if (this.tokenRequest === request) this.tokenRequest = undefined;
         }
       })();
