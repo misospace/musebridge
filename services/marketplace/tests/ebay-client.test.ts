@@ -109,17 +109,29 @@ describe('EbayClient', () => {
 
   it('abandons a shared token refresh stalled on the response body and recovers on a later call', async () => {
     let tokenCalls = 0;
+    let stalledResponse: Response | undefined;
+    let bodyRead = false;
     const client = new EbayClient({ ...options, tokenRequestTimeoutMs: 100, fetchImpl: async (input) => {
       if (String(input).includes('/oauth2/token')) {
         tokenCalls++;
         // Headers arrive, the body never finishes: json() would hang forever on its own.
-        if (tokenCalls === 1) return new Response(new ReadableStream({ start() {} }), { status: 200 });
+        if (tokenCalls === 1) {
+          const response = new Response(new ReadableStream({ start() {} }), { status: 200 });
+          const readJson = response.json.bind(response);
+          response.json = () => { bodyRead = true; return readJson(); };
+          stalledResponse = response;
+          return response;
+        }
         return ok({ access_token: 'synthetic-recovered', expires_in: 3600 });
       }
       return ok({ itemSummaries: [] });
     } });
     await expect(client.searchItems('synthetic', { limit: 1 })).rejects.toThrow(/timed out/);
     expect(tokenCalls).toBe(1);
+    // The stall was in the body, not in the headers: the response was received and its body
+    // consumption started, which is exactly what the deadline has to cover.
+    expect(stalledResponse?.status).toBe(200);
+    expect(bodyRead).toBe(true);
     // The poisoned in-flight promise was cleared: the next call performs a fresh OAuth fetch.
     await expect(client.searchItems('synthetic', { limit: 1 })).resolves.toBeDefined();
     expect(tokenCalls).toBe(2);
@@ -139,8 +151,9 @@ describe('EbayClient', () => {
       }
       return ok({ itemSummaries: [] });
     } });
+    const caller = new AbortController();
     const waiters = Promise.allSettled([
-      client.searchItems('synthetic', { limit: 1 }),
+      client.searchItems('synthetic', { limit: 1 }, caller.signal),
       client.getItemByLegacyId('123')
     ]);
     const settled = await waiters;
@@ -148,13 +161,33 @@ describe('EbayClient', () => {
       && result.reason instanceof Error && /timed out/.test(result.reason.message))).toBe(true);
     expect(tokenCalls).toBe(1);
     // The deadline is bound to the client's own controller, not a caller's, so the stalled
-    // request is actually cancelled.
+    // request is actually cancelled and the caller's signal is left untouched.
     expect(stalledSignal?.aborted).toBe(true);
+    expect(stalledSignal).not.toBe(caller.signal);
+    expect(caller.signal.aborted).toBe(false);
     await expect(client.searchItems('synthetic', { limit: 1 })).resolves.toBeDefined();
     expect(tokenCalls).toBe(2);
   });
 
-  it('rejects a non-positive token request timeout', () => {
+  it('does not cache a token refresh that failed before it could start', async () => {
+    let tokenCalls = 0;
+    const client = new EbayClient({ ...options, tokenRequestTimeoutMs: 100, fetchImpl: (input) => {
+      if (String(input).includes('/oauth2/token')) {
+        tokenCalls++;
+        // A synchronous throw, not a rejected promise: the refresh never reaches the network.
+        if (tokenCalls === 1) throw new Error('synthetic synchronous failure');
+        return Promise.resolve(ok({ access_token: 'synthetic-recovered', expires_in: 3600 }));
+      }
+      return Promise.resolve(ok({ itemSummaries: [] }));
+    } });
+    await expect(client.searchItems('synthetic', { limit: 1 })).rejects.toThrow(/synthetic synchronous failure/);
+    // The failed refresh is not left cached as the shared in-flight promise: the next call
+    // performs a fresh OAuth fetch instead of joining the rejected one forever.
+    await expect(client.searchItems('synthetic', { limit: 1 })).resolves.toBeDefined();
+    expect(tokenCalls).toBe(2);
+  });
+
+  it('validates the token request timeout option', () => {
     expect(() => new EbayClient({ ...options, tokenRequestTimeoutMs: 0 })).toThrow(TypeError);
     expect(() => new EbayClient({ ...options, tokenRequestTimeoutMs: -1 })).toThrow(TypeError);
     expect(() => new EbayClient({ ...options, tokenRequestTimeoutMs: 1.5 })).toThrow(TypeError);

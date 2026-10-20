@@ -7,9 +7,10 @@ export interface EbayClientOptions {
 }
 
 // The shared OAuth refresh runs on its own clock, independent of any caller's deadline, and
-// shorter than the backend request deadline (default 15s) so a stalled token exchange fails
-// with a real token error before callers give up — and the cached in-flight state is already
-// cleared for the next call (#115).
+// shorter than the backend request deadline (15s default in EbayShoppingBackend) so a stalled
+// token exchange fails with a real token error before callers give up — and the cached
+// in-flight state is already cleared for the next call (#115). Keep it below that backend
+// deadline: a longer token deadline would let a stalled refresh outlive every waiter.
 const DEFAULT_TOKEN_REQUEST_TIMEOUT_MS = 10_000;
 
 export interface EbaySearchOptions {
@@ -136,8 +137,12 @@ export class EbayClient {
           reject(reason);
         }, this.tokenRequestTimeoutMs);
       });
+      // The body runs in a microtask so `request` is assigned before anything inside it can
+      // throw. A synchronous throw from `fetchImpl` would otherwise run the `finally` while
+      // `request` is still undefined, leaving the rejected promise cached as the shared
+      // in-flight refresh — poisoning every later caller exactly like a stalled response.
       let request: Promise<string> | undefined;
-      request = (async () => {
+      request = Promise.resolve().then(async () => {
         try {
           const response = await Promise.race([this.fetchImpl(`${this.baseUrl}/identity/v2/oauth2/token`, {
             method: 'POST',
@@ -160,7 +165,7 @@ export class EbayClient {
           clearTimeout(timer);
           if (this.tokenRequest === request) this.tokenRequest = undefined;
         }
-      })();
+      });
       this.tokenRequest = request;
     }
     return raceWithAbort(this.tokenRequest, signal);  }
