@@ -196,8 +196,11 @@ async function responseError(response: Response): Promise<EbayHttpError> {
   // (providerErrorMetadataSchema; zod's `.int()` is `Number.isSafeInteger`), so a fractional
   // hint is truncated and an out-of-range one dropped rather than allowed to break
   // ProviderError construction later; an HTTP-date value parses as NaN and yields no hint.
+  // RFC 9110 delay-seconds is 1*DIGIT, so only decimal digits (with a tolerated fractional
+  // part, as sibling clients do) reach Number(); alternate JavaScript numeric syntaxes
+  // (`+5`, `1e3`, `0x10`, `-0`) are rejected before conversion.
   const header = response.headers.get('retry-after')?.trim();
-  const value = header ? Number(header) : NaN;
+  const value = header && /^\d+(?:\.\d+)?$/.test(header) ? Number(header) : NaN;
   const seconds = Number.isFinite(value) && value >= 0 ? Math.trunc(value) : NaN;
   return new EbayHttpError(response.status, Number.isSafeInteger(seconds) ? seconds : undefined);
 }

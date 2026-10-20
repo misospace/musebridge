@@ -70,6 +70,18 @@ describe('EbayClient', () => {
     await expect(client.getItemByLegacyId('123')).rejects.toMatchObject({ status: 429, retryAfter: undefined });
   });
 
+  it.each(['+5', '1e3', '0x10', '-0'])('treats non-decimal numeric syntax %s as no hint', async (header) => {
+    const client = new EbayClient({ ...options, fetchImpl: async (input) => String(input).includes('/oauth2/token')
+      ? ok({ access_token: 'synthetic', expires_in: 3600 }) : new Response('', { status: 429, headers: { 'retry-after': header } }) });
+    await expect(client.getItemByLegacyId('123')).rejects.toMatchObject({ status: 429, retryAfter: undefined });
+  });
+
+  it('parses a leading-zero decimal retry-after', async () => {
+    const client = new EbayClient({ ...options, fetchImpl: async (input) => String(input).includes('/oauth2/token')
+      ? ok({ access_token: 'synthetic', expires_in: 3600 }) : new Response('', { status: 429, headers: { 'retry-after': '007' } }) });
+    await expect(client.getItemByLegacyId('123')).rejects.toMatchObject({ status: 429, retryAfter: 7 });
+  });
+
   it('drops a retry-after beyond the safe integer range', async () => {
     const client = new EbayClient({ ...options, fetchImpl: async (input) => String(input).includes('/oauth2/token')
       ? ok({ access_token: 'synthetic', expires_in: 3600 }) : new Response('', { status: 429, headers: { 'retry-after': '1e21' } }) });
