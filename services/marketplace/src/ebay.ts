@@ -55,9 +55,12 @@ export class EbayClient {
     if (parsed.username || parsed.password || parsed.search || parsed.hash || (!isEbayHost && !(isLoopback && ['http:', 'https:'].includes(parsed.protocol)))) {
       throw new TypeError('baseUrl must be https://api.ebay.com, https://api.sandbox.ebay.com, or a loopback test address');
     }
+    // Upper bound: setTimeout coerces delays above 2^31-1 to 1, which would fire instantly.
     if (options.tokenRequestTimeoutMs !== undefined
-      && (!Number.isInteger(options.tokenRequestTimeoutMs) || options.tokenRequestTimeoutMs <= 0)) {
-      throw new TypeError('tokenRequestTimeoutMs must be a positive integer');
+      && (!Number.isInteger(options.tokenRequestTimeoutMs)
+        || options.tokenRequestTimeoutMs <= 0
+        || options.tokenRequestTimeoutMs > 2_147_483_647)) {
+      throw new TypeError('tokenRequestTimeoutMs must be a positive integer within setTimeout range');
     }
     this.baseUrl = base.replace(/\/$/, '');
     this.fetchImpl = options.fetchImpl ?? fetch;

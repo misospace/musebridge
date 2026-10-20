@@ -109,7 +109,7 @@ describe('EbayClient', () => {
 
   it('abandons a shared token refresh stalled on the response body and recovers on a later call', async () => {
     let tokenCalls = 0;
-    const client = new EbayClient({ ...options, tokenRequestTimeoutMs: 25, fetchImpl: async (input) => {
+    const client = new EbayClient({ ...options, tokenRequestTimeoutMs: 100, fetchImpl: async (input) => {
       if (String(input).includes('/oauth2/token')) {
         tokenCalls++;
         // Headers arrive, the body never finishes: json() would hang forever on its own.
@@ -128,7 +128,7 @@ describe('EbayClient', () => {
   it('releases joined waiters when the token fetch never returns headers, cancelling the underlying request', async () => {
     let tokenCalls = 0;
     let stalledSignal: AbortSignal | undefined;
-    const client = new EbayClient({ ...options, tokenRequestTimeoutMs: 25, fetchImpl: async (input, init) => {
+    const client = new EbayClient({ ...options, tokenRequestTimeoutMs: 100, fetchImpl: async (input, init) => {
       if (String(input).includes('/oauth2/token')) {
         tokenCalls++;
         if (tokenCalls === 1) {
@@ -158,6 +158,8 @@ describe('EbayClient', () => {
     expect(() => new EbayClient({ ...options, tokenRequestTimeoutMs: 0 })).toThrow(TypeError);
     expect(() => new EbayClient({ ...options, tokenRequestTimeoutMs: -1 })).toThrow(TypeError);
     expect(() => new EbayClient({ ...options, tokenRequestTimeoutMs: 1.5 })).toThrow(TypeError);
+    // setTimeout coerces delays above 2^31-1 to 1, so the bound is enforced, not clamped.
+    expect(() => new EbayClient({ ...options, tokenRequestTimeoutMs: 2_147_483_648 })).toThrow(TypeError);
     expect(() => new EbayClient({ ...options, tokenRequestTimeoutMs: 5000 })).not.toThrow();
   });
 
