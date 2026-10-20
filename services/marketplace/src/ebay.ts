@@ -190,8 +190,14 @@ function raceWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T>
   });
 }
 
-async function responseError(response: Response): Promise<EbayHttpError> {  // A missing header means "no hint" — Number(null) is 0, which would read as "retry now".
-  const header = response.headers.get('retry-after');
-  const value = header === null ? NaN : Number(header);
-  return new EbayHttpError(response.status, Number.isFinite(value) && value >= 0 ? value : undefined);
+async function responseError(response: Response): Promise<EbayHttpError> {
+  // A missing or blank header means "no hint" — Number(null) and Number('') are both 0, which
+  // would read as "retry now". `retry_after` must be a non-negative safe integer
+  // (providerErrorMetadataSchema; zod's `.int()` is `Number.isSafeInteger`), so a fractional
+  // hint is truncated and an out-of-range one dropped rather than allowed to break
+  // ProviderError construction later; an HTTP-date value parses as NaN and yields no hint.
+  const header = response.headers.get('retry-after')?.trim();
+  const value = header ? Number(header) : NaN;
+  const seconds = Number.isFinite(value) && value >= 0 ? Math.trunc(value) : NaN;
+  return new EbayHttpError(response.status, Number.isSafeInteger(seconds) ? seconds : undefined);
 }
