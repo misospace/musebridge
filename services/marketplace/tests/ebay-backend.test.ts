@@ -20,6 +20,15 @@ beforeAll(async () => {
     lastMarketplaceId = Array.isArray(marketplaceHeader) ? marketplaceHeader[0] ?? '' : marketplaceHeader ?? '';
     if (pathname.endsWith('/oauth2/token')) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(fixture('token.json'))); return; }
     if (mode === 'hang') return;
+    // A malformed fractional retry-after must still yield a typed RATE_LIMITED result with a
+    // truncated integer hint, so the error is constructed rather than a schema TypeError.
+    if (mode === 'rate-limited') { res.writeHead(429, { 'retry-after': '7' }); res.end(); return; }
+    if (mode === 'rate-limited-fractional') { res.writeHead(429, { 'retry-after': '1.5' }); res.end(); return; }
+    // Beyond the safe integer range: the hint is meaningless in seconds and the shared
+    // metadata schema rejects it, so the client must drop it rather than break the error.
+    if (mode === 'rate-limited-out-of-range') { res.writeHead(429, { 'retry-after': '1e21' }); res.end(); return; }
+    if (mode === 'rate-limited-no-hint') { res.writeHead(429); res.end(); return; }
+    if (mode === 'rate-limited-negative') { res.writeHead(429, { 'retry-after': '-5' }); res.end(); return; }
     if (pathname.endsWith('/search')) {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(mode === 'unmappable'
@@ -146,5 +155,56 @@ describe('EbayShoppingBackend', () => {
     mode = 'hang';
     const controller = new AbortController(); controller.abort(new Error('caller aborted'));
     await expect(backend().search(searchInput, controller.signal)).rejects.toMatchObject({ code: 'TIMEOUT' });
+  });
+  it('maps a 429 with an integer retry-after to RATE_LIMITED carrying the preserved hint', async () => {
+    mode = 'rate-limited';
+    await expect(backend().search(searchInput, signal())).rejects.toMatchObject({
+      code: 'RATE_LIMITED', metadata: { retry_after: 7 }
+    });
+  });
+  it('maps a 429 with a fractional retry-after to RATE_LIMITED carrying a truncated hint', async () => {
+    mode = 'rate-limited-fractional';
+    const rejection = backend().search(searchInput, signal());
+    await expect(rejection).rejects.toBeInstanceOf(ProviderError);
+    await expect(rejection).rejects.toMatchObject({
+      code: 'RATE_LIMITED', metadata: { retry_after: 1 }
+    });
+  });
+  it('maps a 429 with a beyond-safe-range retry-after to RATE_LIMITED with no retry hint', async () => {
+    mode = 'rate-limited-out-of-range';
+    const rejection = backend().search(searchInput, signal());
+    await expect(rejection).rejects.toBeInstanceOf(ProviderError);
+    const error = await rejection.then(
+      () => { throw new Error('expected the eBay search to reject'); },
+      (thrown: unknown) => thrown as ProviderError
+    );
+    expect(error.code).toBe('RATE_LIMITED');
+    // No hint at all beats a fabricated one: the out-of-range value is dropped, not clamped.
+    expect(error.metadata.retry_after).toBeUndefined();
+    expect('retry_after' in error.metadata).toBe(false);
+  });
+  it('maps a 429 with no retry-after to RATE_LIMITED without a retry hint', async () => {
+    mode = 'rate-limited-no-hint';
+    const rejection = backend().search(searchInput, signal());
+    await expect(rejection).rejects.toBeInstanceOf(ProviderError);
+    const error = await rejection.then(
+      () => { throw new Error('expected the eBay search to reject'); },
+      (thrown: unknown) => thrown as ProviderError
+    );
+    expect(error.code).toBe('RATE_LIMITED');
+    expect(error.metadata.retry_after).toBeUndefined();
+    expect('retry_after' in error.metadata).toBe(false);
+  });
+  it('maps a 429 with a negative retry-after to RATE_LIMITED without a retry hint', async () => {
+    mode = 'rate-limited-negative';
+    const rejection = backend().search(searchInput, signal());
+    await expect(rejection).rejects.toBeInstanceOf(ProviderError);
+    const error = await rejection.then(
+      () => { throw new Error('expected the eBay search to reject'); },
+      (thrown: unknown) => thrown as ProviderError
+    );
+    expect(error.code).toBe('RATE_LIMITED');
+    expect(error.metadata.retry_after).toBeUndefined();
+    expect('retry_after' in error.metadata).toBe(false);
   });
 });
