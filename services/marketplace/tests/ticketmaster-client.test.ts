@@ -78,6 +78,46 @@ describe('TicketmasterClient', () => {
     await expect(client.getEvent('synthetic')).rejects.toMatchObject({ status: 429, retryAfter: 3 });
   });
 
+  it('treats a negative retry-after as no hint', async () => {
+    const client = new TicketmasterClient({ ...options, fetchImpl: async () => new Response('', { status: 429, headers: { 'retry-after': '-5' } }) });
+    await expect(client.getEvent('synthetic')).rejects.toMatchObject({ status: 429, retryAfter: undefined });
+  });
+
+  it('treats a nonnumeric retry-after as no hint', async () => {
+    const client = new TicketmasterClient({ ...options, fetchImpl: async () => new Response('', { status: 429, headers: { 'retry-after': 'later' } }) });
+    await expect(client.getEvent('synthetic')).rejects.toMatchObject({ status: 429, retryAfter: undefined });
+  });
+
+  it('drops a retry-after that is not a plain decimal delay', async () => {
+    const client = new TicketmasterClient({ ...options, fetchImpl: async () => new Response('', { status: 429, headers: { 'retry-after': '1e21' } }) });
+    await expect(client.getEvent('synthetic')).rejects.toMatchObject({ status: 429, retryAfter: undefined });
+  });
+
+  it('drops a retry-after beyond the safe integer range', async () => {
+    const client = new TicketmasterClient({ ...options, fetchImpl: async () => new Response('', { status: 429, headers: { 'retry-after': '9007199254740992' } }) });
+    await expect(client.getEvent('synthetic')).rejects.toMatchObject({ status: 429, retryAfter: undefined });
+  });
+
+  it('treats a malformed-syntax retry-after as no hint', async () => {
+    const client = new TicketmasterClient({ ...options, fetchImpl: async () => new Response('', { status: 429, headers: { 'retry-after': '1e3' } }) });
+    await expect(client.getEvent('synthetic')).rejects.toMatchObject({ status: 429, retryAfter: undefined });
+  });
+
+  it('preserves a retry-after at the maximum safe integer', async () => {
+    const client = new TicketmasterClient({ ...options, fetchImpl: async () => new Response('', { status: 429, headers: { 'retry-after': '9007199254740991' } }) });
+    await expect(client.getEvent('synthetic')).rejects.toMatchObject({ status: 429, retryAfter: 9007199254740991 });
+  });
+
+  it('treats a blank retry-after as no hint, not zero', async () => {
+    const client = new TicketmasterClient({ ...options, fetchImpl: async () => new Response('', { status: 429, headers: { 'retry-after': '' } }) });
+    await expect(client.getEvent('synthetic')).rejects.toMatchObject({ status: 429, retryAfter: undefined });
+  });
+
+  it('treats a whitespace-only retry-after as no hint, not zero', async () => {
+    const client = new TicketmasterClient({ ...options, fetchImpl: async () => new Response('', { status: 429, headers: { 'retry-after': '   ' } }) });
+    await expect(client.getEvent('synthetic')).rejects.toMatchObject({ status: 429, retryAfter: undefined });
+  });
+
   it('validates the API key and restricts the credential destination', () => {
     expect(() => new TicketmasterClient({ ...options, apiKey: '  ' })).toThrow(TypeError);
     expect(() => new TicketmasterClient({ ...options, apiKey: '' })).toThrow(TypeError);

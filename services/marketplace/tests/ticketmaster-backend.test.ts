@@ -14,6 +14,9 @@ beforeAll(async () => {
   server = createServer((req, res) => {
     const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
     if (mode === 'hang') return;
+    if (mode === 'rate-limited') { res.writeHead(429, { 'retry-after': '7' }); res.end(); return; }
+    if (mode === 'rate-limited-fractional') { res.writeHead(429, { 'retry-after': '1.5' }); res.end(); return; }
+    if (mode === 'rate-limited-out-of-range') { res.writeHead(429, { 'retry-after': '1e21' }); res.end(); return; }
     if (pathname.endsWith('/events.json')) {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(
@@ -175,6 +178,34 @@ describe('TicketmasterEventsBackend', () => {
   it('maps a 404 to the house no-result case so the tool layer reports NOT_FOUND', async () => {
     mode = 'not-found';
     await expect(backend().fetch(eventsFetchInputSchema.parse({ id: 'missing' }), signal())).resolves.toBeNull();
+  });
+
+  it('maps a 429 with an integer retry-after to RATE_LIMITED carrying the preserved hint', async () => {
+    mode = 'rate-limited';
+    await expect(backend().search(searchInput, signal())).rejects.toMatchObject({
+      code: 'RATE_LIMITED', metadata: { retry_after: 7 }
+    });
+  });
+
+  it('maps a 429 with a fractional retry-after to RATE_LIMITED carrying a truncated hint', async () => {
+    mode = 'rate-limited-fractional';
+    await expect(backend().search(searchInput, signal())).rejects.toMatchObject({
+      code: 'RATE_LIMITED', metadata: { retry_after: 1 }
+    });
+  });
+
+  it('maps a 429 with a beyond-safe-range retry-after to RATE_LIMITED with no retry hint', async () => {
+    mode = 'rate-limited-out-of-range';
+    const rejection = backend().search(searchInput, signal());
+    await expect(rejection).rejects.toBeInstanceOf(ProviderError);
+    const error = await rejection.then(
+      () => { throw new Error('expected the Ticketmaster search to reject'); },
+      (thrown: unknown) => thrown as ProviderError
+    );
+    expect(error.code).toBe('RATE_LIMITED');
+    // No hint at all beats a fabricated one: the out-of-range value is dropped, not clamped.
+    expect(error.metadata.retry_after).toBeUndefined();
+    expect('retry_after' in error.metadata).toBe(false);
   });
 
   it('honors an already-aborted signal as TIMEOUT', async () => {
