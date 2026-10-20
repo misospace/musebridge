@@ -234,7 +234,10 @@ describe('ThreadsApiBackend', () => {
     ['a string', 'unexpected'],
     ['a number', 42],
     ['a boolean', true],
-    ['an array', ['cursor-2']]
+    ['an array', ['cursor-2']],
+    ['an empty string', ''],
+    ['a zero', 0],
+    ['a false', false]
   ])('rejects a posts page whose paging container is %s as schema drift instead of claiming completeness', async (_label, value) => {
     mode = 'posts-paging-container';
     pagingContainerValue = value;
@@ -247,7 +250,10 @@ describe('ThreadsApiBackend', () => {
     ['a string', 'unexpected'],
     ['a number', 42],
     ['a boolean', true],
-    ['an array', ['cursor-2']]
+    ['an array', ['cursor-2']],
+    ['an empty string', ''],
+    ['a zero', 0],
+    ['a false', false]
   ])('rejects a replies page whose paging container is %s as schema drift instead of claiming completeness', async (_label, value) => {
     mode = 'replies-paging-container';
     pagingContainerValue = value;
