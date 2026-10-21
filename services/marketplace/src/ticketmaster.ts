@@ -1,3 +1,5 @@
+import { normalizeRetryAfterHeader } from './retry-after.js';
+
 export interface TicketmasterClientOptions {
   apiKey: string;
   baseUrl?: string;
@@ -74,11 +76,7 @@ export class TicketmasterClient {
 }
 
 async function responseError(response: Response): Promise<TicketmasterHttpError> {
-  // A missing header means "no hint" — Number(null) is 0, which would read as "retry now".
-  // `retry_after` must be a non-negative integer (providerErrorMetadataSchema), so a
-  // malformed fractional header is truncated rather than allowed to break ProviderError
-  // construction later; an HTTP-date value parses as NaN and yields no hint.
-  const header = response.headers.get('retry-after');
-  const value = header === null ? NaN : Number(header);
-  return new TicketmasterHttpError(response.status, Number.isFinite(value) && value >= 0 ? Math.trunc(value) : undefined);
+  // Normalization (blank/negative/nonnumeric/out-of-range → no hint, fraction truncated) is
+  // shared with the other provider clients in retry-after.ts.
+  return new TicketmasterHttpError(response.status, normalizeRetryAfterHeader(response.headers.get('retry-after')));
 }

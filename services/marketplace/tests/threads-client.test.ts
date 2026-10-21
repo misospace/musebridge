@@ -99,6 +99,46 @@ describe('ThreadsClient', () => {
     await expect(client.listOwnPosts({ limit: 1 })).rejects.toMatchObject({ status: 429, retryAfter: 2 });
   });
 
+  it('treats a negative retry-after as no hint', async () => {
+    const client = new ThreadsClient({ ...options, fetchImpl: async () => new Response('', { status: 429, headers: { 'retry-after': '-5' } }) });
+    await expect(client.listOwnPosts({ limit: 1 })).rejects.toMatchObject({ status: 429, retryAfter: undefined });
+  });
+
+  it('treats a nonnumeric retry-after as no hint', async () => {
+    const client = new ThreadsClient({ ...options, fetchImpl: async () => new Response('', { status: 429, headers: { 'retry-after': 'later' } }) });
+    await expect(client.listOwnPosts({ limit: 1 })).rejects.toMatchObject({ status: 429, retryAfter: undefined });
+  });
+
+  it('drops a retry-after that is not a plain decimal delay', async () => {
+    const client = new ThreadsClient({ ...options, fetchImpl: async () => new Response('', { status: 429, headers: { 'retry-after': '1e21' } }) });
+    await expect(client.listOwnPosts({ limit: 1 })).rejects.toMatchObject({ status: 429, retryAfter: undefined });
+  });
+
+  it('drops a retry-after beyond the safe integer range', async () => {
+    const client = new ThreadsClient({ ...options, fetchImpl: async () => new Response('', { status: 429, headers: { 'retry-after': '9007199254740992' } }) });
+    await expect(client.listOwnPosts({ limit: 1 })).rejects.toMatchObject({ status: 429, retryAfter: undefined });
+  });
+
+  it('treats a malformed-syntax retry-after as no hint', async () => {
+    const client = new ThreadsClient({ ...options, fetchImpl: async () => new Response('', { status: 429, headers: { 'retry-after': '1e3' } }) });
+    await expect(client.listOwnPosts({ limit: 1 })).rejects.toMatchObject({ status: 429, retryAfter: undefined });
+  });
+
+  it('preserves a retry-after at the maximum safe integer', async () => {
+    const client = new ThreadsClient({ ...options, fetchImpl: async () => new Response('', { status: 429, headers: { 'retry-after': '9007199254740991' } }) });
+    await expect(client.listReplies({ mediaId: 'synth-thread-001' })).rejects.toMatchObject({ status: 429, retryAfter: 9007199254740991 });
+  });
+
+  it('treats a blank retry-after as no hint, not zero', async () => {
+    const client = new ThreadsClient({ ...options, fetchImpl: async () => new Response('', { status: 429, headers: { 'retry-after': '' } }) });
+    await expect(client.listOwnPosts({ limit: 1 })).rejects.toMatchObject({ status: 429, retryAfter: undefined });
+  });
+
+  it('treats a whitespace-only retry-after as no hint, not zero', async () => {
+    const client = new ThreadsClient({ ...options, fetchImpl: async () => new Response('', { status: 429, headers: { 'retry-after': '   ' } }) });
+    await expect(client.listOwnPosts({ limit: 1 })).rejects.toMatchObject({ status: 429, retryAfter: undefined });
+  });
+
   it('validates constructor credentials and restricts the credential destination', () => {
     expect(() => new ThreadsClient({ ...options, accessToken: '  ' })).toThrow(TypeError);
     expect(() => new ThreadsClient({ ...options, accessToken: '' })).toThrow(TypeError);

@@ -51,6 +51,8 @@ beforeAll(async () => {
     if (mode === 'unauthorized') { res.writeHead(401); res.end(); return; }
     if (mode === 'forbidden') { res.writeHead(403); res.end(); return; }
     if (mode === 'rate-limited') { res.writeHead(429, { 'retry-after': '7' }); res.end(); return; }
+    if (mode === 'rate-limited-fractional') { res.writeHead(429, { 'retry-after': '1.5' }); res.end(); return; }
+    if (mode === 'rate-limited-out-of-range') { res.writeHead(429, { 'retry-after': '1e21' }); res.end(); return; }
     if (pathname.endsWith('/threads')) {
       if (mode === 'empty') return json(res, fixture('posts-empty.json'));
       if (mode === 'malformed') return json(res, fixture('posts-malformed.json'));
@@ -285,6 +287,27 @@ describe('ThreadsApiBackend', () => {
     await expect(backend().listOwnPosts(postsInput, signal())).rejects.toMatchObject({
       code: 'RATE_LIMITED', metadata: { retry_after: 7 }
     });
+  });
+
+  it('maps a 429 with a fractional retry-after to RATE_LIMITED carrying a truncated hint', async () => {
+    mode = 'rate-limited-fractional';
+    await expect(backend().listOwnPosts(postsInput, signal())).rejects.toMatchObject({
+      code: 'RATE_LIMITED', metadata: { retry_after: 1 }
+    });
+  });
+
+  it('maps a 429 with a beyond-safe-range retry-after to RATE_LIMITED with no retry hint', async () => {
+    mode = 'rate-limited-out-of-range';
+    const rejection = backend().listOwnPosts(postsInput, signal());
+    await expect(rejection).rejects.toBeInstanceOf(ProviderError);
+    const error = await rejection.then(
+      () => { throw new Error('expected the Threads posts list to reject'); },
+      (thrown: unknown) => thrown as ProviderError
+    );
+    expect(error.code).toBe('RATE_LIMITED');
+    // No hint at all beats a fabricated one: the out-of-range value is dropped, not clamped.
+    expect(error.metadata.retry_after).toBeUndefined();
+    expect('retry_after' in error.metadata).toBe(false);
   });
 
   it('follows the paging cursor, dedupes repeated ids, and preserves order', async () => {
