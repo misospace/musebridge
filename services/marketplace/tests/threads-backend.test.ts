@@ -9,6 +9,7 @@ const fixture = (name: string) => JSON.parse(readFileSync(new URL(`./fixtures/th
 let server: Server;
 let origin = '';
 let mode = 'normal';
+let pagingContainerValue: unknown;
 const seenAfters: Array<string | null> = [];
 
 const postsPageOne = {
@@ -86,6 +87,12 @@ beforeAll(async () => {
           paging: { cursors }
         });
       }
+      if (mode === 'posts-paging-container') {
+        return json(res, {
+          data: [{ id: 'synth-paging-container-001', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_user/post/synth-paging-container-001', text: 'Synthetic post.', username: 'synth_user' }],
+          paging: pagingContainerValue
+        });
+      }
       if (mode === 'pagination') {
         const after = url.searchParams.get('after');
         seenAfters.push(after);
@@ -98,6 +105,12 @@ beforeAll(async () => {
       if (mode === 'replies-malformed') return json(res, fixture('replies-malformed.json'));
       if (mode === 'replies-malformed-item') return json(res, { data: [{}] });
       if (mode === 'replies-mixed-captionless') return json(res, fixture('replies-mixed-captionless.json'));
+      if (mode === 'replies-paging-container') {
+        return json(res, {
+          data: [{ id: 'synth-reply-pc-001', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_friend/post/synth-reply-pc-001', text: 'Synthetic reply.', username: 'synth_friend' }],
+          paging: pagingContainerValue
+        });
+      }
       if (mode === 'replies-pagination') {
         const after = url.searchParams.get('after');
         seenAfters.push(after);
@@ -217,6 +230,51 @@ describe('ThreadsApiBackend', () => {
   it('still reports an exhausted page when the provider sends a null cursors.after', async () => {
     mode = 'posts-null-cursor';
     await expect(backend().listOwnPosts(postsInput, signal())).resolves.toMatchObject({ truncated: false });
+  });
+
+  it.each([
+    ['a string', 'unexpected'],
+    ['a number', 42],
+    ['a boolean', true],
+    ['an array', ['cursor-2']],
+    ['an empty string', ''],
+    ['a zero', 0],
+    ['a false', false]
+  ])('rejects a posts page whose paging container is %s as schema drift instead of claiming completeness', async (_label, value) => {
+    mode = 'posts-paging-container';
+    pagingContainerValue = value;
+    await expect(backend().listOwnPosts(postsInput, signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The Threads response paging container was not recognized.'
+    });
+  });
+
+  it.each([
+    ['a string', 'unexpected'],
+    ['a number', 42],
+    ['a boolean', true],
+    ['an array', ['cursor-2']],
+    ['an empty string', ''],
+    ['a zero', 0],
+    ['a false', false]
+  ])('rejects a replies page whose paging container is %s as schema drift instead of claiming completeness', async (_label, value) => {
+    mode = 'replies-paging-container';
+    pagingContainerValue = value;
+    await expect(backend().listReplies(repliesInput, signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The Threads response paging container was not recognized.'
+    });
+  });
+
+  it('treats an omitted or null paging field as a legitimately exhausted page', async () => {
+    // The documented no-pagination shape: posts-success.json omits `paging` entirely, and an
+    // explicit `paging: null` is the same exhausted-page case, not schema drift.
+    mode = 'normal';
+    await expect(backend().listOwnPosts(postsInput, signal())).resolves.toMatchObject({ truncated: false });
+    mode = 'posts-paging-container';
+    pagingContainerValue = null;
+    await expect(backend().listOwnPosts(postsInput, signal())).resolves.toMatchObject({ truncated: false });
+    mode = 'replies-paging-container';
+    pagingContainerValue = null;
+    await expect(backend().listReplies(repliesInput, signal())).resolves.toMatchObject({ truncated: false });
   });
 
   it('marks a page exhausted at the exact limit as complete, not truncated', async () => {

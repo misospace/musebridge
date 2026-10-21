@@ -155,13 +155,21 @@ function requireDataArray(payload: unknown): unknown[] | null {
 // Extracts the forward cursor without ever surfacing the raw `paging.next` URL: that URL
 // can carry the access token, so only the `after` value is ever returned. `cursors.after`
 // wins when present; otherwise the `after` search param of `next` is parsed out. A present
-// cursor field we cannot read is schema drift — `next` unresolvable, or `cursors` sent in a
+// cursor field we cannot read is schema drift — a `paging` container in a shape we do not
+// recognize (a non-object, including an array), `next` unresolvable, or `cursors` sent in a
 // shape we do not recognize (not an object, or an unusable `after`) — and throwing keeps a
 // drifted cursor from silently claiming the page set was exhausted (a false `truncated: false`).
+// Only an absent or explicitly-null `paging` field is the documented "no pagination" case.
 function cursorAfter(payload: unknown): string | undefined {
   if (!payload || typeof payload !== 'object') return undefined;
   const paging = (payload as { paging?: unknown }).paging;
-  if (!paging || typeof paging !== 'object') return undefined;
+  // `undefined` (field omitted) and `null` are the documented exhausted-page shapes; anything
+  // else that is not a readable object container (string, number, boolean, array) is drift,
+  // because an unrecognized pagination schema may be hiding more results.
+  if (paging === undefined || paging === null) return undefined;
+  if (typeof paging !== 'object' || Array.isArray(paging)) {
+    throw new ProviderError('UPSTREAM_ERROR', 'The Threads response paging container was not recognized.');
+  }
   const cursors = (paging as { cursors?: unknown }).cursors;
   // A `cursors` field the provider sent that we cannot read as a forward cursor — a non-object
   // (including an array), or an `after` that is neither a non-empty string nor absent. `next` is
