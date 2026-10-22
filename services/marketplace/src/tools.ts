@@ -54,7 +54,39 @@ const shoppingScope = { provider: 'ebay', account: 'default', surface: 'shopping
 const eventsScope = { provider: 'ticketmaster', account: 'default', surface: 'events' } as const;
 const socialScope = { provider: 'threads', account: 'default', surface: 'social' } as const;
 
-const TOOLS = [
+/**
+ * The conversation backend methods a tool may require. Only the method keys of
+ * `ConversationBackend` qualify, so naming a method that does not exist is a compile error
+ * instead of a tool that silently never registers.
+ */
+type ConversationBackendMethod = {
+  [K in keyof ConversationBackend]: ConversationBackend[K] extends (...args: never[]) => unknown ? K : never;
+}[keyof ConversationBackend];
+
+/**
+ * A backend capability a tool needs before it may be registered. The requirement rides on the
+ * tool entry itself, so a gated tool cannot be forgotten by a separate gate list. Today the
+ * capability is a conversation backend method — the only surface that is gated per method — so a
+ * requirement naming another surface's method is a compile error rather than a tool that silently
+ * never registers.
+ */
+interface ToolRequirement {
+  /** The conversation backend method that must exist for the tool to be usable. */
+  readonly method: ConversationBackendMethod;
+}
+
+/** The shape every TOOLS entry declares. */
+interface ToolDeclaration {
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema: z.ZodType;
+  readonly outputSchema: z.ZodType;
+  readonly definition: ActionDefinition;
+  /** The capability the wired conversation backend must provide; the tool is registered only when it does. */
+  readonly requires?: ToolRequirement;
+}
+
+export const TOOLS = [
   {
     name: 'marketplace_search',
     description: 'Search marketplace listings.',
@@ -123,6 +155,7 @@ const TOOLS = [
     description: 'Draft one seller reply for a conversation thread and return the exact send payload with its authorization digest. Sends nothing and grants no approval, but opening the thread marks it "Seen" for the other participant.',
     inputSchema: threadPrepareInputSchema,
     outputSchema: prepareOutputSchema,
+    requires: { method: 'prepareDraft' },
     definition: { riskClass: 'prepare', scope: messengerScope }
   },
   {
@@ -130,6 +163,7 @@ const TOOLS = [
     description: 'Send one approval-grant-bound message into a conversation thread. Requires a single-use signed approval grant. Delivery is confirmed by reading the thread for the idempotency token; unconfirmed sends are reported as unknown and are never resent.',
     inputSchema: threadSendInputSchema,
     outputSchema: sendOutputSchema,
+    requires: { method: 'sendThread' },
     definition: { riskClass: 'send', scope: messengerScope }
   },
   {
@@ -146,15 +180,31 @@ const TOOLS = [
     outputSchema: threadsRepliesListOutputSchema,
     definition: { riskClass: 'read', scope: socialScope }
   }
-] as const;
+] as const satisfies ReadonlyArray<ToolDeclaration>;
 
 export const TOOL_DEFINITIONS: Readonly<Record<ToolName, ActionDefinition>> = Object.fromEntries(
   TOOLS.map(({ name, definition }) => [name, definition])
 ) as Record<ToolName, ActionDefinition>;
 
 type ToolName = typeof TOOLS[number]['name'];
+/** One declared tool, exactly as the TOOLS table declares it. */
+export type ToolEntry = typeof TOOLS[number];
 /** The union of result shapes the TOOLS table declares, one per tool. */
 type ToolOutput = z.infer<(typeof TOOLS)[number]['outputSchema']>;
+
+/**
+ * One registered tool: the declaration plus the schemas it is served with. The registration is
+ * derived from the TOOLS entry, so the tool name, its schemas, and its action definition cannot
+ * drift apart, and a tool that is not registered has no entry at all — the lookup misses instead
+ * of handing back another tool's schema.
+ */
+interface ToolRegistration {
+  readonly name: ToolName;
+  readonly description: string;
+  readonly inputSchema: z.ZodType;
+  readonly outputSchema: ToolEntry['outputSchema'];
+  readonly definition: ActionDefinition;
+}
 
 export interface MarketplaceToolOptions {
   backendName?: string;
@@ -190,32 +240,36 @@ export function registerMarketplaceTools(
   // The messenger conversation tools (draft and send) are gated per capability, not just per surface:
   // a host-injected conversation backend that only serves reads must not be advertised as able to
   // draft or send, because a registered tool whose backend method is absent fails as INTERNAL_ERROR
-  // instead of the InvalidParams unknown-tool refusal. messenger_prepare needs prepareDraft and
-  // messenger_send needs sendThread; the read-only messenger tools keep today's surface behavior.
-  const conversationBackend = options.conversations;
-  const conversationCapabilities = [
-    { tool: 'messenger_prepare', method: 'prepareDraft' },
-    { tool: 'messenger_send', method: 'sendThread' }
-  ] as const satisfies ReadonlyArray<{ readonly tool: ToolName; readonly method: keyof ConversationBackend }>;
-  const activeTools = TOOLS.filter((tool) => {
-    const required = conversationCapabilities.find(({ tool: gated }) => gated === tool.name);
-    return required === undefined || typeof conversationBackend?.[required.method] === 'function';
-  });
-  assertWritableToolsHaveAuthorizer(activeTools, options.authorizer);
+  // instead of the InvalidParams unknown-tool refusal. The requirement rides on the tool entry
+  // itself (messenger_prepare needs prepareDraft, messenger_send needs sendThread), so the gate
+  // cannot fall out of step with the registry the way a separate tool-name list could.
+  const activeTools = TOOLS.filter((tool) => hasRequiredCapability(tool, options));
+  // The CallTool handler validates a tool's result with the very schema the TOOLS table declares
+  // and ListTools advertises, so the pairing cannot drift: a new or renamed tool is validated with
+  // its own schema instead of silently inheriting whichever schema an unrelated branch used to fall
+  // back to. One registry entry per active tool carries the name, both schemas, and the action
+  // definition, so a gated-out tool is simply absent rather than present with an undefined schema.
+  const registry = new Map<string, ToolRegistration>(
+    activeTools.map((tool) => [
+      tool.name,
+      {
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+        outputSchema: tool.outputSchema,
+        definition: tool.definition
+      }
+    ] as const)
+  );
+  assertWritableToolsHaveAuthorizer([...registry.values()], options.authorizer);
 
   const backendName = options.backendName ?? backend.name;
   const backendTimeoutMs = options.backendTimeoutMs ?? 30_000;
   const shutdownSignal = options.shutdownSignal;
   const authorizer = options.authorizer ?? new DenyAllAuthorizer();
-  const inputSchemas = Object.fromEntries(activeTools.map(({ name, inputSchema }) => [name, inputSchema])) as unknown as Record<ToolName, z.ZodType>;
-  // The CallTool handler validates a tool's result with the very schema the TOOLS table declares
-  // and ListTools advertises, so the pairing cannot drift: a new or renamed tool is validated with
-  // its own schema instead of silently inheriting whichever schema an unrelated branch used to fall
-  // back to.
-  const outputSchemas = Object.fromEntries(activeTools.map(({ name, outputSchema }) => [name, outputSchema])) as unknown as Record<ToolName, z.ZodType<ToolOutput>>;
   server.registerCapabilities({ tools: {} });
   server.setRequestHandler(ListToolsRequestSchema, () => ({
-    tools: activeTools.map(({ name, description, inputSchema, outputSchema }) => ({
+    tools: [...registry.values()].map(({ name, description, inputSchema, outputSchema }) => ({
       name,
       description,
       inputSchema: toMcpObjectSchema(inputSchema, 'input', name),
@@ -224,9 +278,10 @@ export function registerMarketplaceTools(
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const name = request.params.name as ToolName;
-    const schema = Object.hasOwn(inputSchemas, name) ? inputSchemas[name] : undefined;
-    if (!schema) throw new McpError(ErrorCode.InvalidParams, `Unknown tool: ${request.params.name}`);
+    const registration = registry.get(request.params.name);
+    if (!registration) throw new McpError(ErrorCode.InvalidParams, `Unknown tool: ${request.params.name}`);
+    const name = registration.name;
+    const schema = registration.inputSchema;
 
     // Validate here instead of returning an MCP tool-error result for malformed arguments.
     const args = request.params.arguments ?? {};
@@ -236,7 +291,7 @@ export function registerMarketplaceTools(
     }
     if (!parsed.success) throw new McpError(ErrorCode.InvalidParams, formatValidationError(parsed.error));
 
-    const definition = TOOL_DEFINITIONS[name];
+    const definition = registration.definition;
     // The digest here covers the tool's own input. For messenger_prepare that is deliberately the
     // smaller {thread_id, message} input, not the published send digest: prepare is autonomous and
     // consumes no grant, and no approval can ever be requested over this request.
@@ -256,7 +311,7 @@ export function registerMarketplaceTools(
     }
     const decision = authorizeAction(definition, actionRequest, authorizer, grant);
 
-    const outputSchema = outputSchemas[name];
+    const outputSchema = registration.outputSchema;
     let validatedOutput: ToolOutput;
     if (!decision.ok) {
       // Refusals parse against the shared runtime failure schema so the uniform refusal shape
@@ -473,6 +528,18 @@ export function registerMarketplaceTools(
       isError: 'ok' in validatedOutput && validatedOutput.ok === false
     };
   });
+}
+
+/**
+ * A tool is available when the wired conversation backend provides the capability its entry
+ * declares. An entry without a requirement is always available; an entry with one is registered
+ * only while the named conversation backend method exists, so a read-only backend is never
+ * advertised as able to draft or send.
+ */
+function hasRequiredCapability(tool: ToolEntry, options: MarketplaceToolOptions): boolean {
+  if (!('requires' in tool)) return true;
+  const { method } = tool.requires;
+  return typeof options.conversations?.[method] === 'function';
 }
 
 function toMcpObjectSchema(schema: z.ZodType, io: 'input' | 'output', toolName?: ToolName): Record<string, unknown> {
