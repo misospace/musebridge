@@ -86,6 +86,68 @@ interface ToolDeclaration {
   readonly requires?: ToolRequirement;
 }
 
+/**
+ * Whether two tool names are the same name.
+ *
+ * Both directions must hold, so a literal name never matches a widened one: a name typed as
+ * `string` stands for any name, and treating it as equal to every literal would blame a tool
+ * that is not duplicated.
+ */
+type SameToolName<A extends string, B extends string> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
+/** Whether a tool table declares `Name` in its tail. */
+type TailDeclaresName<Name extends string, T extends readonly { readonly name: string }[]> = T extends readonly [
+  infer Head extends { readonly name: string },
+  ...infer Rest extends readonly { readonly name: string }[]
+]
+  ? (SameToolName<Head['name'], Name> extends true ? true : TailDeclaresName<Name, Rest>)
+  : false;
+
+/**
+ * The names a TOOLS table declares more than once.
+ *
+ * A name is repeated when a later entry declares the same name, so every repeated name is
+ * collected from the entry that opens the repeat; a name declared once never enters the union.
+ * An entry whose name is not a literal cannot be matched against any other entry, so it never
+ * names a duplicate — the runtime half of the guard covers that table instead.
+ */
+type DuplicatedToolNames<T extends readonly { readonly name: string }[]> = T extends readonly [
+  infer Head extends { readonly name: string },
+  ...infer Rest extends readonly { readonly name: string }[]
+]
+  ? (string extends Head['name']
+      ? never
+      : TailDeclaresName<Head['name'], Rest> extends true
+        ? Head['name']
+        : never)
+    | DuplicatedToolNames<Rest>
+  : never;
+
+/**
+ * Refuse a registry that declares the same tool name twice.
+ *
+ * Every per-name lookup in this module is derived from the TOOLS table, so a repeated name
+ * collapses silently: the later entry wins the lookup, the earlier tool is never served with its
+ * own schemas, and the derived definition map loses a key its own type still claims is present.
+ *
+ * The type parameter carries the compile-time half of the guard. While the table is a literal
+ * tuple of literal names, a repeated name makes the argument type demand that duplicate
+ * explicitly, so the call site does not compile and the error names the offending tool. The
+ * runtime half covers what the types cannot reach — a table assembled dynamically, or a name
+ * widened away from its literal — and fails loudly instead of serving a collapsed registry.
+ */
+export function assertUniqueToolNames<T extends readonly { readonly name: string }[]>(
+  tools: T & ([DuplicatedToolNames<T>] extends [never] ? unknown : { readonly duplicateToolNames: DuplicatedToolNames<T> })
+): void {
+  const seen = new Set<string>();
+  for (const { name } of tools) {
+    if (seen.has(name)) {
+      throw new Error(`Duplicate tool name in the tool registry: ${name}`);
+    }
+    seen.add(name);
+  }
+}
+
 export const TOOLS = [
   {
     name: 'marketplace_search',
@@ -182,6 +244,11 @@ export const TOOLS = [
   }
 ] as const satisfies ReadonlyArray<ToolDeclaration>;
 
+// The registry refuses a repeated tool name before any per-name lookup is derived from it. The
+// call does not compile while the table declares the same name twice, and it throws while the
+// module loads — the effective startup failure — for the paths the types cannot reach.
+assertUniqueToolNames(TOOLS);
+
 export const TOOL_DEFINITIONS: Readonly<Record<ToolName, ActionDefinition>> = Object.fromEntries(
   TOOLS.map(({ name, definition }) => [name, definition])
 ) as Record<ToolName, ActionDefinition>;
@@ -244,6 +311,9 @@ export function registerMarketplaceTools(
   // itself (messenger_prepare needs prepareDraft, messenger_send needs sendThread), so the gate
   // cannot fall out of step with the registry the way a separate tool-name list could.
   const activeTools = TOOLS.filter((tool) => hasRequiredCapability(tool, options));
+  // The registration map is name-keyed. The import-time guard above covers the literal table;
+  // this runtime check also protects the derived active set if its construction changes later.
+  assertUniqueToolNames(activeTools);
   // The CallTool handler validates a tool's result with the very schema the TOOLS table declares
   // and ListTools advertises, so the pairing cannot drift: a new or renamed tool is validated with
   // its own schema instead of silently inheriting whichever schema an unrelated branch used to fall
