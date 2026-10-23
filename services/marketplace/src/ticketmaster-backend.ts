@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { ProviderError, type EventsBackend } from './backend.js';
 import { eventAvailabilitySchema, type EventAvailability } from './domain.js';
 import { TicketmasterClient, TicketmasterHttpError, type TicketmasterClientOptions } from './ticketmaster.js';
+import { validateTimeout } from './timeout.js';
 
 const isoOffsetSchema = z.string().datetime({ offset: true });
 
@@ -260,8 +261,4 @@ function classifications(item: Record<string, any>): string[] {
 function images(item: Record<string, any>): string[] {
   if (!Array.isArray(item.images)) return [];
   return item.images.map((image: any) => image?.url).filter((url): url is string => typeof url === 'string').slice(0, 6);
-}
-
-function validateTimeout(value: number, name: string): void {
-  if (!Number.isInteger(value) || value <= 0) throw new RangeError(`${name} must be a positive integer`);
 }

@@ -1,6 +1,7 @@
 import { ProviderError, type ShoppingBackend } from './backend.js';
 import { productOfferSchema, type ProductOffer } from './domain.js';
 import { EbayClient, EbayHttpError, type EbayClientOptions } from './ebay.js';
+import { validateTimeout } from './timeout.js';
 
 export class EbayShoppingBackend implements ShoppingBackend {
   readonly name = 'ebay';
@@ -189,8 +190,4 @@ function condition(value: unknown): ProductOffer['condition'] {
   if (lower.includes('used') || lower.includes('pre-owned') || lower.includes('open box')) return 'used';
   if (lower.startsWith('new other') || lower.startsWith('new with')) return 'new';
   return 'unknown';
-}
-
-function validateTimeout(value: number, name: string): void {
-  if (!Number.isInteger(value) || value <= 0) throw new RangeError(`${name} must be a positive integer`);
 }

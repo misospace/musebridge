@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { ProviderError, type ThreadsBackend, type ThreadsPostPage, type ThreadsReplyPage } from './backend.js';
 import { MAX_THREADS_MEDIA_URLS, MAX_THREADS_REPLY_COUNT, isOfficialThreadsMediaUrl, threadsPostSchema, threadsReplySchema, type ThreadsPost, type ThreadsReply } from './domain.js';
 import { ThreadsClient, ThreadsHttpError, type ThreadsClientOptions } from './threads.js';
+import { validateTimeout } from './timeout.js';
 
 const isoOffsetSchema = z.string().datetime({ offset: true });
 
@@ -309,8 +310,4 @@ function mapReply(value: unknown, parentMediaId: string): ThreadsReply | null {
   };
   const parsed = threadsReplySchema.safeParse(reply);
   return parsed.success ? parsed.data : null;
-}
-
-function validateTimeout(value: number, name: string): void {
-  if (!Number.isInteger(value) || value <= 0) throw new RangeError(`${name} must be a positive integer`);
 }
