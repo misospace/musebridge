@@ -2,6 +2,7 @@ import { errors } from 'playwright';
 import { BrowserSessionManager, BrowserUnavailableError, sleepUntilAbort } from './browser.js';
 import type { ConversationBackend } from './backend.js';
 import { ProviderError as MarketplaceProviderError, SurfaceDisabledError, renderDeliveredMessage } from './backend.js';
+import { validateTimeout, waitForRequestBudget } from './timeout.js';
 import {
   threadsListInputSchema,
   threadReadInputSchema,
@@ -39,7 +40,6 @@ import {
   parseMessengerInboxGraphQLRequest,
   type MessengerInboxGraphQLObservation
 } from './facebook-messenger-inbox-graphql.js';
-import { validateTimeout } from './timeout.js';
 
 export interface FacebookMessengerBackendOptions {
   browser: BrowserSessionManager;
@@ -549,21 +549,4 @@ function isJsonContentType(value: string | undefined): boolean {
   if (typeof value !== 'string') return false;
   const mediaType = value.split(';', 1)[0]?.trim().toLowerCase();
   return mediaType === 'application/json' || mediaType === 'text/json' || mediaType === 'application/graphql+json';
-}
-
-function waitForRequestBudget<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | undefined> {
-  if (signal.aborted) return Promise.reject(signal.reason ?? new Error('Browser operation aborted'));
-  return new Promise<T | undefined>((resolve, reject) => {
-    const onAbort = (): void => {
-      cleanup();
-      resolve(undefined);
-    };
-    const cleanup = (): void => signal.removeEventListener('abort', onAbort);
-    signal.addEventListener('abort', onAbort, { once: true });
-    if (signal.aborted) onAbort();
-    promise.then(
-      (result) => { cleanup(); resolve(result); },
-      (error: unknown) => { cleanup(); reject(error); }
-    );
-  });
 }

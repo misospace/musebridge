@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { ProviderError, type ThreadsBackend, type ThreadsPostPage, type ThreadsReplyPage } from './backend.js';
 import { MAX_THREADS_MEDIA_URLS, MAX_THREADS_REPLY_COUNT, isOfficialThreadsMediaUrl, threadsPostSchema, threadsReplySchema, type ThreadsPost, type ThreadsReply } from './domain.js';
 import { ThreadsClient, ThreadsHttpError, type ThreadsClientOptions } from './threads.js';
-import { validateTimeout } from './timeout.js';
+import { runWithDeadline, validateTimeout } from './timeout.js';
 
 const isoOffsetSchema = z.string().datetime({ offset: true });
 
@@ -23,7 +23,7 @@ export class ThreadsApiBackend implements ThreadsBackend {
   }
 
   async listOwnPosts(input: Parameters<ThreadsBackend['listOwnPosts']>[0], signal: AbortSignal): Promise<ThreadsPostPage> {
-    return this.withDeadline(signal, async (requestSignal) => {
+    return runWithDeadline(signal, this.requestTimeoutMs, 'Threads', async (requestSignal) => {
       try {
         const seen = new Set<string>();
         const posts: ThreadsPost[] = [];
@@ -68,7 +68,7 @@ export class ThreadsApiBackend implements ThreadsBackend {
   }
 
   async listReplies(input: Parameters<ThreadsBackend['listReplies']>[0], signal: AbortSignal): Promise<ThreadsReplyPage | null> {
-    return this.withDeadline(signal, async (requestSignal) => {
+    return runWithDeadline(signal, this.requestTimeoutMs, 'Threads', async (requestSignal) => {
       try {
         const seen = new Set<string>();
         const replies: ThreadsReply[] = [];
@@ -114,23 +114,6 @@ export class ThreadsApiBackend implements ThreadsBackend {
     });
   }
 
-  private async withDeadline<T>(signal: AbortSignal, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
-    if (signal.aborted) throw timeoutOrAbort(signal);
-    const controller = new AbortController();
-    const abort = () => controller.abort(signal.reason);
-    signal.addEventListener('abort', abort, { once: true });
-    const timer = setTimeout(() => controller.abort(new Error('deadline exceeded')), this.requestTimeoutMs);
-    try {
-      return await Promise.race([
-        operation(controller.signal),
-        new Promise<T>((_, reject) => controller.signal.addEventListener('abort', () => reject(timeoutOrAbort(controller.signal)), { once: true }))
-      ]);
-    } finally { clearTimeout(timer); signal.removeEventListener('abort', abort); }
-  }
-}
-
-function timeoutOrAbort(signal: AbortSignal): ProviderError {
-  return new ProviderError('TIMEOUT', signal.reason instanceof Error && signal.reason.message === 'deadline exceeded' ? 'The Threads request timed out.' : 'The Threads request was aborted.');
 }
 
 function mapError(error: unknown): ProviderError {

@@ -32,7 +32,7 @@ import {
 } from './facebook-marketplace-url.js';
 import { assertFacebookOrigin, FacebookSessionProbe, type FacebookProbeCode } from './facebook.js';
 import { FacebookCredentialLogin } from './facebook-login.js';
-import { validateTimeout } from './timeout.js';
+import { validateTimeout, waitForRequestBudget } from './timeout.js';
 
 export interface FacebookMarketplaceBackendOptions {
   browser: BrowserSessionManager;
@@ -360,21 +360,4 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     if (outcome.kind === 'unavailable') return null;
     return outcome.listing;
   }
-}
-
-function waitForRequestBudget<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | undefined> {
-  if (signal.aborted) return Promise.reject(signal.reason ?? new Error('Browser operation aborted'));
-  return new Promise<T | undefined>((resolve, reject) => {
-    const onAbort = (): void => {
-      cleanup();
-      resolve(undefined);
-    };
-    const cleanup = (): void => signal.removeEventListener('abort', onAbort);
-    signal.addEventListener('abort', onAbort, { once: true });
-    if (signal.aborted) onAbort();
-    promise.then(
-      (result) => { cleanup(); resolve(result); },
-      (error: unknown) => { cleanup(); reject(error); }
-    );
-  });
 }
