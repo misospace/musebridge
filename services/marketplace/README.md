@@ -118,6 +118,8 @@ Credentials are optional and environment-only:
 - `FACEBOOK_USERNAME` / `FACEBOOK_PASSWORD` — set together or not at all; a half-configured pair fails startup once the Facebook backend is selected. They are read only for that backend, so a fixture deployment never touches them. They are never written to disk, returned in a tool result, placed in a URL, or logged. A login is attempted only for a plain login requirement.
 - `FACEBOOK_LOGIN_WAIT_SECONDS` — how long to wait for the mobile approval, as a positive integer. Defaults to 180.
 
+Credential retry cooldown applies account-wide across Marketplace and Messenger and cannot be tuned by environment variables (30-second base, doubling to a 10-minute ceiling; hard-open after three failures or any challenge). Manual re-authentication is unaffected. The in-memory breaker exposes only its status and failure count, never credentials.
+
 This is not a 2FA implementation and it bypasses nothing. A captcha stops the attempt immediately, because it cannot be satisfied from the phone. A checkpoint is tolerated while the window is open — Facebook uses one as the gate for the approval itself — and reported as `SESSION_INVALID` only once the window closes. Either outcome, and a timeout, leaves the session `session_unknown` or `session_needs_reauth`, never usable, and hands off to the manual re-auth console below. Credentials are submitted at most once per attempt; a challenge never triggers a retry.
 
 Playwright's error text from the credential step is deliberately not surfaced: an error raised while typing can quote the typed value, so only the error name is logged.

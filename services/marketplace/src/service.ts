@@ -13,6 +13,7 @@ import { ThreadsClient } from './threads.js';
 import { ThreadsApiBackend } from './threads-backend.js';
 import { FacebookMarketplaceBackend } from './facebook-marketplace-backend.js';
 import { FacebookMessengerBackend } from './facebook-messenger-backend.js';
+import { FacebookLoginCircuitBreaker } from './facebook-login-circuit-breaker.js';
 import type { FacebookMarket } from './facebook-marketplace-url.js';
 import { backendNameSchema, SERVICE_VERSION } from './domain.js';
 import { BrowserSessionManager } from './browser.js';
@@ -118,6 +119,7 @@ export interface MarketplaceService {
   readonly port: number;
   readonly browser: BrowserSessionManager;
   readonly facebook: FacebookSessionProbe;
+  readonly loginGate: FacebookLoginCircuitBreaker;
   readonly reauth: ReauthManager;
   readonly admin: ReauthAdminServer;
   readonly messengerBrowser?: BrowserSessionManager;
@@ -243,6 +245,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
       waitMs: loginWaitMs,
       logger
     });
+  const loginGate = new FacebookLoginCircuitBreaker();
   const messengerLogin = credentials === undefined || messengerBrowser === undefined
     ? undefined
     : new FacebookCredentialLogin({
@@ -261,6 +264,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
       browser,
       probe: facebook,
       ...(login !== undefined ? { login } : {}),
+      loginGate,
       ...(options.facebookMarkets !== undefined ? { markets: options.facebookMarkets } : {}),
       logger
     })
@@ -271,6 +275,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
       browser: messengerBrowser,
       probe: messengerProbe,
       ...(messengerLogin !== undefined ? { login: messengerLogin } : {}),
+      loginGate,
       probeOnly: options.messengerProbeOnly ?? parseMessengerProbeOnly(process.env.FACEBOOK_MESSENGER_PROBE_ONLY),
       logger
     })
@@ -528,6 +533,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     port,
     browser,
     facebook,
+    loginGate,
     reauth,
     admin,
     ...(messengerBrowser !== undefined ? { messengerBrowser } : {}),

@@ -32,6 +32,7 @@ import {
 } from './facebook-marketplace-url.js';
 import { assertFacebookOrigin, FacebookSessionProbe, type FacebookProbeCode } from './facebook.js';
 import { FacebookCredentialLogin } from './facebook-login.js';
+import { FacebookLoginCircuitBreaker, type FacebookLoginAttemptPermit } from './facebook-login-circuit-breaker.js';
 import { validateTimeout, waitForRequestBudget } from './timeout.js';
 
 export interface FacebookMarketplaceBackendOptions {
@@ -42,6 +43,7 @@ export interface FacebookMarketplaceBackendOptions {
    * credentials are submitted and the session is re-probed before the search fails.
    */
   login?: FacebookCredentialLogin;
+  loginGate?: FacebookLoginCircuitBreaker;
   markets?: readonly FacebookMarket[];
   navigationTimeoutMs?: number;
   settleTimeoutMs?: number;
@@ -54,6 +56,7 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
   private readonly browser: BrowserSessionManager;
   private readonly probe: FacebookSessionProbe;
   private readonly login: FacebookCredentialLogin | undefined;
+  readonly loginGate: FacebookLoginCircuitBreaker;
   private readonly markets: readonly FacebookMarket[];
   private readonly navigationTimeoutMs: number;
   private readonly settleTimeoutMs: number;
@@ -76,10 +79,14 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     if (options.login !== undefined && !(options.login instanceof FacebookCredentialLogin)) {
       throw new TypeError('options.login must be a FacebookCredentialLogin');
     }
+    if (options.loginGate !== undefined && !(options.loginGate instanceof FacebookLoginCircuitBreaker)) {
+      throw new TypeError('options.loginGate must be a FacebookLoginCircuitBreaker');
+    }
 
     this.browser = options.browser;
     this.probe = options.probe;
     this.login = options.login;
+    this.loginGate = options.loginGate ?? new FacebookLoginCircuitBreaker();
     this.markets = options.markets ?? DEFAULT_FACEBOOK_MARKETS;
     this.navigationTimeoutMs = options.navigationTimeoutMs ?? 8_000;
     this.settleTimeoutMs = options.settleTimeoutMs ?? 3_000;
@@ -204,6 +211,8 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
       throw new ProviderError('UPSTREAM_ERROR', 'The Facebook session could not be verified.');
     }
 
+    if (session.status === 'session_usable') this.loginGate.recordSuccess();
+
     if (session.status === 'session_needs_reauth') {
       // Credentials are submitted only for a plain login requirement. A captcha or checkpoint
       // already means a human is needed, and re-submitting credentials there is exactly the loop
@@ -220,6 +229,7 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
       }
       session = await this.confirmCredentialLogin(signal);
       if (session.status !== 'session_usable') {
+        if (recovery.ownsAttempt) this.loginGate.recordCycleFailure();
         const code = session.code ?? 'SESSION_INVALID';
         const messages = {
           LOGIN_REQUIRED: 'Facebook Marketplace requires login.',
@@ -245,13 +255,20 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
   private async waitForCredentialLogin(
     code: FacebookProbeCode | undefined,
     signal: AbortSignal
-  ): Promise<{ recovered: boolean; code?: FacebookProbeCode }> {
+  ): Promise<{ recovered: boolean; code?: FacebookProbeCode; ownsAttempt?: boolean }> {
     if (!this.login || code !== 'LOGIN_REQUIRED') return { recovered: false };
     if (this.closePromise || this.loginController.signal.aborted) {
       throw this.loginController.signal.reason ?? new Error('Facebook backend is shutting down');
     }
 
-    const recovery = this.credentialRecovery ?? this.startCredentialLogin();
+    let ownsAttempt = false;
+    let recovery = this.credentialRecovery;
+    if (!recovery) {
+      const permit = this.loginGate.beginAttempt();
+      if (!permit) return { recovered: false };
+      ownsAttempt = true;
+      recovery = this.startCredentialLogin(permit);
+    }
     let outcome: { recovered: boolean; code?: FacebookProbeCode } | undefined;
     try {
       outcome = await waitForRequestBudget(recovery, signal);
@@ -260,12 +277,14 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
       throw error;
     }
     if (outcome === undefined) return { recovered: false, code: 'LOGIN_REQUIRED' };
-    return outcome;
+    return ownsAttempt ? { ...outcome, ownsAttempt: true } : outcome;
   }
 
   private async confirmCredentialLogin(signal: AbortSignal): Promise<Awaited<ReturnType<FacebookSessionProbe['probeSession']>>> {
     try {
-      return await this.probe.probeSession(signal);
+      const session = await this.probe.probeSession(signal);
+      if (session.status === 'session_usable') this.loginGate.recordSuccess();
+      return session;
     } catch (error) {
       if (signal.aborted) throw signal.reason ?? error;
       if (error instanceof ProviderError) throw error;
@@ -276,8 +295,8 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     }
   }
 
-  private startCredentialLogin(): Promise<{ recovered: boolean; code?: FacebookProbeCode }> {
-    const attempt = Promise.resolve().then(() => this.performCredentialLogin());
+  private startCredentialLogin(permit: FacebookLoginAttemptPermit): Promise<{ recovered: boolean; code?: FacebookProbeCode }> {
+    const attempt = Promise.resolve().then(() => this.performCredentialLogin(permit));
     this.credentialRecovery = attempt;
     void attempt.finally(() => {
       if (this.credentialRecovery === attempt) this.credentialRecovery = undefined;
@@ -285,19 +304,27 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     return attempt;
   }
 
-  private async performCredentialLogin(): Promise<{ recovered: boolean; code?: FacebookProbeCode }> {
+  private async performCredentialLogin(permit: FacebookLoginAttemptPermit): Promise<{ recovered: boolean; code?: FacebookProbeCode }> {
     try {
       const outcome = await this.login!.attempt(this.loginController.signal);
+      this.loginGate.settleAttempt(permit, outcome.outcome === 'challenge'
+        ? 'challenge'
+        : outcome.outcome === 'authenticated' ? 'accepted' : 'failure');
       if (outcome.outcome !== 'authenticated') {
         return { recovered: false, ...(outcome.code !== undefined ? { code: outcome.code } : {}) };
       }
       return { recovered: true };
     } catch (error) {
-      if (this.loginController.signal.aborted) throw this.loginController.signal.reason ?? error;
-      if (error instanceof ProviderError) throw error;
+      if (this.loginController.signal.aborted) {
+        this.loginGate.settleAttempt(permit, 'abandoned');
+        throw this.loginController.signal.reason ?? error;
+      }
       if (error instanceof BrowserUnavailableError) {
+        this.loginGate.settleAttempt(permit, 'abandoned');
         throw new ProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
       }
+      this.loginGate.settleAttempt(permit, 'failure');
+      if (error instanceof ProviderError) throw error;
       throw new ProviderError('UPSTREAM_ERROR', 'The Facebook session could not be established.');
     }
   }
