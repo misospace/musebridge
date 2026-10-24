@@ -208,3 +208,20 @@ describe('EbayShoppingBackend', () => {
     expect('retry_after' in error.metadata).toBe(false);
   });
 });
+
+describe('EbayShoppingBackend requestTimeoutMs validation', () => {
+  const options = () => ({ clientId: 'synthetic', clientSecret: 'synthetic', baseUrl: origin });
+  // setTimeout coerces delays above 2^31-1 ms to 1, so an out-of-range value must fail at
+  // construction rather than abort every request instantly (#119).
+  it.each([2_147_483_648, 4_294_967_296, Number.MAX_SAFE_INTEGER, Number.POSITIVE_INFINITY])(
+    'rejects %s at construction', (requestTimeoutMs) => {
+      expect(() => new EbayShoppingBackend(options(), { requestTimeoutMs })).toThrow(RangeError);
+    }
+  );
+  it('accepts the 2^31-1 upper bound', () => {
+    expect(() => new EbayShoppingBackend(options(), { requestTimeoutMs: 2_147_483_647 })).not.toThrow();
+  });
+  it.each([0, -1, 1.5, Number.NaN])('keeps rejecting invalid %s', (requestTimeoutMs) => {
+    expect(() => new EbayShoppingBackend(options(), { requestTimeoutMs })).toThrow(RangeError);
+  });
+});
