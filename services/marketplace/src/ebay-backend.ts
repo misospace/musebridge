@@ -1,7 +1,7 @@
 import { ProviderError, type ShoppingBackend } from './backend.js';
 import { productOfferSchema, type ProductOffer } from './domain.js';
 import { EbayClient, EbayHttpError, type EbayClientOptions } from './ebay.js';
-import { validateTimeout } from './timeout.js';
+import { runWithDeadline, validateTimeout } from './timeout.js';
 
 export class EbayShoppingBackend implements ShoppingBackend {
   readonly name = 'ebay';
@@ -15,7 +15,7 @@ export class EbayShoppingBackend implements ShoppingBackend {
   }
 
   async search(input: Parameters<ShoppingBackend['search']>[0], signal: AbortSignal): Promise<ProductOffer[]> {
-    return this.withDeadline(signal, async (requestSignal) => {
+    return runWithDeadline(signal, this.requestTimeoutMs, 'eBay', async (requestSignal) => {
       try {
         const payload = await this.client.searchItems(input.query, { limit: input.limit, minPrice: input.min_price, maxPrice: input.max_price }, requestSignal) as { itemSummaries?: unknown; total?: unknown };
         if (!Array.isArray(payload?.itemSummaries)) {
@@ -36,7 +36,7 @@ export class EbayShoppingBackend implements ShoppingBackend {
   }
 
   async fetch(input: Parameters<ShoppingBackend['fetch']>[0], signal: AbortSignal): Promise<ProductOffer | null> {
-    return this.withDeadline(signal, async (requestSignal) => {
+    return runWithDeadline(signal, this.requestTimeoutMs, 'eBay', async (requestSignal) => {
       try {
         // A RESTful id addresses the exact variation via GET /item/{id}; a legacy numeric id
         // or an /itm/ URL can only address the parent listing — variation ambiguity is honest
@@ -59,23 +59,6 @@ export class EbayShoppingBackend implements ShoppingBackend {
     });
   }
 
-  private async withDeadline<T>(signal: AbortSignal, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
-    if (signal.aborted) throw timeoutOrAbort(signal);
-    const controller = new AbortController();
-    const abort = () => controller.abort(signal.reason);
-    signal.addEventListener('abort', abort, { once: true });
-    const timer = setTimeout(() => controller.abort(new Error('deadline exceeded')), this.requestTimeoutMs);
-    try {
-      return await Promise.race([
-        operation(controller.signal),
-        new Promise<T>((_, reject) => controller.signal.addEventListener('abort', () => reject(timeoutOrAbort(controller.signal)), { once: true }))
-      ]);
-    } finally { clearTimeout(timer); signal.removeEventListener('abort', abort); }
-  }
-}
-
-function timeoutOrAbort(signal: AbortSignal): ProviderError {
-  return new ProviderError('TIMEOUT', signal.reason instanceof Error && signal.reason.message === 'deadline exceeded' ? 'The eBay request timed out.' : 'The eBay request was aborted.');
 }
 
 function mapError(error: unknown): ProviderError {

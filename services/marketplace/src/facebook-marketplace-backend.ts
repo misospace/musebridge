@@ -32,6 +32,7 @@ import {
 } from './facebook-marketplace-url.js';
 import { assertFacebookOrigin, FacebookSessionProbe, type FacebookProbeCode } from './facebook.js';
 import { FacebookCredentialLogin } from './facebook-login.js';
+import { validateSafeTimeout, waitForRequestBudget } from './timeout.js';
 
 export interface FacebookMarketplaceBackendOptions {
   browser: BrowserSessionManager;
@@ -85,8 +86,8 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     this.maxCards = options.maxCards ?? MARKETPLACE_EXTRACT_LIMITS.maxCards;
     this.logger = options.logger ?? console;
 
-    validateTimeout(this.navigationTimeoutMs, 'navigationTimeoutMs');
-    validateTimeout(this.settleTimeoutMs, 'settleTimeoutMs');
+    validateSafeTimeout(this.navigationTimeoutMs, 'navigationTimeoutMs');
+    validateSafeTimeout(this.settleTimeoutMs, 'settleTimeoutMs');
     if (!Number.isSafeInteger(this.maxCards) || this.maxCards < 1 || this.maxCards > MARKETPLACE_EXTRACT_LIMITS.maxCards) {
       throw new RangeError(`maxCards must be an integer from 1 to ${MARKETPLACE_EXTRACT_LIMITS.maxCards}`);
     }
@@ -358,28 +359,5 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     if (outcome.kind === 'error') throw new ProviderError(outcome.code, outcome.message);
     if (outcome.kind === 'unavailable') return null;
     return outcome.listing;
-  }
-}
-
-function waitForRequestBudget<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | undefined> {
-  if (signal.aborted) return Promise.reject(signal.reason ?? new Error('Browser operation aborted'));
-  return new Promise<T | undefined>((resolve, reject) => {
-    const onAbort = (): void => {
-      cleanup();
-      resolve(undefined);
-    };
-    const cleanup = (): void => signal.removeEventListener('abort', onAbort);
-    signal.addEventListener('abort', onAbort, { once: true });
-    if (signal.aborted) onAbort();
-    promise.then(
-      (result) => { cleanup(); resolve(result); },
-      (error: unknown) => { cleanup(); reject(error); }
-    );
-  });
-}
-
-function validateTimeout(value: number, name: string): void {
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new RangeError(`${name} must be a positive safe integer`);
   }
 }
