@@ -2,7 +2,7 @@ import type { Locator, Page } from 'playwright';
 import { ProviderError } from './backend.js';
 import { BrowserSessionManager, BrowserUnavailableError, type BrowserSessionInfo, type ProviderSessionAssessment } from './browser.js';
 import type { ProviderErrorCode } from './domain.js';
-import { validateSafeTimeout } from './timeout.js';
+import { validateTimeout } from './timeout.js';
 
 export const FACEBOOK_ORIGIN = 'https://www.facebook.com';
 export const FACEBOOK_MARKETPLACE_PATH = '/marketplace/';
@@ -111,8 +111,8 @@ export class FacebookSessionProbe {
     this.settleTimeoutMs = options.settleTimeoutMs ?? 3_000;
     this.logger = options.logger ?? console;
 
-    validateSafeTimeout(this.navigationTimeoutMs, 'navigationTimeoutMs');
-    validateSafeTimeout(this.settleTimeoutMs, 'settleTimeoutMs');
+    validateTimeout(this.navigationTimeoutMs, 'navigationTimeoutMs');
+    validateTimeout(this.settleTimeoutMs, 'settleTimeoutMs');
   }
 
   async probeSession(signal: AbortSignal): Promise<FacebookSessionProbeResult> {

@@ -548,6 +548,12 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
     expect(() => new FacebookMessengerBackend({ browser: {} as BrowserSessionManager, probe: {} as FacebookSessionProbe })).toThrow(TypeError);
     expect(() => new FacebookMessengerBackend({ browser: managers.at(-1)!, probe: new FacebookSessionProbe({ browser: managers.at(-1)!, baseUrl: origin }), maxThreads: 0 })).toThrow(RangeError);
     expect(() => new FacebookMessengerBackend({ browser: managers.at(-1)!, probe: new FacebookSessionProbe({ browser: managers.at(-1)!, baseUrl: origin }), inboxPath: '//elsewhere.invalid/' })).toThrow(TypeError);
+    // setTimeout coerces delays above 2^31-1 ms to 1, so construction must reject them instead.
+    expect(() => new FacebookMessengerBackend({ browser: managers.at(-1)!, probe: new FacebookSessionProbe({ browser: managers.at(-1)!, baseUrl: origin }), navigationTimeoutMs: 2_147_483_648 })).toThrow(RangeError);
+    expect(() => new FacebookMessengerBackend({ browser: managers.at(-1)!, probe: new FacebookSessionProbe({ browser: managers.at(-1)!, baseUrl: origin }), settleTimeoutMs: 2_147_483_648 })).toThrow(RangeError);
+    expect(() => new FacebookMessengerBackend({ browser: managers.at(-1)!, probe: new FacebookSessionProbe({ browser: managers.at(-1)!, baseUrl: origin }), graphqlFlushTimeoutMs: 2_147_483_648 })).toThrow(RangeError);
+    expect(new FacebookMessengerBackend({ browser: managers.at(-1)!, probe: new FacebookSessionProbe({ browser: managers.at(-1)!, baseUrl: origin }), navigationTimeoutMs: 2_147_483_647, settleTimeoutMs: 2_147_483_647, graphqlFlushTimeoutMs: 2_147_483_647 }).name)
+      .toBe('facebook');
   });
 });
 

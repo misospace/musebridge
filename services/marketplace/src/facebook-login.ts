@@ -13,7 +13,7 @@ import {
   type FacebookProbeCode,
   type FacebookSessionProbeResult
 } from './facebook.js';
-import { validateSafeTimeout } from './timeout.js';
+import { validateTimeout } from './timeout.js';
 
 /**
  * Facebook's regular web login. The reference implementation we replace
@@ -165,12 +165,12 @@ export class FacebookCredentialLogin {
     this.consentSettleMs = options.consentSettleMs ?? CONSENT_SETTLE_MS;
     this.logger = options.logger ?? console;
 
-    validateSafeTimeout(this.waitMs, 'waitMs');
-    validateSafeTimeout(this.pollIntervalMs, 'pollIntervalMs');
-    validateSafeTimeout(this.navigationTimeoutMs, 'navigationTimeoutMs');
-    validateSafeTimeout(this.typingDelayMs, 'typingDelayMs');
-    validateSafeTimeout(this.consentTimeoutMs, 'consentTimeoutMs');
-    validateSafeTimeout(this.consentSettleMs, 'consentSettleMs');
+    validateTimeout(this.waitMs, 'waitMs');
+    validateTimeout(this.pollIntervalMs, 'pollIntervalMs');
+    validateTimeout(this.navigationTimeoutMs, 'navigationTimeoutMs');
+    validateTimeout(this.typingDelayMs, 'typingDelayMs');
+    validateTimeout(this.consentTimeoutMs, 'consentTimeoutMs');
+    validateTimeout(this.consentSettleMs, 'consentSettleMs');
   }
 
   private get credentials(): FacebookCredentials {
