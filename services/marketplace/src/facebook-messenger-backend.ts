@@ -2,6 +2,7 @@ import { errors } from 'playwright';
 import { BrowserSessionManager, BrowserUnavailableError, sleepUntilAbort } from './browser.js';
 import type { ConversationBackend } from './backend.js';
 import { ProviderError as MarketplaceProviderError, SurfaceDisabledError, renderDeliveredMessage } from './backend.js';
+import { validateSafeTimeout, waitForRequestBudget } from './timeout.js';
 import {
   threadsListInputSchema,
   threadReadInputSchema,
@@ -95,9 +96,9 @@ export class FacebookMessengerBackend implements ConversationBackend {
     this.graphqlFlushTimeoutMs = options.graphqlFlushTimeoutMs ?? GRAPHQL_FLUSH_TIMEOUT_MS;
     this.maxThreads = options.maxThreads ?? MESSENGER_EXTRACT_LIMITS.maxThreads;
     this.logger = options.logger ?? console;
-    validateTimeout(this.navigationTimeoutMs, 'navigationTimeoutMs');
-    validateTimeout(this.settleTimeoutMs, 'settleTimeoutMs');
-    validateTimeout(this.graphqlFlushTimeoutMs, 'graphqlFlushTimeoutMs');
+    validateSafeTimeout(this.navigationTimeoutMs, 'navigationTimeoutMs');
+    validateSafeTimeout(this.settleTimeoutMs, 'settleTimeoutMs');
+    validateSafeTimeout(this.graphqlFlushTimeoutMs, 'graphqlFlushTimeoutMs');
     if (!Number.isSafeInteger(this.maxThreads) || this.maxThreads < 1 || this.maxThreads > MESSENGER_EXTRACT_LIMITS.maxThreads) {
       throw new RangeError(`maxThreads must be an integer from 1 to ${MESSENGER_EXTRACT_LIMITS.maxThreads}`);
     }
@@ -548,27 +549,4 @@ function isJsonContentType(value: string | undefined): boolean {
   if (typeof value !== 'string') return false;
   const mediaType = value.split(';', 1)[0]?.trim().toLowerCase();
   return mediaType === 'application/json' || mediaType === 'text/json' || mediaType === 'application/graphql+json';
-}
-
-function waitForRequestBudget<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | undefined> {
-  if (signal.aborted) return Promise.reject(signal.reason ?? new Error('Browser operation aborted'));
-  return new Promise<T | undefined>((resolve, reject) => {
-    const onAbort = (): void => {
-      cleanup();
-      resolve(undefined);
-    };
-    const cleanup = (): void => signal.removeEventListener('abort', onAbort);
-    signal.addEventListener('abort', onAbort, { once: true });
-    if (signal.aborted) onAbort();
-    promise.then(
-      (result) => { cleanup(); resolve(result); },
-      (error: unknown) => { cleanup(); reject(error); }
-    );
-  });
-}
-
-function validateTimeout(value: number, name: string): void {
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new RangeError(`${name} must be a positive safe integer`);
-  }
 }

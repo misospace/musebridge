@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { ProviderError, type EventsBackend } from './backend.js';
 import { eventAvailabilitySchema, type EventAvailability } from './domain.js';
 import { TicketmasterClient, TicketmasterHttpError, type TicketmasterClientOptions } from './ticketmaster.js';
-import { validateTimeout } from './timeout.js';
+import { runWithDeadline, validateTimeout } from './timeout.js';
 
 const isoOffsetSchema = z.string().datetime({ offset: true });
 
@@ -18,7 +18,7 @@ export class TicketmasterEventsBackend implements EventsBackend {
   }
 
   async search(input: Parameters<EventsBackend['search']>[0], signal: AbortSignal): Promise<EventAvailability[]> {
-    return this.withDeadline(signal, async (requestSignal) => {
+    return runWithDeadline(signal, this.requestTimeoutMs, 'Ticketmaster', async (requestSignal) => {
       try {
         const payload = await this.client.searchEvents(input.query, {
           ...(input.city !== undefined ? { city: input.city } : {}),
@@ -45,7 +45,7 @@ export class TicketmasterEventsBackend implements EventsBackend {
   }
 
   async fetch(input: Parameters<EventsBackend['fetch']>[0], signal: AbortSignal): Promise<EventAvailability | null> {
-    return this.withDeadline(signal, async (requestSignal) => {
+    return runWithDeadline(signal, this.requestTimeoutMs, 'Ticketmaster', async (requestSignal) => {
       try {
         const id = input.id ?? eventIdFromUrl(input.url!);
         if (!id) throw new ProviderError('UPSTREAM_ERROR', 'The Ticketmaster event URL does not contain an event id.');
@@ -62,23 +62,6 @@ export class TicketmasterEventsBackend implements EventsBackend {
     });
   }
 
-  private async withDeadline<T>(signal: AbortSignal, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
-    if (signal.aborted) throw timeoutOrAbort(signal);
-    const controller = new AbortController();
-    const abort = () => controller.abort(signal.reason);
-    signal.addEventListener('abort', abort, { once: true });
-    const timer = setTimeout(() => controller.abort(new Error('deadline exceeded')), this.requestTimeoutMs);
-    try {
-      return await Promise.race([
-        operation(controller.signal),
-        new Promise<T>((_, reject) => controller.signal.addEventListener('abort', () => reject(timeoutOrAbort(controller.signal)), { once: true }))
-      ]);
-    } finally { clearTimeout(timer); signal.removeEventListener('abort', abort); }
-  }
-}
-
-function timeoutOrAbort(signal: AbortSignal): ProviderError {
-  return new ProviderError('TIMEOUT', signal.reason instanceof Error && signal.reason.message === 'deadline exceeded' ? 'The Ticketmaster request timed out.' : 'The Ticketmaster request was aborted.');
 }
 
 function mapError(error: unknown): ProviderError {
