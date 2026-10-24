@@ -11,17 +11,6 @@ export function validateTimeout(value: number, name: string): void {
 }
 
 /**
- * Positive safe-integer millisecond bound. The lenient sibling of `validateTimeout`: no
- * `setTimeout` ceiling. The browser-backed providers validate their navigation, settle,
- * and wait budgets with this variant.
- */
-export function validateSafeTimeout(value: number, name: string): void {
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new RangeError(`${name} must be a positive safe integer`);
-  }
-}
-
-/**
  * Runs one provider request under a per-request deadline. Expiry aborts only the request's
  * own controller, and both deadline and caller aborts reject with `ProviderError('TIMEOUT')`;
  * a `deadline exceeded` abort reason selects the timeout message, everything else reports

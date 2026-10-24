@@ -2,7 +2,7 @@ import { errors } from 'playwright';
 import { BrowserSessionManager, BrowserUnavailableError, sleepUntilAbort } from './browser.js';
 import type { ConversationBackend } from './backend.js';
 import { ProviderError as MarketplaceProviderError, SurfaceDisabledError, renderDeliveredMessage } from './backend.js';
-import { validateSafeTimeout, waitForRequestBudget } from './timeout.js';
+import { validateTimeout, waitForRequestBudget } from './timeout.js';
 import {
   threadsListInputSchema,
   threadReadInputSchema,
@@ -96,9 +96,9 @@ export class FacebookMessengerBackend implements ConversationBackend {
     this.graphqlFlushTimeoutMs = options.graphqlFlushTimeoutMs ?? GRAPHQL_FLUSH_TIMEOUT_MS;
     this.maxThreads = options.maxThreads ?? MESSENGER_EXTRACT_LIMITS.maxThreads;
     this.logger = options.logger ?? console;
-    validateSafeTimeout(this.navigationTimeoutMs, 'navigationTimeoutMs');
-    validateSafeTimeout(this.settleTimeoutMs, 'settleTimeoutMs');
-    validateSafeTimeout(this.graphqlFlushTimeoutMs, 'graphqlFlushTimeoutMs');
+    validateTimeout(this.navigationTimeoutMs, 'navigationTimeoutMs');
+    validateTimeout(this.settleTimeoutMs, 'settleTimeoutMs');
+    validateTimeout(this.graphqlFlushTimeoutMs, 'graphqlFlushTimeoutMs');
     if (!Number.isSafeInteger(this.maxThreads) || this.maxThreads < 1 || this.maxThreads > MESSENGER_EXTRACT_LIMITS.maxThreads) {
       throw new RangeError(`maxThreads must be an integer from 1 to ${MESSENGER_EXTRACT_LIMITS.maxThreads}`);
     }

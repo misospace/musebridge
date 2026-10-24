@@ -241,6 +241,10 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace backend', () => {
     expect(backend.name).toBe('facebook');
     expect(() => new FacebookMarketplaceBackend({ browser, probe, navigationTimeoutMs: 0 })).toThrow(RangeError);
     expect(() => new FacebookMarketplaceBackend({ browser, probe, settleTimeoutMs: 1.5 })).toThrow(RangeError);
+    // setTimeout coerces delays above 2^31-1 ms to 1, so construction must reject them instead.
+    expect(() => new FacebookMarketplaceBackend({ browser, probe, navigationTimeoutMs: 2_147_483_648 })).toThrow(RangeError);
+    expect(() => new FacebookMarketplaceBackend({ browser, probe, settleTimeoutMs: 2_147_483_648 })).toThrow(RangeError);
+    expect(new FacebookMarketplaceBackend({ browser, probe, navigationTimeoutMs: 2_147_483_647, settleTimeoutMs: 2_147_483_647 }).name).toBe('facebook');
     expect(() => new FacebookMarketplaceBackend({ browser, probe, maxCards: 0 })).toThrow(RangeError);
     expect(() => new FacebookMarketplaceBackend({ browser, probe, maxCards: 61 })).toThrow(RangeError);
     expect(() => new FacebookMarketplaceBackend({ browser: {} as BrowserSessionManager, probe })).toThrow(TypeError);
