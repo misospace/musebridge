@@ -12,12 +12,17 @@ while IFS= read -r -d '' file; do
   # Binary detection must read the whole file: a NUL byte anywhere in it marks the
   # file binary, so a matcher that exits on the first hit would misclassify a file
   # whose NUL byte sits after the first line.
-  nul_bytes="$(LC_ALL=C tr -dc '\000' < "$file" | LC_ALL=C wc -c)"
+  if ! nul_bytes="$(LC_ALL=C tr -dc '\000' < "$file" | LC_ALL=C wc -c)"; then
+    printf 'unreadable file: %q\n' "$file"
+    status=1
+    continue
+  fi
   if [ "$nul_bytes" -gt 0 ]; then
     continue
   fi
-  if [ -n "$(tail -c 1 -- "$file")" ]; then
-    printf 'trailing newline missing: %s\n' "$file"
+  # "./" keeps a tracked file literally named "-" from being read as stdin.
+  if [ -n "$(tail -c 1 -- "./$file")" ]; then
+    printf 'trailing newline missing: %q\n' "$file"
     status=1
   fi
 done < <(git ls-files -z)
