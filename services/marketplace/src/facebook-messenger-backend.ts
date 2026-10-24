@@ -39,6 +39,7 @@ import {
   parseMessengerInboxGraphQLRequest,
   type MessengerInboxGraphQLObservation
 } from './facebook-messenger-inbox-graphql.js';
+import { validateTimeout } from './timeout.js';
 
 export interface FacebookMessengerBackendOptions {
   browser: BrowserSessionManager;
@@ -565,10 +566,4 @@ function waitForRequestBudget<T>(promise: Promise<T>, signal: AbortSignal): Prom
       (error: unknown) => { cleanup(); reject(error); }
     );
   });
-}
-
-function validateTimeout(value: number, name: string): void {
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new RangeError(`${name} must be a positive safe integer`);
-  }
 }

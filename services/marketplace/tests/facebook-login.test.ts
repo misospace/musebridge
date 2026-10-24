@@ -99,6 +99,14 @@ describe('facebookCredentialsFromEnv', () => {
     expect(() => new FacebookCredentialLogin({ browser: manager, username: 'x', password: 'y', typingDelayMs: 0 })).toThrow(RangeError);
     expect(() => new FacebookCredentialLogin({ browser: manager, username: 'x', password: 'y', consentTimeoutMs: 0 })).toThrow(RangeError);
     expect(() => new FacebookCredentialLogin({ browser: manager, username: 'x', password: 'y', consentSettleMs: 0 })).toThrow(RangeError);
+    // setTimeout coerces delays above 2^31-1 ms to 1, so construction must reject them instead.
+    expect(() => new FacebookCredentialLogin({ browser: manager, username: 'x', password: 'y', waitMs: 2_147_483_648 })).toThrow(RangeError);
+    expect(() => new FacebookCredentialLogin({ browser: manager, username: 'x', password: 'y', pollIntervalMs: 2_147_483_648 })).toThrow(RangeError);
+    expect(() => new FacebookCredentialLogin({ browser: manager, username: 'x', password: 'y', navigationTimeoutMs: 2_147_483_648 })).toThrow(RangeError);
+    expect(() => new FacebookCredentialLogin({ browser: manager, username: 'x', password: 'y', typingDelayMs: 2_147_483_648 })).toThrow(RangeError);
+    expect(() => new FacebookCredentialLogin({ browser: manager, username: 'x', password: 'y', consentTimeoutMs: 2_147_483_648 })).toThrow(RangeError);
+    expect(() => new FacebookCredentialLogin({ browser: manager, username: 'x', password: 'y', consentSettleMs: 2_147_483_648 })).toThrow(RangeError);
+    expect(() => new FacebookCredentialLogin({ browser: manager, username: 'x', password: 'y', waitMs: 2_147_483_647, pollIntervalMs: 2_147_483_647, navigationTimeoutMs: 2_147_483_647, typingDelayMs: 2_147_483_647, consentTimeoutMs: 2_147_483_647, consentSettleMs: 2_147_483_647 })).not.toThrow();
     expect(() => new FacebookCredentialLogin({ browser: manager, username: 'x', password: 'y', baseUrl: 'https://evil.example' })).toThrow(TypeError);
     expect(() => new FacebookCredentialLogin({ browser: manager, username: 'x', password: 'y', loginPath: 'https://evil.example/login' })).toThrow(TypeError);
   });

@@ -32,6 +32,7 @@ import {
 } from './facebook-marketplace-url.js';
 import { assertFacebookOrigin, FacebookSessionProbe, type FacebookProbeCode } from './facebook.js';
 import { FacebookCredentialLogin } from './facebook-login.js';
+import { validateTimeout } from './timeout.js';
 
 export interface FacebookMarketplaceBackendOptions {
   browser: BrowserSessionManager;
@@ -376,10 +377,4 @@ function waitForRequestBudget<T>(promise: Promise<T>, signal: AbortSignal): Prom
       (error: unknown) => { cleanup(); reject(error); }
     );
   });
-}
-
-function validateTimeout(value: number, name: string): void {
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new RangeError(`${name} must be a positive safe integer`);
-  }
 }

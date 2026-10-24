@@ -268,6 +268,11 @@ describe('Facebook session probe construction', () => {
       .toBe('http://localhost:3000');
     expect(() => new FacebookSessionProbe({ browser: manager, navigationTimeoutMs: 0 })).toThrow(RangeError);
     expect(() => new FacebookSessionProbe({ browser: manager, settleTimeoutMs: Number.MAX_SAFE_INTEGER + 1 })).toThrow(RangeError);
+    // setTimeout coerces delays above 2^31-1 ms to 1, so construction must reject them instead.
+    expect(() => new FacebookSessionProbe({ browser: manager, navigationTimeoutMs: 2_147_483_648 })).toThrow(RangeError);
+    expect(() => new FacebookSessionProbe({ browser: manager, settleTimeoutMs: 2_147_483_648 })).toThrow(RangeError);
+    expect(new FacebookSessionProbe({ browser: manager, navigationTimeoutMs: 2_147_483_647, settleTimeoutMs: 2_147_483_647 }).baseUrl)
+      .toBe('https://www.facebook.com');
     expect(() => new FacebookSessionProbe(null as unknown as FacebookSessionProbeOptions)).toThrow(TypeError);
     expect(() => new FacebookSessionProbe({ browser: {} as BrowserManager })).toThrow(TypeError);
   });

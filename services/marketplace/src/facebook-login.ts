@@ -13,6 +13,7 @@ import {
   type FacebookProbeCode,
   type FacebookSessionProbeResult
 } from './facebook.js';
+import { validateTimeout } from './timeout.js';
 
 /**
  * Facebook's regular web login. The reference implementation we replace
@@ -350,11 +351,5 @@ function isAuthenticatedNonVerificationPage(
       snapshot.hasAuthenticatedMarker && !snapshot.hasPasswordInput && !snapshot.hasLoginForm;
   } catch {
     return false;
-  }
-}
-
-function validateTimeout(value: number, name: string): void {
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new RangeError(`${name} must be a positive safe integer`);
   }
 }

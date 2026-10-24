@@ -2,6 +2,7 @@ import type { Locator, Page } from 'playwright';
 import { ProviderError } from './backend.js';
 import { BrowserSessionManager, BrowserUnavailableError, type BrowserSessionInfo, type ProviderSessionAssessment } from './browser.js';
 import type { ProviderErrorCode } from './domain.js';
+import { validateTimeout } from './timeout.js';
 
 export const FACEBOOK_ORIGIN = 'https://www.facebook.com';
 export const FACEBOOK_MARKETPLACE_PATH = '/marketplace/';
@@ -381,10 +382,4 @@ export function normalizeFacebookBaseUrl(value: string): string {
 
 function isLoopbackHost(hostname: string): boolean {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]';
-}
-
-function validateTimeout(value: number, name: string): void {
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new RangeError(`${name} must be a positive safe integer`);
-  }
 }
