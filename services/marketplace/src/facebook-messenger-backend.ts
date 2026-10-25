@@ -513,13 +513,22 @@ export class FacebookMessengerBackend implements ConversationBackend {
     // The gate arms the revocation of this attempt together with the grant, so a challenge
     // recorded while the attempt is in flight aborts it before it can submit any further
     // credentials. The challenge is a fact about the account, so the other scope's probe can
-    // revoke this scope's attempt too.
-    const attemptSignal = AbortSignal.any([this.loginController.signal, permit.signal]);
+    // revoke this scope's attempt too. A manual re-auth lease takes the browser profile over,
+    // so it ends the attempt the same way: the lease owns the profile from that moment, and the
+    // attempt must not submit a credential into it.
+    const attemptSignal = AbortSignal.any([this.loginController.signal, permit.signal, this.browser.profileTakeoverSignal]);
     // A challenge recorded between the grant and this point already revoked the permit, so the
     // attempt must not start at all: no credential is submitted.
     if (permit.signal.aborted) {
       this.loginGate.settleAttempt(permit, 'abandoned');
       throw new MarketplaceProviderError('LOGIN_REQUIRED', messengerSessionMessage('LOGIN_REQUIRED'));
+    }
+    // A lease that took the profile over between the grant and this point ended the attempt's
+    // access to it, so the attempt must not start at all: no credential is submitted. A takeover
+    // is not a challenge, so the attempt is abandoned and the scope spends no retry budget on it.
+    if (this.browser.profileTakeoverSignal.aborted) {
+      this.loginGate.settleAttempt(permit, 'abandoned');
+      throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
     }
     try {
       const outcome = await this.login!.attempt(attemptSignal);

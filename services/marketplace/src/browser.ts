@@ -87,6 +87,12 @@ export class BrowserSessionManager {
   private headlessLaunchGeneration = 0;
   private lastAssessment: ProviderSessionAssessment = 'session_unknown';
   private lastFailure: string | undefined;
+  /**
+   * The takeover channel of the browser profile. A manual re-auth lease aborts it the moment it
+   * takes the profile over, so an in-flight credential attempt stops before it submits a
+   * credential into the profile the human now owns.
+   */
+  private takeoverController: AbortController;
   private closed = false;
   private queue: Promise<void> = Promise.resolve();
   private closePromise: Promise<void> | undefined;
@@ -101,6 +107,7 @@ export class BrowserSessionManager {
     this.settleTimeoutMs = options.settleTimeoutMs ?? 5_000;
     this.launchArgs = [...(options.launchArgs ?? [])];
     this.logger = options.logger ?? console;
+    this.takeoverController = new AbortController();
     if (!Number.isSafeInteger(this.launchTimeoutMs) || this.launchTimeoutMs <= 0) {
       throw new RangeError('launchTimeoutMs must be a positive integer');
     }
@@ -166,6 +173,16 @@ export class BrowserSessionManager {
     this.lastAssessment = status;
   }
 
+  /**
+   * The signal that reports the browser profile being taken over by a manual re-auth lease. A
+   * credential attempt composes it, so the lease ends the attempt instead of letting it submit
+   * credentials into the profile the human now owns. The signal is live again once the lease
+   * ends, so an attempt started after the lease may run.
+   */
+  get profileTakeoverSignal(): AbortSignal {
+    return this.takeoverController.signal;
+  }
+
   runExclusive<T>(signal: AbortSignal, task: (page: Page, signal: AbortSignal) => Promise<T>): Promise<T> {
     if (this.interactive) return Promise.reject(new BrowserUnavailableError('Interactive reauth session owns the browser profile'));
     if (signal.aborted) return Promise.reject(signal.reason ?? new Error('Browser operation aborted'));
@@ -217,6 +234,15 @@ export class BrowserSessionManager {
     if (this.interactiveBegin) return this.interactiveBegin;
     if (this.interactive) return Promise.resolve();
     this.interactive = true;
+    // The lease owns the profile from this moment on, so an in-flight credential attempt must
+    // stop before it submits any credential into it. The takeover is signalled synchronously,
+    // before the queued headless work is awaited, so the lease never waits for that attempt.
+    try {
+      this.takeoverController.abort(new BrowserUnavailableError('Interactive reauth session owns the browser profile'));
+    } catch {
+      // The takeover has already taken effect, so a synchronous abort failure must not escape
+      // into the lease startup.
+    }
     this.interactiveLaunchInvalidated = false;
     this.headlessLaunchGeneration += 1;
     this.lastAssessment = 'session_unknown';
@@ -431,6 +457,9 @@ export class BrowserSessionManager {
     this.interactive = false;
     this.lastAssessment = 'session_unknown';
     this.lastFailure = undefined;
+    // The profile is usable again, so the takeover channel is replaced by a live one: the ended
+    // lease keeps its aborted signal, and the next lease signals its own takeover.
+    this.takeoverController = new AbortController();
   }
 
   close(): Promise<void> {

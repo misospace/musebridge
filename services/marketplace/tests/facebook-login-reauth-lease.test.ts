@@ -20,9 +20,9 @@ import { FakeReauthRuntime } from './helpers/fake-reauth-runtime.js';
  * `ReauthManager` over the real `BrowserSessionManager`; only the Chromium launch is replaced, so
  * the suite stays browser-free and makes no network request.
  *
- * An attempt that was already in flight when the lease starts is not covered here: it keeps
- * running to its own conclusion and is graded like any other attempt. That gap is tracked
- * separately in issue #145 ("Manual reauthentication must preempt automated login wait").
+ * The lease also preempts an attempt that was already in flight when it started: the takeover
+ * ends that attempt before it submits any credential, and the attempt is abandoned, so it spends
+ * no retry budget either.
  */
 const USERNAME_SENTINEL = 'USER-SENTINEL-1234';
 const PASSWORD_SENTINEL = 'PASS-SENTINEL-5678';
@@ -69,6 +69,44 @@ class FakeLocator {
 }
 
 /**
+ * Holds a navigation to the Facebook login path until the test releases it, so a credential
+ * attempt can be observed while it is still in flight. The held navigation resolves on release,
+ * so the attempt it belongs to always concludes and nothing is left pending.
+ */
+class LoginNavigationGate {
+  private reached = false;
+  private readonly reachedPromise: Promise<void>;
+  private readonly releasePromise: Promise<void>;
+  private markReached!: () => void;
+  private release!: () => void;
+
+  constructor() {
+    this.reachedPromise = new Promise<void>((resolve) => { this.markReached = resolve; });
+    this.releasePromise = new Promise<void>((resolve) => { this.release = resolve; });
+  }
+
+  /** Holds a navigation to the Facebook login path until this gate is released. */
+  async hold(url: string): Promise<void> {
+    if (!url.includes(FACEBOOK_LOGIN_PATH)) return;
+    if (!this.reached) {
+      this.reached = true;
+      this.markReached();
+    }
+    await this.releasePromise;
+  }
+
+  /** Resolves once a navigation to the Facebook login path is held. */
+  async waitForHeld(): Promise<void> {
+    await this.reachedPromise;
+  }
+
+  /** Releases the held navigation so the attempt it belongs to can conclude. */
+  releaseHeld(): void {
+    this.release();
+  }
+}
+
+/**
  * A page stand-in that records every navigation and every typed value, so "no credentials were
  * submitted" is an observation rather than an absence.
  */
@@ -78,9 +116,12 @@ class FakePage {
   enterPressed = false;
   private currentUrl = 'about:blank';
 
+  constructor(private readonly loginNavigationGate?: LoginNavigationGate) {}
+
   async goto(url: string): Promise<null> {
     this.navigations.push(url);
     this.currentUrl = url;
+    await this.loginNavigationGate?.hold(url);
     return null;
   }
 
@@ -119,6 +160,8 @@ class FakePage {
  */
 class FakeBrowserContext {
   readonly pagesCreated: FakePage[] = [];
+  /** Installed by a test that needs to hold the credential attempt's login navigation. */
+  loginNavigationGate: LoginNavigationGate | undefined;
 
   constructor(private readonly leasePage?: FakePage) {}
 
@@ -127,7 +170,7 @@ class FakeBrowserContext {
   }
 
   async newPage(): Promise<Page> {
-    const page = new FakePage();
+    const page = new FakePage(this.loginNavigationGate);
     this.pagesCreated.push(page);
     return page as unknown as Page;
   }
@@ -315,6 +358,21 @@ async function failureOf(promise: Promise<unknown>): Promise<unknown> {
   return promise.then(() => undefined, (error: unknown) => error);
 }
 
+/**
+ * Waits until the credential attempt's login navigation is held, and fails fast when the request
+ * ends before it gets there: a request that never reached the login form was not an attempt in
+ * flight, so the takeover it is meant to observe never happened.
+ */
+async function awaitHeldNavigation(gate: LoginNavigationGate, request: Promise<unknown>): Promise<void> {
+  const outcome = await Promise.race([
+    gate.waitForHeld().then(() => 'held' as const),
+    failureOf(request).then(() => 'ended' as const)
+  ]);
+  if (outcome !== 'held') {
+    throw new Error('the request ended before the credential attempt reached the login form');
+  }
+}
+
 describe('manual re-auth lease blocks credential submission', () => {
   it('refuses a credential attempt that starts while the lease owns the profile', async () => {
     const scope = setupMarketplace();
@@ -322,8 +380,7 @@ describe('manual re-auth lease blocks credential submission', () => {
     expect(lease.reauth.status().phase).toBe('active');
     expect(scope.browser.getInfo().interactive).toBe(true);
 
-    // This attempt starts while the lease owns the profile. An attempt that was already in
-    // flight when the lease started is out of scope here (issue #145).
+    // This attempt starts while the lease owns the profile.
     const failure = await failureOf(scope.login.attempt(signal()));
 
     expect(failure).toBeInstanceOf(BrowserUnavailableError);
@@ -434,5 +491,65 @@ describe('manual re-auth lease blocks credential submission', () => {
     expect(credentialActivity(scope.browser)).toEqual({ typed: [], submitted: false });
     expect(navigations({ leasePage: lease.leasePage, browser: scope.browser }).some((url) => url.includes(FACEBOOK_LOGIN_PATH))).toBe(false);
     expectNoCredentials(failure);
+  });
+
+  it('preempts a Marketplace credential attempt that was in flight when the lease started', async () => {
+    const scope = setupMarketplace();
+    const held = new LoginNavigationGate();
+    scope.browser.headlessContext.loginNavigationGate = held;
+
+    // The request goes in flight and its credential attempt reaches the login form.
+    const request = scope.backend.search(search, signal());
+    await awaitHeldNavigation(held, request);
+
+    // The lease takes the profile over while that attempt is still on the login form. The lease
+    // reaches its active phase without waiting for the attempt it preempted.
+    const lease = await startLease(scope.browser);
+    expect(lease.reauth.status().phase).toBe('active');
+    held.releaseHeld();
+
+    const failure = await failureOf(request);
+
+    // The contract is the one an attempt that starts during a lease already gets.
+    expect(failure).toMatchObject({
+      name: 'ProviderError',
+      code: 'UPSTREAM_ERROR',
+      message: 'The browser session is not available.'
+    });
+    // The attempt really was on the login form, and it submitted nothing: no credential value was
+    // ever typed and the form was never submitted.
+    expect(navigations({ leasePage: lease.leasePage, browser: scope.browser }).some((url) => url.includes(FACEBOOK_LOGIN_PATH))).toBe(true);
+    expect(credentialActivity(scope.browser)).toEqual({ typed: [], submitted: false });
+    expectNoCredentials(failure);
+    // The attempt was abandoned, so the human lease costs the account no retry budget, and the
+    // takeover did not hard-open the gate.
+    expect(scope.gate.snapshot()).toEqual({ status: 'closed' });
+  });
+
+  it('preempts a Messenger credential attempt that was in flight when the lease started', async () => {
+    const scope = setupMessenger();
+    const held = new LoginNavigationGate();
+    scope.browser.headlessContext.loginNavigationGate = held;
+
+    const request = scope.backend.listThreads(threads, signal());
+    await awaitHeldNavigation(held, request);
+
+    const lease = await startLease(scope.browser);
+    expect(lease.reauth.status().phase).toBe('active');
+    held.releaseHeld();
+
+    const failure = await failureOf(request);
+
+    expect(failure).toMatchObject({
+      name: 'ProviderError',
+      code: 'UPSTREAM_ERROR',
+      message: 'The browser session is not available.'
+    });
+    expect(navigations({ leasePage: lease.leasePage, browser: scope.browser }).some((url) => url.includes(FACEBOOK_LOGIN_PATH))).toBe(true);
+    expect(credentialActivity(scope.browser)).toEqual({ typed: [], submitted: false });
+    expectNoCredentials(failure);
+    // The takeover is not a challenge: the attempt is abandoned, so the account spends no retry
+    // budget on it and the gate stays closed.
+    expect(scope.gate.snapshot()).toEqual({ status: 'closed' });
   });
 });
