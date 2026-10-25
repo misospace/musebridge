@@ -14,6 +14,15 @@ export type FacebookProbeOutcome = typeof FACEBOOK_PROBE_OUTCOMES[number];
 
 export type FacebookProbeCode = Extract<ProviderErrorCode, 'LOGIN_REQUIRED' | 'CAPTCHA_REQUIRED' | 'SESSION_INVALID'>;
 
+/**
+ * Whether a provider error code is an auth-class failure observed from page content: a login
+ * requirement, a captcha, or a checkpoint. Such an observation proves the session this profile
+ * holds is no longer usable, even when the last probe assessed it usable (#147).
+ */
+export function isFacebookAuthClassCode(code: ProviderErrorCode): code is FacebookProbeCode {
+  return code === 'LOGIN_REQUIRED' || code === 'CAPTCHA_REQUIRED' || code === 'SESSION_INVALID';
+}
+
 export interface FacebookSessionProbeResult {
   status: ProviderSessionAssessment;
   outcome: FacebookProbeOutcome;

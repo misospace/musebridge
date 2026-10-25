@@ -325,7 +325,7 @@ describe('fixture MCP service', () => {
     expect(tools.tools.map(({ description }) => description)).toEqual([
       'Search marketplace listings.',
       'Fetch one marketplace listing by ID or canonical URL. Does not fetch remote URLs.',
-      'Report service and schema versions, the configured backend name, and the Facebook session state.',
+      'Report service and schema versions, the configured backend name, and the per-surface Facebook session state (marketplace and messenger).',
       'Search one configured shopping source for products with prices, availability, and provenance. Read-only.',
       'Fetch one product offer by canonical ID or URL from the configured shopping source. Read-only.',
       'Search one configured events source for read-only availability: on-sale status, date/time, price ranges, and venue. Read-only.',
@@ -821,9 +821,14 @@ describe('fixture MCP service', () => {
     expect(result).toEqual({
       ok: true,
       service_version: packageVersion,
-      schema_version: '1.6.0',
+      schema_version: '1.7.0',
       backend: 'status-only',
       facebook_session: { status: 'session_unknown' },
+      // Neither surface is served by a Facebook browser scope here: the marketplace backend is
+      // injected and Messenger is off, so both report 'disabled', distinct from the legacy
+      // field's unassessed 'session_unknown' (#147).
+      marketplace_session: { status: 'disabled' },
+      messenger_session: { status: 'disabled' },
       shopping_backend: 'fixture',
       events_backend: 'fixture',
       threads_backend: 'fixture',
@@ -867,6 +872,57 @@ describe('fixture MCP service', () => {
     }
   });
 
+  it.skipIf(!browserAvailable)('reports marketplace and messenger session states as independent profile states', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    const profileRoot = mkdtempSync(join(tmpdir(), 'marketplace-service-surface-status-'));
+    const marketplaceBrowser = new BrowserSessionManager({ profileDir: join(profileRoot, 'marketplace') });
+    const messengerBrowser = new BrowserSessionManager({ profileDir: join(profileRoot, 'messenger') });
+
+    try {
+      for (const browser of [marketplaceBrowser, messengerBrowser]) {
+        await browser.runExclusive(new AbortController().signal, async (page) => {
+          await page.goto('about:blank');
+        });
+      }
+      service = createMarketplaceService({
+        host: '127.0.0.1',
+        port: 0,
+        adminPort: 0,
+        backendKind: 'facebook',
+        facebookCredentials: { username: 'synthetic-user', password: 'synthetic-password' },
+        browser: marketplaceBrowser,
+        messengerEnabled: true,
+        messengerBrowser,
+        messengerReauthAdminPort: 0,
+        logger: { error: vi.fn() }
+      });
+      await packageEntry.listen(service);
+      const address = service.address();
+      if (!address || typeof address === 'string') throw new Error('Expected a TCP address');
+      baseUrl = `http://127.0.0.1:${address.port}`;
+      const client = await connectClient();
+
+      // Messenger can need re-auth while Marketplace is usable, and the other way around:
+      // each surface reports its own profile's assessment, never the other's (#147).
+      marketplaceBrowser.assessSession('session_usable');
+      messengerBrowser.assessSession('session_needs_reauth');
+      let status = structured(await client.callTool({ name: 'marketplace_status', arguments: {} }));
+      expect(status.marketplace_session).toEqual({ status: 'session_usable' });
+      expect(status.messenger_session).toEqual({ status: 'session_needs_reauth' });
+      expect(status.facebook_session).toEqual({ status: 'session_usable' });
+
+      messengerBrowser.assessSession('session_usable');
+      marketplaceBrowser.assessSession('session_needs_reauth');
+      status = structured(await client.callTool({ name: 'marketplace_status', arguments: {} }));
+      expect(status.marketplace_session).toEqual({ status: 'session_needs_reauth' });
+      expect(status.messenger_session).toEqual({ status: 'session_usable' });
+    } finally {
+      await service.close();
+      rmSync(profileRoot, { recursive: true, force: true });
+    }
+  });
+
   it('uses the stable consumer listing contract and reports backend identity dynamically', async () => {
     const client = await connectClient();
     const search = structured(await client.callTool({ name: 'marketplace_search', arguments: { query: 'synthetic', location: 'a', limit: 20 } }));
@@ -897,7 +953,7 @@ describe('fixture MCP service', () => {
     expect(customSearch.backend).toBe('consumer-test');
     expect(customFetch.backend).toBe('consumer-test');
     expect(customStatus.backend).toBe('consumer-test');
-    expect(customStatus.schema_version).toBe('1.6.0');
+    expect(customStatus.schema_version).toBe('1.7.0');
     expect(customStatus.capabilities).toEqual([
       { surface: 'marketplace', provider: 'facebook', backend: 'consumer-test' },
       { surface: 'shopping', provider: 'ebay', backend: 'fixture' },
@@ -1133,7 +1189,7 @@ describe('fixture MCP service', () => {
     ]);
     expect(structured(first).listings[0].id).toBe('fixture-chair-002');
     expect(structured(second).listing.state).toBe('sold');
-    expect(structured(third).schema_version).toBe('1.6.0');
+    expect(structured(third).schema_version).toBe('1.7.0');
   });
 
   it('bounds shutdown with both an in-flight backend call and a partial request body', async () => {

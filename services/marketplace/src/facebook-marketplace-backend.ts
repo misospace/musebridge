@@ -4,7 +4,8 @@ import { BrowserSessionManager, BrowserUnavailableError, sleepUntilAbort } from 
 import {
   fetchInputSchema,
   searchInputSchema,
-  type Listing
+  type Listing,
+  type ProviderErrorCode
 } from './domain.js';
 import { ProviderError, type MarketplaceBackend } from './backend.js';
 import {
@@ -30,7 +31,7 @@ import {
   resolveMarketplaceItemInput,
   type FacebookMarket
 } from './facebook-marketplace-url.js';
-import { assertFacebookOrigin, FacebookSessionProbe, type FacebookProbeCode } from './facebook.js';
+import { assertFacebookOrigin, FacebookSessionProbe, isFacebookAuthClassCode, type FacebookProbeCode } from './facebook.js';
 import { FacebookCredentialLogin } from './facebook-login.js';
 import { FacebookLoginCircuitBreaker, type FacebookLoginAttemptPermit, type FacebookLoginScope } from './facebook-login-circuit-breaker.js';
 import { validateTimeout, waitForRequestBudget } from './timeout.js';
@@ -200,9 +201,22 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
       ...(input.min_price !== undefined ? { minPrice: input.min_price } : {}),
       ...(input.max_price !== undefined ? { maxPrice: input.max_price } : {})
     });
-    if (outcome.kind === 'error') throw new ProviderError(outcome.code, outcome.message);
+    if (outcome.kind === 'error') {
+      this.recordObservedAuthFailure(outcome.code);
+      throw new ProviderError(outcome.code, outcome.message);
+    }
     if (outcome.kind === 'empty') return [];
     return [...outcome.listings];
+  }
+
+  /**
+   * A result page that itself shows a login, captcha, or checkpoint means the session this
+   * profile holds has expired or been challenged, even when the last probe assessed it usable.
+   * Downgrade the cached assessment so `marketplace_status` stops reporting the stale verdict
+   * until a probe or re-auth records a fresh one (#147).
+   */
+  private recordObservedAuthFailure(code: ProviderErrorCode): void {
+    if (isFacebookAuthClassCode(code)) this.browser.assessSession('session_needs_reauth');
   }
 
   private async ensureUsableSession(signal: AbortSignal): Promise<void> {
@@ -436,7 +450,10 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
       url: resolved.url,
       ...(locationMarket?.ok ? { fallbackCurrency: locationMarket.market.currency } : {})
     });
-    if (outcome.kind === 'error') throw new ProviderError(outcome.code, outcome.message);
+    if (outcome.kind === 'error') {
+      this.recordObservedAuthFailure(outcome.code);
+      throw new ProviderError(outcome.code, outcome.message);
+    }
     if (outcome.kind === 'unavailable') return null;
     return outcome.listing;
   }
