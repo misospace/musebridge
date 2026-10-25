@@ -30,6 +30,15 @@ export class FacebookLoginCircuitBreaker {
   private openReason: 'failures' | 'challenge' | undefined;
   private activePermit: FacebookLoginAttemptPermit | undefined;
   private readonly settled = new WeakSet<object>();
+  /**
+   * The last concluded attempt self-reported `authenticated` but no backend probe has yet
+   * independently confirmed a usable session. That claim is never trusted (issue #144): the next
+   * `beginAttempt` grades it as a failed cycle instead of granting a fresh attempt un-penalized.
+   * `recordSuccess` clears it (the usable session was verified); every other settle either leaves
+   * it standing by re-claiming (`accepted`) or records its own cycle conclusion, which supersedes
+   * the earlier unverified claim (failure, challenge) — so exactly one penalty lands per cycle.
+   */
+  private unconfirmedClaim = false;
 
   constructor(options: FacebookLoginCircuitBreakerOptions = {}) {
     this.baseCooldownMs = options.baseCooldownMs ?? FACEBOOK_LOGIN_GATE_DEFAULTS.baseCooldownMs;
@@ -47,6 +56,15 @@ export class FacebookLoginCircuitBreaker {
     now = Math.floor(now);
     if (this.activePermit !== undefined || this.openReason !== undefined) return undefined;
     if (this.failures > 0 && now < this.blockUntil) return undefined;
+    if (this.unconfirmedClaim) {
+      // The previous attempt self-claimed `authenticated` and no probe has verified it: grade that
+      // cycle as failed before this one may even be considered, then refuse immediately either way
+      // (the fresh cooldown cannot have expired within the same call). A repeated unverified
+      // acceptance therefore still decelerates and eventually opens the gate instead of looping.
+      this.unconfirmedClaim = false;
+      this.applyFailure(now);
+      return undefined;
+    }
     const permit: FacebookLoginAttemptPermit = Object.freeze({ id: Symbol('facebook-login-attempt') });
     this.activePermit = permit;
     return permit;
@@ -64,10 +82,15 @@ export class FacebookLoginCircuitBreaker {
     this.activePermit = undefined;
     if (outcome === 'failure') this.applyFailure(now);
     else if (outcome === 'challenge') this.openReason = 'challenge';
+    // 'accepted' leaves an unverified self-claim standing; every other outcome is either its own
+    // cycle's conclusion (failure, challenge) or an already-consumed/waiting state, so the claim
+    // does not carry forward.
+    this.unconfirmedClaim = outcome === 'accepted';
   }
 
   recordCycleFailure(now = Date.now()): void {
     if (this.openReason !== undefined) return;
+    this.unconfirmedClaim = false;
     this.applyFailure(now);
   }
 
@@ -75,6 +98,7 @@ export class FacebookLoginCircuitBreaker {
     this.failures = 0;
     this.blockUntil = 0;
     this.openReason = undefined;
+    this.unconfirmedClaim = false;
   }
 
   snapshot(now = Date.now()): FacebookLoginGateSnapshot {

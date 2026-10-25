@@ -83,8 +83,30 @@ describe('Facebook backend login gate', () => {
     await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
   });
 
-  it('keeps the breaker in memory across backend reconstruction only when the same gate is reused', async () => {
-    const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 10, maxCooldownMs: 40, maxFailures: 3 });
+  it('grades a detached attempt whose accepted self-claim was never probe-verified', async () => {
+    const state = setup();
+    let settle!: (value: { outcome: 'authenticated' }) => void;
+    const attempt = vi.spyOn(state.marketplaceLogin, 'attempt')
+      .mockImplementationOnce(() => new Promise((resolve) => { settle = resolve; }))
+      .mockImplementation(async () => ({ outcome: 'timeout' as const, code: 'LOGIN_REQUIRED' as const }));
+    mockProbe(state.marketplaceProbe, [loginRequired, loginRequired]);
+    // The first request aborts while the login is still waiting for approval; the attempt keeps
+    // running detached and concludes 'authenticated' with nobody around to confirm it through a
+    // probe. The next cycle must grade that unverified self-claim instead of restarting freely.
+    const budgeted = new AbortController();
+    setTimeout(() => budgeted.abort(new Error('deadline exceeded')), 20);
+    await expect(state.marketplace.search(search, budgeted.signal)).rejects.toBeInstanceOf(Error);
+    settle({ outcome: 'authenticated' });
+    // Let the detached attempt's promise chain finish settle and clear the registration before the
+    // next request consults the gate; otherwise that request might join the finished attempt.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await expect(state.marketplace.search(search, signal())).rejects.toMatchObject({ name: 'ProviderError', code: 'LOGIN_REQUIRED' });
+    expect(attempt).toHaveBeenCalledTimes(1);
+    expect(state.gate.snapshot()).toMatchObject({ status: 'cooldown', failures: 1 });
+    await state.browser.close();
+  });
+
+  it('keeps the breaker in memory across backend reconstruction only when the same gate is reused', async () => {    const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 10, maxCooldownMs: 40, maxFailures: 3 });
     const state = setup(gate);
     mockProbe(state.marketplaceProbe, [loginRequired, loginRequired]);
     const attempt = mockLogin(state.marketplaceLogin);

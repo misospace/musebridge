@@ -54,7 +54,9 @@ describe('FacebookLoginCircuitBreaker', () => {
     gate.recordSuccess(51);
     expect(gate.snapshot(51)).toEqual({ status: 'closed' });
     expect(gate.beginAttempt(51)).toBeUndefined();
-    gate.settleAttempt(inflight, 'accepted', 52);
+    // Release-only settle: the permit is dropped without grading cycles (an 'accepted' settle
+    // would grade the claim now covered by the dedicated tests above).
+    gate.settleAttempt(inflight, 'abandoned', 52);
     expect(gate.beginAttempt(52)).toBeDefined();
   });
 
@@ -76,5 +78,38 @@ describe('FacebookLoginCircuitBreaker', () => {
     expect(() => new FacebookLoginCircuitBreaker({ maxFailures: 0 })).toThrow(RangeError);
     expect(() => new FacebookLoginCircuitBreaker({ maxFailures: 1.5 })).toThrow(RangeError);
     expect(() => new FacebookLoginCircuitBreaker({ baseCooldownMs: 100, maxCooldownMs: 50 })).toThrow(RangeError);
+  });
+
+  describe('unconfirmed accepted self-claims', () => {
+    it('grades an unverified acceptance as one failed cycle at the next attempt', () => {
+      const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
+      const permit = gate.beginAttempt(0)!;
+      gate.settleAttempt(permit, 'accepted', 0);
+      // The self-claim is invisible until the next request asks for an attempt, then it is graded.
+      expect(gate.snapshot(10)).toEqual({ status: 'closed' });
+      expect(gate.beginAttempt(10)).toBeUndefined();
+      expect(gate.snapshot(10)).toEqual({ status: 'cooldown', failures: 1, blockedForMs: 50 });
+      expect(gate.beginAttempt(10)).toBeUndefined();
+    });
+
+    it('clears the claim on verified success and never carries it into later cycles', () => {
+      const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
+      let permit = gate.beginAttempt(0)!;
+      gate.settleAttempt(permit, 'accepted', 0);
+      expect(gate.beginAttempt(10)).toBeUndefined();
+      // A usable session verified by an independent probe resets the account, claim included.
+      gate.recordSuccess(11);
+      expect(gate.snapshot(11)).toEqual({ status: 'closed' });
+
+      permit = gate.beginAttempt(12)!;
+      gate.settleAttempt(permit, 'accepted', 12);
+      expect(gate.beginAttempt(13)).toBeUndefined();
+      // After the due cooldown a fresh attempt is granted with a clean claim, so its own failure
+      // settles exactly one penalty; the consumed acceptance is not graded a second time.
+      permit = gate.beginAttempt(63)!;
+      gate.settleAttempt(permit, 'failure', 63);
+      expect(gate.snapshot(63)).toEqual({ status: 'cooldown', failures: 2, blockedForMs: 100 });
+      expect(gate.beginAttempt(163)).toBeDefined();
+    });
   });
 });
