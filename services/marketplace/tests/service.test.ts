@@ -501,6 +501,7 @@ describe('fixture MCP service', () => {
       expect(service.messengerBrowser?.profileDir).toBe(join(profileRoot, 'messenger'));
       expect(service.messengerProbe?.probeUrl).toBe('http://127.0.0.1:3210/marketplace/inbox/');
       expect(service.browser.profileDir).not.toBe(service.messengerBrowser?.profileDir);
+      expect(service.loginGate).toBeDefined();
     } finally {
       await service.close();
       rmSync(profileRoot, { recursive: true, force: true });

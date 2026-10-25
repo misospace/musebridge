@@ -35,17 +35,26 @@ import {
 } from './facebook-messenger-url.js';
 import { assertFacebookOrigin, FacebookSessionProbe, type FacebookProbeCode } from './facebook.js';
 import { FacebookCredentialLogin } from './facebook-login.js';
+import { FacebookLoginCircuitBreaker, type FacebookLoginAttemptPermit, type FacebookLoginScope } from './facebook-login-circuit-breaker.js';
 import {
   MessengerInboxGraphQLCollector,
   parseMessengerInboxGraphQLRequest,
   type MessengerInboxGraphQLObservation
 } from './facebook-messenger-inbox-graphql.js';
 
+/**
+ * The scope this backend owns in the shared account-level login gate. The Messenger profile is its
+ * own browser session, so a usable session verified here only clears Messenger's own penalty; the
+ * Marketplace scope keeps its own.
+ */
+const LOGIN_SCOPE: FacebookLoginScope = 'messenger';
+
 export interface FacebookMessengerBackendOptions {
   browser: BrowserSessionManager;
   probe: FacebookSessionProbe;
   /** Optional env-backed login instance isolated to the Messenger browser profile. */
   login?: FacebookCredentialLogin;
+  loginGate?: FacebookLoginCircuitBreaker;
   /** Probe the existing session only; never log in, extract threads, or open a conversation. */
   probeOnly?: boolean;
   inboxPath?: string;
@@ -61,6 +70,7 @@ export class FacebookMessengerBackend implements ConversationBackend {
   private readonly browser: BrowserSessionManager;
   private readonly probe: FacebookSessionProbe;
   private readonly login: FacebookCredentialLogin | undefined;
+  readonly loginGate: FacebookLoginCircuitBreaker;
   private readonly probeOnly: boolean;
   private readonly inboxPath: string;
   private readonly navigationTimeoutMs: number;
@@ -85,10 +95,13 @@ export class FacebookMessengerBackend implements ConversationBackend {
     if (options.login !== undefined && !(options.login instanceof FacebookCredentialLogin)) {
       throw new TypeError('options.login must be a FacebookCredentialLogin');
     }
-
+    if (options.loginGate !== undefined && !(options.loginGate instanceof FacebookLoginCircuitBreaker)) {
+      throw new TypeError('options.loginGate must be a FacebookLoginCircuitBreaker');
+    }
     this.browser = options.browser;
     this.probe = options.probe;
     this.login = options.login;
+    this.loginGate = options.loginGate ?? new FacebookLoginCircuitBreaker();
     this.probeOnly = options.probeOnly ?? false;
     if (typeof this.probeOnly !== 'boolean') throw new TypeError('probeOnly must be a boolean');
     this.navigationTimeoutMs = options.navigationTimeoutMs ?? 8_000;
@@ -401,6 +414,17 @@ export class FacebookMessengerBackend implements ConversationBackend {
       throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook session could not be verified.');
     }
 
+    if (session.status === 'session_usable') this.loginGate.recordSuccess(LOGIN_SCOPE);
+
+    // A captcha or checkpoint the probe observed is a challenge only a human can clear, so it
+    // hard-opens the shared gate for every scope: the scope that first observes the challenge
+    // owns that open, so no request may submit credentials while the challenge stands (issue
+    // #144). The probe-only diagnostics run observes the same states, so it arms the gate before
+    // it reports the disabled surface.
+    if (session.status === 'session_needs_reauth' && session.code !== 'LOGIN_REQUIRED') {
+      this.loginGate.recordChallenge(LOGIN_SCOPE);
+    }
+
     if (this.probeOnly) {
       if (session.code) {
         throw new MarketplaceProviderError(session.code, messengerSessionMessage(session.code));
@@ -415,6 +439,15 @@ export class FacebookMessengerBackend implements ConversationBackend {
       }
       session = await this.confirmCredentialLogin(signal);
       if (session.status !== 'session_usable') {
+        // A captcha or checkpoint the confirming probe observed is a challenge only a human can
+        // clear, so it hard-opens the shared gate for every scope: a challenge is a fact about
+        // the profile, whoever noticed it, and the scope that first observes it owns that open
+        // (issue #144).
+        if (session.status === 'session_needs_reauth' && session.code !== 'LOGIN_REQUIRED') {
+          this.loginGate.recordChallenge(LOGIN_SCOPE);
+        } else if (recovery.ownsAttempt) {
+          this.loginGate.recordCycleFailure(LOGIN_SCOPE);
+        }
         const code = session.code ?? 'SESSION_INVALID';
         throw new MarketplaceProviderError(code, messengerSessionMessage(code));
       }
@@ -427,13 +460,20 @@ export class FacebookMessengerBackend implements ConversationBackend {
   private async waitForCredentialLogin(
     code: FacebookProbeCode | undefined,
     signal: AbortSignal
-  ): Promise<{ recovered: boolean; code?: FacebookProbeCode }> {
+  ): Promise<{ recovered: boolean; code?: FacebookProbeCode; ownsAttempt?: boolean }> {
     if (!this.login || code !== 'LOGIN_REQUIRED') return { recovered: false };
     if (this.closePromise || this.loginController.signal.aborted) {
       throw this.loginController.signal.reason ?? new Error('Facebook Messenger backend is shutting down');
     }
 
-    const recovery = this.credentialRecovery ?? this.startCredentialLogin();
+    let ownsAttempt = false;
+    let recovery = this.credentialRecovery;
+    if (!recovery) {
+      const permit = this.loginGate.beginAttempt(LOGIN_SCOPE);
+      if (!permit) return { recovered: false };
+      ownsAttempt = true;
+      recovery = this.startCredentialLogin(permit);
+    }
     let outcome: { recovered: boolean; code?: FacebookProbeCode } | undefined;
     try {
       outcome = await waitForRequestBudget(recovery, signal);
@@ -442,12 +482,14 @@ export class FacebookMessengerBackend implements ConversationBackend {
       throw error;
     }
     if (outcome === undefined) return { recovered: false, code: 'LOGIN_REQUIRED' };
-    return outcome;
+    return ownsAttempt ? { ...outcome, ownsAttempt: true } : outcome;
   }
 
   private async confirmCredentialLogin(signal: AbortSignal): Promise<Awaited<ReturnType<FacebookSessionProbe['probeSession']>>> {
     try {
-      return await this.probe.probeSession(signal);
+      const session = await this.probe.probeSession(signal);
+      if (session.status === 'session_usable') this.loginGate.recordSuccess(LOGIN_SCOPE);
+      return session;
     } catch (error) {
       if (signal.aborted) throw signal.reason ?? error;
       if (error instanceof MarketplaceProviderError) throw error;
@@ -458,8 +500,8 @@ export class FacebookMessengerBackend implements ConversationBackend {
     }
   }
 
-  private startCredentialLogin(): Promise<{ recovered: boolean; code?: FacebookProbeCode }> {
-    const attempt = Promise.resolve().then(() => this.performCredentialLogin());
+  private startCredentialLogin(permit: FacebookLoginAttemptPermit): Promise<{ recovered: boolean; code?: FacebookProbeCode }> {
+    const attempt = Promise.resolve().then(() => this.performCredentialLogin(permit));
     this.credentialRecovery = attempt;
     void attempt.finally(() => {
       if (this.credentialRecovery === attempt) this.credentialRecovery = undefined;
@@ -467,19 +509,58 @@ export class FacebookMessengerBackend implements ConversationBackend {
     return attempt;
   }
 
-  private async performCredentialLogin(): Promise<{ recovered: boolean; code?: FacebookProbeCode }> {
+  private async performCredentialLogin(permit: FacebookLoginAttemptPermit): Promise<{ recovered: boolean; code?: FacebookProbeCode }> {
+    // The gate arms the revocation of this attempt together with the grant, so a challenge
+    // recorded while the attempt is in flight aborts it before it can submit any further
+    // credentials. The challenge is a fact about the account, so the other scope's probe can
+    // revoke this scope's attempt too. A manual re-auth lease takes the browser profile over,
+    // so it ends the attempt the same way: the lease owns the profile from that moment, and the
+    // attempt must not submit a credential into it.
+    const attemptSignal = AbortSignal.any([this.loginController.signal, permit.signal, this.browser.profileTakeoverSignal]);
+    // A challenge recorded between the grant and this point already revoked the permit, so the
+    // attempt must not start at all: no credential is submitted.
+    if (permit.signal.aborted) {
+      this.loginGate.settleAttempt(permit, 'abandoned');
+      throw new MarketplaceProviderError('LOGIN_REQUIRED', messengerSessionMessage('LOGIN_REQUIRED'));
+    }
+    // A lease that took the profile over between the grant and this point ended the attempt's
+    // access to it, so the attempt must not start at all: no credential is submitted. A takeover
+    // is not a challenge, so the attempt is abandoned and the scope spends no retry budget on it.
+    if (this.browser.profileTakeoverSignal.aborted) {
+      this.loginGate.settleAttempt(permit, 'abandoned');
+      throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
+    }
     try {
-      const outcome = await this.login!.attempt(this.loginController.signal);
+      const outcome = await this.login!.attempt(attemptSignal);
+      // A challenge recorded while this attempt was running revoked it, so a revoked attempt that
+      // failed is abandoned rather than counted as a failure: the scope spends no retry budget on
+      // an attempt the challenge cut short. A challenge the attempt itself hit still counts as a
+      // failed cycle for its scope, and a self-reported success still leaves an unverified claim.
+      this.loginGate.settleAttempt(permit, outcome.outcome === 'challenge'
+        ? 'challenge'
+        : outcome.outcome === 'authenticated' ? 'accepted'
+          : permit.signal.aborted ? 'abandoned' : 'failure');
       if (outcome.outcome !== 'authenticated') {
         return { recovered: false, ...(outcome.code !== undefined ? { code: outcome.code } : {}) };
       }
       return { recovered: true };
     } catch (error) {
-      if (this.loginController.signal.aborted) throw this.loginController.signal.reason ?? error;
-      if (error instanceof MarketplaceProviderError) throw error;
+      if (this.loginController.signal.aborted) {
+        this.loginGate.settleAttempt(permit, 'abandoned');
+        throw this.loginController.signal.reason ?? error;
+      }
+      if (permit.signal.aborted) {
+        // The attempt was revoked by a challenge, not by a login failure: it is abandoned, so the
+        // scope spends no retry budget on it, and the request reports the plain login requirement.
+        this.loginGate.settleAttempt(permit, 'abandoned');
+        throw new MarketplaceProviderError('LOGIN_REQUIRED', messengerSessionMessage('LOGIN_REQUIRED'));
+      }
       if (error instanceof BrowserUnavailableError) {
+        this.loginGate.settleAttempt(permit, 'abandoned');
         throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
       }
+      this.loginGate.settleAttempt(permit, 'failure');
+      if (error instanceof MarketplaceProviderError) throw error;
       throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook session could not be established.');
     }
   }
