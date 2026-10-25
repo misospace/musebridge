@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   FACEBOOK_LOGIN_GATE_DEFAULTS,
-  FacebookLoginCircuitBreaker
+  FacebookLoginCircuitBreaker,
+  type FacebookLoginScope
 } from '../src/facebook-login-circuit-breaker.js';
 
 describe('FacebookLoginCircuitBreaker', () => {
@@ -190,6 +191,173 @@ describe('FacebookLoginCircuitBreaker', () => {
       expect(gate.snapshot(10)).toEqual({ status: 'open', reason: 'failures' });
       gate.recordSuccess('messenger', 10);
       expect(gate.snapshot(10)).toEqual({ status: 'closed' });
+    });
+  });
+
+  describe('probe-observed challenges', () => {
+    it('hard-opens the account gate for every scope', () => {
+      const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
+      gate.recordChallenge('marketplace', 0);
+      expect(gate.snapshot(0)).toEqual({ status: 'open', reason: 'challenge' });
+      // The hard open is account-wide: neither scope may start a credential attempt.
+      expect(gate.beginAttempt('marketplace', 0)).toBeUndefined();
+      expect(gate.beginAttempt('messenger', 0)).toBeUndefined();
+    });
+
+    it('closes the challenge hard open only for the scope that observed it', () => {
+      const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
+      gate.recordChallenge('marketplace', 0);
+      // A usable session in the other scope proves nothing about the challenged profile, so the
+      // account stays hard open.
+      gate.recordSuccess('messenger', 0);
+      expect(gate.snapshot(0)).toEqual({ status: 'open', reason: 'challenge' });
+      expect(gate.beginAttempt('messenger', 0)).toBeUndefined();
+      // Only the scope that observed the challenge may close it.
+      gate.recordSuccess('marketplace', 0);
+      expect(gate.snapshot(0)).toEqual({ status: 'closed' });
+      expect(gate.beginAttempt('marketplace', 0)).toBeDefined();
+    });
+
+    it('keeps the standing hard-open owner when another scope observes a challenge', () => {
+      const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
+      const permit = gate.beginAttempt('marketplace', 0)!;
+      gate.settleAttempt(permit, 'challenge', 0);
+      expect(gate.snapshot(0)).toEqual({ status: 'open', reason: 'challenge' });
+      // The Messenger scope observes a challenge of its own; the standing open keeps the scope
+      // that caused it.
+      gate.recordChallenge('messenger', 0);
+      expect(gate.snapshot(0)).toEqual({ status: 'open', reason: 'challenge' });
+      gate.recordSuccess('messenger', 0);
+      expect(gate.snapshot(0)).toEqual({ status: 'open', reason: 'challenge' });
+      gate.recordSuccess('marketplace', 0);
+      expect(gate.snapshot(0)).toEqual({ status: 'closed' });
+    });
+
+    it('clears the observing scope unverified claim instead of grading it as a failed cycle', () => {
+      const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 5 });
+      const permit = gate.beginAttempt('marketplace', 0)!;
+      gate.settleAttempt(permit, 'accepted', 0);
+      // The Messenger scope owns the standing open, so the Marketplace challenge counts as a
+      // failed cycle for the scope that hit it.
+      gate.recordChallenge('messenger', 0);
+      gate.recordChallenge('marketplace', 0);
+      // The Messenger scope closes the account-wide open; the Marketplace scope keeps its own
+      // failed cycle.
+      gate.recordSuccess('messenger', 0);
+      expect(gate.snapshot(0)).toEqual({ status: 'cooldown', failures: 1, blockedForMs: 50 });
+      // The Marketplace scope's unverified acceptance was cleared by the challenge, so once its
+      // own cooldown expires the next attempt is granted instead of being graded as another
+      // failed cycle.
+      expect(gate.beginAttempt('marketplace', 60)).toBeDefined();
+    });
+  });
+
+  describe('challenge notifications', () => {
+    it('notifies a subscriber with the observing scope once the gate has opened', () => {
+      const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
+      const seen: FacebookLoginScope[] = [];
+      const observed: string[] = [];
+      gate.subscribeChallenge((scope) => {
+        seen.push(scope);
+        // The gate state is already updated when the listener runs, so the open the challenge
+        // caused is visible to the listener.
+        observed.push(gate.snapshot(0).status);
+      });
+      gate.recordChallenge('messenger', 0);
+      expect(seen).toEqual(['messenger']);
+      expect(observed).toEqual(['open']);
+    });
+
+    it('notifies a subscriber when an attempt settles as a challenge', () => {
+      const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
+      const seen: FacebookLoginScope[] = [];
+      gate.subscribeChallenge((scope) => seen.push(scope));
+      const permit = gate.beginAttempt('marketplace', 0)!;
+      gate.settleAttempt(permit, 'challenge', 0);
+      expect(seen).toEqual(['marketplace']);
+      expect(gate.snapshot(0)).toEqual({ status: 'open', reason: 'challenge' });
+    });
+
+    it('notifies a subscriber when a challenge is recorded while an open already stands', () => {
+      const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
+      const seen: FacebookLoginScope[] = [];
+      gate.subscribeChallenge((scope) => seen.push(scope));
+      gate.recordChallenge('marketplace', 0);
+      // The standing open keeps its owner, but the later observer is still told about the
+      // challenge, so an attempt it owns can be revoked.
+      gate.recordChallenge('messenger', 0);
+      expect(seen).toEqual(['marketplace', 'messenger']);
+    });
+
+    it('stops notifying after the subscription is cancelled', () => {
+      const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
+      const seen: FacebookLoginScope[] = [];
+      const unsubscribe = gate.subscribeChallenge((scope) => seen.push(scope));
+      unsubscribe();
+      gate.recordChallenge('messenger', 0);
+      expect(seen).toEqual([]);
+      // Cancelling twice is harmless.
+      expect(() => unsubscribe()).not.toThrow();
+      // A challenge reported by a settled attempt is not notified either.
+      const other = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
+      const otherSeen: FacebookLoginScope[] = [];
+      other.subscribeChallenge((scope) => otherSeen.push(scope))();
+      const permit = other.beginAttempt('marketplace', 0)!;
+      other.settleAttempt(permit, 'challenge', 0);
+      expect(otherSeen).toEqual([]);
+    });
+
+    it('keeps the gate usable when a listener throws', () => {
+      const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
+      const seen: FacebookLoginScope[] = [];
+      gate.subscribeChallenge(() => {
+        throw new Error('listener failure');
+      });
+      gate.subscribeChallenge((scope) => seen.push(scope));
+      // The throwing listener neither corrupts the gate nor breaks the caller, and the other
+      // listener is still told about the challenge.
+      expect(() => gate.recordChallenge('messenger', 0)).not.toThrow();
+      expect(seen).toEqual(['messenger']);
+      expect(gate.snapshot(0)).toEqual({ status: 'open', reason: 'challenge' });
+    });
+  });
+
+  describe('threshold cooldown under a standing open', () => {
+    it('holds a scope that reached its threshold back while another scope owns the open', () => {
+      const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 2 });
+      // The Marketplace scope fails once and is holding a second attempt.
+      gate.recordCycleFailure('marketplace', 0);
+      const marketplace = gate.beginAttempt('marketplace', 50)!;
+      // The Messenger scope observes a challenge and owns the account-wide open.
+      gate.recordChallenge('messenger', 50);
+      expect(gate.snapshot(50)).toEqual({ status: 'open', reason: 'challenge' });
+      // The in-flight Marketplace attempt fails while the Messenger open stands, so the
+      // Marketplace scope reaches its own failure threshold.
+      gate.settleAttempt(marketplace, 'failure', 50);
+      // The Marketplace scope records no verified success of its own: a usable session in a
+      // challenged profile is exactly what the open is waiting for.
+      expect(gate.snapshot(50)).toEqual({ status: 'open', reason: 'challenge' });
+      // The owning scope's verified success closes the open.
+      gate.recordSuccess('messenger', 60);
+      // The threshold scope stays held back by its own cooldown instead of getting a free
+      // attempt the moment the other scope's open clears.
+      expect(gate.snapshot(60)).toEqual({ status: 'cooldown', failures: 2, blockedForMs: 190 });
+      expect(gate.beginAttempt('marketplace', 60)).toBeUndefined();
+      expect(gate.beginAttempt('marketplace', 249)).toBeUndefined();
+      expect(gate.beginAttempt('marketplace', 250)).toBeDefined();
+    });
+
+    it('keeps the owner path invisible: its verified success clears its own penalty', () => {
+      const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 2 });
+      gate.recordCycleFailure('messenger', 0);
+      const messenger = gate.beginAttempt('messenger', 50)!;
+      gate.settleAttempt(messenger, 'failure', 50);
+      expect(gate.snapshot(50)).toEqual({ status: 'open', reason: 'failures' });
+      // The scope that owns the open records its own verified success: its penalty and cooldown
+      // are reset, so the open closing leaves nothing behind.
+      gate.recordSuccess('messenger', 60);
+      expect(gate.snapshot(60)).toEqual({ status: 'closed' });
+      expect(gate.beginAttempt('messenger', 60)).toBeDefined();
     });
   });
 

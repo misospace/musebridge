@@ -416,6 +416,15 @@ export class FacebookMessengerBackend implements ConversationBackend {
 
     if (session.status === 'session_usable') this.loginGate.recordSuccess(LOGIN_SCOPE);
 
+    // A captcha or checkpoint the probe observed is a challenge only a human can clear, so it
+    // hard-opens the shared gate for every scope: the scope that first observes the challenge
+    // owns that open, so no request may submit credentials while the challenge stands (issue
+    // #144). The probe-only diagnostics run observes the same states, so it arms the gate before
+    // it reports the disabled surface.
+    if (session.status === 'session_needs_reauth' && session.code !== 'LOGIN_REQUIRED') {
+      this.loginGate.recordChallenge(LOGIN_SCOPE);
+    }
+
     if (this.probeOnly) {
       if (session.code) {
         throw new MarketplaceProviderError(session.code, messengerSessionMessage(session.code));
@@ -430,7 +439,15 @@ export class FacebookMessengerBackend implements ConversationBackend {
       }
       session = await this.confirmCredentialLogin(signal);
       if (session.status !== 'session_usable') {
-        if (recovery.ownsAttempt) this.loginGate.recordCycleFailure(LOGIN_SCOPE);
+        // A captcha or checkpoint the confirming probe observed is a challenge only a human can
+        // clear, so it hard-opens the shared gate for every scope: a challenge is a fact about
+        // the profile, whoever noticed it, and the scope that first observes it owns that open
+        // (issue #144).
+        if (session.status === 'session_needs_reauth' && session.code !== 'LOGIN_REQUIRED') {
+          this.loginGate.recordChallenge(LOGIN_SCOPE);
+        } else if (recovery.ownsAttempt) {
+          this.loginGate.recordCycleFailure(LOGIN_SCOPE);
+        }
         const code = session.code ?? 'SESSION_INVALID';
         throw new MarketplaceProviderError(code, messengerSessionMessage(code));
       }
@@ -493,8 +510,18 @@ export class FacebookMessengerBackend implements ConversationBackend {
   }
 
   private async performCredentialLogin(permit: FacebookLoginAttemptPermit): Promise<{ recovered: boolean; code?: FacebookProbeCode }> {
+    // A challenge recorded while this attempt is in flight revokes it: the attempt is aborted
+    // before it can submit any further credentials. The challenge is a fact about the account, so
+    // the other scope's probe can revoke this scope's attempt too.
+    const challenge = new AbortController();
+    let revoked = false;
+    const unsubscribe = this.loginGate.subscribeChallenge(() => {
+      revoked = true;
+      challenge.abort(new Error('A Facebook login challenge was recorded'));
+    });
+    const attemptSignal = AbortSignal.any([this.loginController.signal, challenge.signal]);
     try {
-      const outcome = await this.login!.attempt(this.loginController.signal);
+      const outcome = await this.login!.attempt(attemptSignal);
       this.loginGate.settleAttempt(permit, outcome.outcome === 'challenge'
         ? 'challenge'
         : outcome.outcome === 'authenticated' ? 'accepted' : 'failure');
@@ -507,6 +534,12 @@ export class FacebookMessengerBackend implements ConversationBackend {
         this.loginGate.settleAttempt(permit, 'abandoned');
         throw this.loginController.signal.reason ?? error;
       }
+      if (revoked) {
+        // The attempt was revoked by a challenge, not by a login failure: it is abandoned, so the
+        // scope spends no retry budget on it, and the request reports the plain login requirement.
+        this.loginGate.settleAttempt(permit, 'abandoned');
+        throw new MarketplaceProviderError('LOGIN_REQUIRED', messengerSessionMessage('LOGIN_REQUIRED'));
+      }
       if (error instanceof BrowserUnavailableError) {
         this.loginGate.settleAttempt(permit, 'abandoned');
         throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
@@ -514,6 +547,8 @@ export class FacebookMessengerBackend implements ConversationBackend {
       this.loginGate.settleAttempt(permit, 'failure');
       if (error instanceof MarketplaceProviderError) throw error;
       throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook session could not be established.');
+    } finally {
+      unsubscribe();
     }
   }
 }
