@@ -32,8 +32,15 @@ import {
 } from './facebook-marketplace-url.js';
 import { assertFacebookOrigin, FacebookSessionProbe, type FacebookProbeCode } from './facebook.js';
 import { FacebookCredentialLogin } from './facebook-login.js';
-import { FacebookLoginCircuitBreaker, type FacebookLoginAttemptPermit } from './facebook-login-circuit-breaker.js';
+import { FacebookLoginCircuitBreaker, type FacebookLoginAttemptPermit, type FacebookLoginScope } from './facebook-login-circuit-breaker.js';
 import { validateTimeout, waitForRequestBudget } from './timeout.js';
+
+/**
+ * The scope this backend owns in the shared account-level login gate. The Marketplace profile is
+ * its own browser session, so a usable session verified here only clears Marketplace's own
+ * penalty; the Messenger scope keeps its own.
+ */
+const LOGIN_SCOPE: FacebookLoginScope = 'marketplace';
 
 export interface FacebookMarketplaceBackendOptions {
   browser: BrowserSessionManager;
@@ -211,7 +218,7 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
       throw new ProviderError('UPSTREAM_ERROR', 'The Facebook session could not be verified.');
     }
 
-    if (session.status === 'session_usable') this.loginGate.recordSuccess();
+    if (session.status === 'session_usable') this.loginGate.recordSuccess(LOGIN_SCOPE);
 
     if (session.status === 'session_needs_reauth') {
       // Credentials are submitted only for a plain login requirement. A captcha or checkpoint
@@ -229,7 +236,7 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
       }
       session = await this.confirmCredentialLogin(signal);
       if (session.status !== 'session_usable') {
-        if (recovery.ownsAttempt) this.loginGate.recordCycleFailure();
+        if (recovery.ownsAttempt) this.loginGate.recordCycleFailure(LOGIN_SCOPE);
         const code = session.code ?? 'SESSION_INVALID';
         const messages = {
           LOGIN_REQUIRED: 'Facebook Marketplace requires login.',
@@ -264,7 +271,7 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     let ownsAttempt = false;
     let recovery = this.credentialRecovery;
     if (!recovery) {
-      const permit = this.loginGate.beginAttempt();
+      const permit = this.loginGate.beginAttempt(LOGIN_SCOPE);
       if (!permit) return { recovered: false };
       ownsAttempt = true;
       recovery = this.startCredentialLogin(permit);
@@ -283,7 +290,7 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
   private async confirmCredentialLogin(signal: AbortSignal): Promise<Awaited<ReturnType<FacebookSessionProbe['probeSession']>>> {
     try {
       const session = await this.probe.probeSession(signal);
-      if (session.status === 'session_usable') this.loginGate.recordSuccess();
+      if (session.status === 'session_usable') this.loginGate.recordSuccess(LOGIN_SCOPE);
       return session;
     } catch (error) {
       if (signal.aborted) throw signal.reason ?? error;

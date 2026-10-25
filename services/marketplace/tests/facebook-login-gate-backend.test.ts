@@ -29,8 +29,19 @@ function mockProbe(probe: FacebookSessionProbe, results: Array<typeof loginRequi
   vi.spyOn(probe, 'probeSession').mockImplementation(async () => results.shift() ?? loginRequired);
 }
 
-function mockLogin(login: FacebookCredentialLogin, outcomes: Array<'timeout' | 'authenticated'> = ['timeout']) {
-  return vi.spyOn(login, 'attempt').mockImplementation(async () => ({ outcome: outcomes.shift() ?? 'timeout', code: 'LOGIN_REQUIRED' }));
+function mockLogin(login: FacebookCredentialLogin, outcomes: Array<'timeout' | 'authenticated' | 'challenge'> = ['timeout']) {
+  return vi.spyOn(login, 'attempt').mockImplementation(async () => {
+    const outcome = outcomes.shift() ?? 'timeout';
+    return { outcome, code: outcome === 'challenge' ? 'CAPTCHA_REQUIRED' as const : 'LOGIN_REQUIRED' as const };
+  });
+}
+
+/**
+ * Runs the Messenger session gate alone, without the browser work that follows it, so the shared
+ * gate's scope ownership can be exercised without a Chromium install.
+ */
+function messengerSession(messenger: FacebookMessengerBackend) {
+  return (messenger as unknown as { ensureUsableSession(signal: AbortSignal): Promise<void> }).ensureUsableSession(signal());
 }
 
 async function expectLoginRequired(promise: Promise<unknown>, message: string) {
@@ -127,6 +138,43 @@ describe('Facebook backend login gate', () => {
     mockProbe(state.marketplaceProbe, [loginRequired, loginRequired]);
     const attempt = mockLogin(state.marketplaceLogin);
     await expectLoginRequired(state.marketplace.search(search, signal()), 'Facebook Marketplace requires login.');
+    await expectLoginRequired(state.marketplace.search(search, signal()), 'Facebook Marketplace requires login.');
+    expect(attempt).toHaveBeenCalledTimes(1);
+    await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
+  });
+
+  it('does not let a usable Messenger session clear a Marketplace challenge hard open', async () => {
+    const state = setup(new FacebookLoginCircuitBreaker({ baseCooldownMs: 60_000, maxCooldownMs: 120_000, maxFailures: 3 }));
+    mockProbe(state.marketplaceProbe, [loginRequired]);
+    const attempt = mockLogin(state.marketplaceLogin, ['challenge']);
+    await expect(state.marketplace.search(search, signal())).rejects.toMatchObject({ name: 'ProviderError', code: 'CAPTCHA_REQUIRED' });
+    expect(attempt).toHaveBeenCalledTimes(1);
+    expect(state.gate.snapshot()).toEqual({ status: 'open', reason: 'challenge' });
+    // The Messenger profile is a separate browser session: its usable session proves nothing
+    // about the Marketplace profile that hit the challenge.
+    mockProbe(state.messengerProbe, [usable]);
+    const messengerAttempt = mockLogin(state.messengerLogin);
+    await expect(messengerSession(state.messenger)).resolves.toBeUndefined();
+    expect(messengerAttempt).not.toHaveBeenCalled();
+    expect(state.gate.snapshot()).toEqual({ status: 'open', reason: 'challenge' });
+    // The Marketplace gate is still hard open, so the next request never submits credentials.
+    await expect(state.marketplace.search(search, signal())).rejects.toMatchObject({ name: 'ProviderError', code: 'LOGIN_REQUIRED' });
+    expect(attempt).toHaveBeenCalledTimes(1);
+    await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
+  });
+
+  it('does not let a usable Messenger session clear a Marketplace cooldown', async () => {
+    const state = setup(new FacebookLoginCircuitBreaker({ baseCooldownMs: 60_000, maxCooldownMs: 120_000, maxFailures: 3 }));
+    mockProbe(state.marketplaceProbe, [loginRequired]);
+    const attempt = mockLogin(state.marketplaceLogin, ['timeout']);
+    await expectLoginRequired(state.marketplace.search(search, signal()), 'Facebook Marketplace requires login.');
+    expect(attempt).toHaveBeenCalledTimes(1);
+    expect(state.gate.snapshot()).toMatchObject({ status: 'cooldown', failures: 1 });
+    // The Messenger success clears only the Messenger scope's own penalty.
+    mockProbe(state.messengerProbe, [usable]);
+    await expect(messengerSession(state.messenger)).resolves.toBeUndefined();
+    expect(state.gate.snapshot()).toMatchObject({ status: 'cooldown', failures: 1 });
+    // The Marketplace cooldown still holds, so the second request never submits credentials.
     await expectLoginRequired(state.marketplace.search(search, signal()), 'Facebook Marketplace requires login.');
     expect(attempt).toHaveBeenCalledTimes(1);
     await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
