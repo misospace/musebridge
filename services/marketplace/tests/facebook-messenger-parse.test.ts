@@ -5,6 +5,7 @@ import {
   interpretMessengerInboxPage,
   interpretMessengerThreadPage
 } from '../src/facebook-messenger-parse.js';
+import { MESSENGER_EXTRACT_LIMITS } from '../src/facebook-messenger-extract.js';
 import type { ExtractedInboxPage, ExtractedThreadPage } from '../src/facebook-messenger-extract.js';
 
 const authenticatedSignals = {
@@ -34,6 +35,30 @@ function thread(overrides: Partial<ExtractedThreadPage> = {}): ExtractedThreadPa
     url: 'https://www.facebook.com/messages/t/1684432532/',
     signals: { ...authenticatedSignals },
     messages: [],
+    ...overrides
+  };
+}
+
+// A proven window needs explicit timestamps on every candidate and a report of the scan bounds.
+function provenDiagnostics(overrides: Partial<NonNullable<ExtractedThreadPage['diagnostics']>> = {}) {
+  return {
+    hasMessageLog: true,
+    hasArticleMessages: false,
+    hasExplicitEmptyState: false,
+    scannedRows: 2,
+    unattributedRows: 0,
+    undatedMessages: 0,
+    scanBoundExceeded: false,
+    truncated: false,
+    ...overrides
+  };
+}
+
+function datedMessage(index: number, overrides: Record<string, unknown> = {}) {
+  return {
+    sender: 'you' as const,
+    text: `Synthetic message ${index}`,
+    sentAt: new Date(Date.UTC(2026, 8, 14, 10, 0, index)).toISOString(),
     ...overrides
   };
 }
@@ -131,50 +156,92 @@ describe('Messenger page interpretation', () => {
       page: thread({
         messages: [
           { sender: 'other', senderName: 'Synthetic Seller', text: 'Hello', sentAt: '2026-09-14T10:30:00.000Z' },
-          { sender: 'you', text: 'Thanks' },
-          { text: 'Unattributed must not be mapped' },
-          { sender: 'other', senderName: ' ', text: 'bad optional name' }
+          { sender: 'you', text: 'Thanks', sentAt: '2026-09-14T10:31:00.000Z' },
+          { text: 'Unattributed must not be mapped', sentAt: '2026-09-14T10:32:00.000Z' },
+          { sender: 'other', senderName: ' ', text: 'bad optional name', sentAt: '2026-09-14T10:33:00.000Z' }
         ],
-        diagnostics: {
-          hasMessageLog: true, hasArticleMessages: false, hasExplicitEmptyState: false,
-          scannedRows: 4, unattributedRows: 1, truncated: false
-        }
+        diagnostics: provenDiagnostics({ scannedRows: 4, unattributedRows: 1 })
       }),
       baseUrl: 'https://www.facebook.com',
       threadId: '1684432532'
     });
     expect(outcome).toEqual({ kind: 'messages', messages: [
       { sender: 'other', sender_name: 'Synthetic Seller', text: 'Hello', sent_at: '2026-09-14T10:30:00.000Z' },
-      { sender: 'you', text: 'Thanks' },
-      { sender: 'other', text: 'bad optional name' }
+      { sender: 'you', text: 'Thanks', sent_at: '2026-09-14T10:31:00.000Z' },
+      { sender: 'other', text: 'bad optional name', sent_at: '2026-09-14T10:33:00.000Z' }
     ], coverage: { window: 'tail', scanned_rows: 4, truncated: false } });
     expect(interpretMessengerThreadPage({ page: thread(), baseUrl: 'https://www.facebook.com', threadId: '1684432532' })).toMatchObject({
       kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger thread page layout was not recognized.'
     });
   });
 
-  it('reports the tail window and truncation from extraction diagnostics', () => {
-    const messages = [{ sender: 'you' as const, text: 'Newest [synthetic-reply-token]' }];
-    const truncated = interpretMessengerThreadPage({
+  it('reports a timestamp-proven tail window and flags a window that left messages out', () => {
+    // The window is anchored by explicit timestamps, so more candidates than the window bound
+    // truncates it — the coverage says so instead of presenting the window as the whole thread.
+    const overflow = interpretMessengerThreadPage({
       page: thread({
-        messages,
-        diagnostics: {
-          hasMessageLog: true, hasArticleMessages: false, hasExplicitEmptyState: false,
-          scannedRows: 50, unattributedRows: 0, truncated: true
-        }
+        messages: Array.from({ length: MESSENGER_EXTRACT_LIMITS.maxMessages + 1 }, (_, index) => datedMessage(index)),
+        diagnostics: provenDiagnostics({ scannedRows: MESSENGER_EXTRACT_LIMITS.maxMessages + 1 })
       }),
       baseUrl: 'https://www.facebook.com',
       threadId: '1684432532'
     });
-    expect(truncated).toMatchObject({ kind: 'messages', coverage: { window: 'tail', scanned_rows: 50, truncated: true } });
-    // An extraction that cannot report its scan bounds has proven nothing outside its window is
-    // absent, so coverage fails closed to truncated rather than claiming full coverage.
-    const withoutDiagnostics = interpretMessengerThreadPage({
-      page: thread({ messages }),
+    expect(overflow).toMatchObject({
+      kind: 'messages',
+      coverage: { window: 'tail', scanned_rows: MESSENGER_EXTRACT_LIMITS.maxMessages + 1, truncated: true }
+    });
+    if (overflow.kind !== 'messages') throw new Error('expected a messages outcome');
+    expect(overflow.messages).toHaveLength(MESSENGER_EXTRACT_LIMITS.maxMessages);
+    // The newest candidate by timestamp is inside the window; the oldest one fell out of it.
+    expect(overflow.messages[overflow.messages.length - 1]?.text).toBe(`Synthetic message ${MESSENGER_EXTRACT_LIMITS.maxMessages}`);
+
+    const complete = interpretMessengerThreadPage({
+      page: thread({ messages: [datedMessage(0), datedMessage(1)], diagnostics: provenDiagnostics() }),
       baseUrl: 'https://www.facebook.com',
       threadId: '1684432532'
     });
-    expect(withoutDiagnostics).toMatchObject({ kind: 'messages', coverage: { window: 'tail', scanned_rows: 0, truncated: true } });
+    expect(complete).toMatchObject({ kind: 'messages', coverage: { window: 'tail', scanned_rows: 2, truncated: false } });
+  });
+
+  it('fails closed with a static typed error when the newest end cannot be proven', () => {
+    // A candidate without an explicit timestamp cannot be placed on the thread's timeline.
+    expect(interpretMessengerThreadPage({
+      page: thread({
+        messages: [datedMessage(0), { sender: 'you', text: 'Undated candidate' }],
+        diagnostics: provenDiagnostics({ undatedMessages: 1 })
+      }),
+      baseUrl: 'https://www.facebook.com',
+      threadId: '1684432532'
+    })).toEqual({
+      kind: 'error',
+      code: 'UPSTREAM_ERROR',
+      message: 'The newest message in the Facebook Messenger thread could not be established from explicit timestamps.'
+    });
+
+    // More rendered rows than the scan bound means at least one row was never examined.
+    expect(interpretMessengerThreadPage({
+      page: thread({
+        messages: [datedMessage(0), datedMessage(1)],
+        diagnostics: provenDiagnostics({ scanBoundExceeded: true, truncated: true })
+      }),
+      baseUrl: 'https://www.facebook.com',
+      threadId: '1684432532'
+    })).toEqual({
+      kind: 'error',
+      code: 'UPSTREAM_ERROR',
+      message: 'The Facebook Messenger thread renders more rows than the supported scan bound; its newest message could not be established.'
+    });
+
+    // An extraction that cannot report its scan bounds has proven no coverage at all.
+    expect(interpretMessengerThreadPage({
+      page: thread({ messages: [datedMessage(0), datedMessage(1)] }),
+      baseUrl: 'https://www.facebook.com',
+      threadId: '1684432532'
+    })).toEqual({
+      kind: 'error',
+      code: 'UPSTREAM_ERROR',
+      message: 'The Facebook Messenger thread coverage could not be established.'
+    });
   });
 
   it('does not trust content from a redirected address, but login still wins on a redirected login page', () => {
@@ -225,8 +292,8 @@ describe('Messenger page interpretation', () => {
   });
 
   it.each([
-    [{ hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false, scannedRows: 1, unattributedRows: 1, truncated: false }, 'The Facebook Messenger article message layout is unsupported; sender attribution was not verified.'],
-    [{ hasMessageLog: true, hasArticleMessages: false, hasExplicitEmptyState: true, scannedRows: 0, unattributedRows: 0, truncated: false }, 'The Facebook Messenger empty thread layout could not be verified.']
+    [{ hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false, scannedRows: 1, unattributedRows: 1, undatedMessages: 0, scanBoundExceeded: false, truncated: false }, 'The Facebook Messenger article message layout is unsupported; sender attribution was not verified.'],
+    [{ hasMessageLog: true, hasArticleMessages: false, hasExplicitEmptyState: true, scannedRows: 0, unattributedRows: 0, undatedMessages: 0, scanBoundExceeded: false, truncated: false }, 'The Facebook Messenger empty thread layout could not be verified.']
   ])('reports a static unsupported-layout diagnostic without returning content', (diagnostics, message) => {
     const outcome = interpretMessengerThreadPage({
       page: thread({ diagnostics }), baseUrl: 'https://www.facebook.com', threadId: '1684432532'
@@ -237,8 +304,8 @@ describe('Messenger page interpretation', () => {
   it('does not attribute unrelated role rows when an unsupported article conversation is present', () => {
     expect(interpretMessengerThreadPage({
       page: thread({
-        messages: [{ sender: 'you', text: 'Unrelated widget [synthetic-reply-token]' }],
-        diagnostics: { hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false, scannedRows: 1, unattributedRows: 0, truncated: false }
+        messages: [{ sender: 'you', text: 'Unrelated widget [synthetic-reply-token]', sentAt: '2026-09-14T10:30:00.000Z' }],
+        diagnostics: provenDiagnostics({ hasArticleMessages: true, scannedRows: 1 })
       }),
       baseUrl: 'https://www.facebook.com', threadId: '1684432532'
     })).toEqual({ kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger article message layout is unsupported; sender attribution was not verified.' });

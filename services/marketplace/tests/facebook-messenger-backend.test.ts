@@ -23,7 +23,7 @@ const fixtures = new Map([
   'inbox-buttons-graphql.html', 'inbox-buttons-graphql-delayed.html', 'inbox-buttons-graphql-paginated.html', 'inbox-buttons-graphql-stalled.html',
   'inbox-graphql-error-dom.html',
   'thread-normal.html', 'thread-layout-changed.html', 'thread-articles-unattributed.html', 'thread-empty.html', 'thread-token-bounds.html',
-  'thread-composer.html', 'thread-no-composer.html', 'thread-two-composers.html'
+  'thread-composer.html', 'thread-no-composer.html', 'thread-two-composers.html', 'thread-undated.html'
 ].map((name) => [name, readFileSync(new URL(name, fixtureDir), 'utf8')]));
 
 let server: Server;
@@ -455,16 +455,26 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
     expect(result).toMatchObject({
       thread_id: '1684432532',
       messages: [
-        { sender: 'other', sender_name: 'Synthetic Seller', text: 'Hello there.10:30' },
-        { sender: 'you', text: 'Is the desk available?' },
-        { sender: 'other', sender_name: 'Synthetic Seller', text: 'Yes, it is available.10:30' },
-        { sender: 'other', sender_name: 'Example Buyer', text: 'Could I pick it up tomorrow?' }
+        { sender: 'other', sender_name: 'Synthetic Seller', text: 'Hello there.10:30', sent_at: '2026-09-14T10:30:00.000Z' },
+        { sender: 'you', text: 'Is the desk available?10:31', sent_at: '2026-09-14T10:31:00.000Z' },
+        { sender: 'other', sender_name: 'Synthetic Seller', text: 'Yes, it is available.10:32', sent_at: '2026-09-14T10:32:00.000Z' },
+        { sender: 'other', sender_name: 'Example Buyer', text: 'Could I pick it up tomorrow?10:33', sent_at: '2026-09-14T10:33:00.000Z' }
       ],
-      // The six synthetic rows all fit the bounded window (two are not attributed messages),
-      // so the read proves an untruncated tail-anchored scan.
+      // All six synthetic rows fit the bounded window (two are not attributed messages) and every
+      // attributed row carries an explicit timestamp, so the newest end of the thread is proven.
       coverage: { window: 'tail', scanned_rows: 6, truncated: false }
     });
     expect(requests).toEqual(['/marketplace/inbox/', '/messages/t/1684432532/']);
+  });
+
+  it('fails closed when no explicit timestamp establishes the newest end of the thread', async () => {
+    configure('inbox-normal.html', 'thread-undated.html');
+    const backend = createBackend({ settleTimeoutMs: 200 });
+    await expectProviderError(
+      backend.readThread(readInput(), new AbortController().signal),
+      'UPSTREAM_ERROR',
+      'The newest message in the Facebook Messenger thread could not be established from explicit timestamps.'
+    );
   });
 
   it.each([

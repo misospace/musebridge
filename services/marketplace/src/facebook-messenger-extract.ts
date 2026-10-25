@@ -2,7 +2,10 @@ export const MESSENGER_EXTRACT_LIMITS = {
   maxThreads: 20,
   maxThreadsScan: 60,
   maxMessages: 50,
-  maxMessagesScan: 120,
+  // The maximum number of rendered message rows a read may examine. Every examined row must be
+  // examined for its own explicit timestamp, so a thread that renders more rows than this bound
+  // cannot be oriented by timestamp and the read fails closed instead of guessing an end.
+  maxMessagesScan: 500,
   maxTextLength: 2000,
   maxPreviewLength: 280,
   maxHrefsPerAnchor: 12
@@ -43,6 +46,8 @@ export interface ExtractedMessage {
 export interface ExtractedThreadPage {
   url: string;
   signals: ExtractedMessengerSignals;
+  /** Attributed message rows found in the page, in DOM order. This is the candidate set; the
+   *  newest end of the window is selected from it by explicit timestamps, never by DOM order. */
   messages: ExtractedMessage[];
   diagnostics?: {
     hasMessageLog: boolean;
@@ -50,8 +55,13 @@ export interface ExtractedThreadPage {
     hasExplicitEmptyState: boolean;
     scannedRows: number;
     unattributedRows: number;
-    // True when the scan stopped before every row present in the DOM was examined — either the
-    // scan cap or the message cap cut it short — so messages may exist outside the window.
+    /** Candidates that carry no usable explicit timestamp, so the newest end is not proven. */
+    undatedMessages: number;
+    /** True when the page renders more rows than the scan bound, so not every rendered row could
+     *  be examined and the newest end of the thread is not proven. */
+    scanBoundExceeded: boolean;
+    // True when the scan stopped before every row present in the DOM was examined — so rows may
+    // exist outside the examined window.
     truncated: boolean;
   };
 }
@@ -156,7 +166,6 @@ export function extractMessengerInboxPage(options: ExtractMessengerInboxOptions)
 export function extractMessengerThreadPage(options: ExtractMessengerThreadOptions): ExtractedThreadPage {
   const limits = options.limits;
   const boundedLimit = (value: number): number => Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
-  const maxMessages = boundedLimit(limits.maxMessages);
   const maxMessagesScan = boundedLimit(limits.maxMessagesScan);
   const maxTextLength = boundedLimit(limits.maxTextLength);
   const body = document.body ?? document.documentElement;
@@ -186,22 +195,25 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
     hasExplicitEmptyState: /no messages yet|no conversations|nothing here yet/i.test((messageLog?.textContent ?? '').slice(0, 20_000)),
     scannedRows: 0,
     unattributedRows: 0,
+    undatedMessages: 0,
+    scanBoundExceeded: false,
     truncated: false
   };
-  const rows = document.querySelectorAll('[role="row"]');
-  // Scan newest-first, starting at the last row in DOM order. The window claim is deliberately
-  // scoped to the observed DOM: the collected window contains the newest rows of the rendered
-  // log, independent of how long the thread is beyond what the page renders. A head-anchored
-  // window made a just-sent idempotency token invisible to send reconciliation on long threads.
-  // The collected order is reversed at the end so the returned window stays chronological.
+  // The conversation's own rows are the evidence, so they are collected from the message log when
+  // the page has one; only a page without a message log falls back to a document-wide scan.
+  const rows = messageLog !== null
+    ? messageLog.querySelectorAll('[role="row"]')
+    : document.querySelectorAll('[role="row"]');
+  // Every rendered row is examined: the newest end of the window is proven by explicit timestamps
+  // on the rows themselves, so a row that was never examined could be the newest one. DOM order is
+  // never used to decide which end is newest. When the page renders more rows than the scan bound,
+  // a subset cannot prove the newest end, so the scan stops and reports the exceeded bound rather
+  // than silently presenting a partial view as the tail.
   const scanLength = Math.min(rows.length, maxMessagesScan);
+  diagnostics.scanBoundExceeded = rows.length > maxMessagesScan;
+  if (diagnostics.scanBoundExceeded) diagnostics.truncated = true;
   for (let offset = 0; offset < scanLength; offset += 1) {
-    if (messages.length >= maxMessages) {
-      // The message cap stopped the scan before every row in the window was examined.
-      diagnostics.truncated = true;
-      break;
-    }
-    const row = rows[rows.length - 1 - offset];
+    const row = rows[offset];
     if (!row) continue;
     diagnostics.scannedRows += 1;
     const label = row.getAttribute('aria-label') ?? '';
@@ -232,12 +244,11 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
       const year = date.getUTCFullYear();
       if (Number.isFinite(date.getTime()) && year >= 2000 && year <= 2100) message.sentAt = date.toISOString();
     }
+    // An attributed row without a usable explicit timestamp cannot be placed in the thread's
+    // timeline, so it counts against the orientation proof.
+    if (!message.sentAt) diagnostics.undatedMessages += 1;
     messages.push(message);
   }
-  // Rows older than the scan window were never examined; report that honestly rather than
-  // presenting the tail window as the whole thread.
-  if (scanLength < rows.length) diagnostics.truncated = true;
-  messages.reverse();
   return { url, signals, messages, diagnostics };
 }
 
@@ -258,6 +269,56 @@ export function classifyMessengerComposerCount(composerCount: number): Messenger
   if (composerCount <= 0) return 'absent';
   if (composerCount === 1) return 'present';
   return 'ambiguous';
+}
+
+/**
+ * Why the newest end of a thread read window could not be established. Every reason is a
+ * fail-closed condition: the read reports a typed upstream error instead of guessing an end.
+ */
+export type MessengerWindowUnprovenReason = 'undated_messages' | 'scan_bound_exceeded' | 'missing_diagnostics';
+
+export type MessengerWindowOutcome =
+  | { kind: 'window'; messages: ExtractedMessage[]; truncated: boolean }
+  | { kind: 'unproven'; reason: MessengerWindowUnprovenReason };
+
+/**
+ * Pure decision contract for a thread read window: the newest end of the window is established
+ * only by the explicit timestamps carried on the message rows themselves. DOM order is never used
+ * to decide which end is newest, and the window is ordered by those timestamps rather than by
+ * the order the rows happened to render in — the deployed Messenger DOM ordering is unvalidated,
+ * so an ordering assumption is not a proof. Messages that share one timestamp keep their relative
+ * order among themselves.
+ *
+ * This has no page or browser APIs, so it is unit-testable on the Node side and is applied there
+ * after the thin in-page probe collects the candidates.
+ */
+export function selectMessengerThreadWindow(input: {
+  candidates: ExtractedMessage[];
+  diagnostics?: ExtractedThreadPage['diagnostics'];
+  maxMessages: number;
+}): MessengerWindowOutcome {
+  const diagnostics = input.diagnostics;
+  // An extraction that cannot report its scan bounds has proven nothing about the rows it did
+  // not examine, so the coverage of the window is unknown.
+  if (!diagnostics) return { kind: 'unproven', reason: 'missing_diagnostics' };
+  // More rendered rows than the scan bound means at least one row was never examined, and that
+  // row could carry the newest timestamp.
+  if (diagnostics.scanBoundExceeded) return { kind: 'unproven', reason: 'scan_bound_exceeded' };
+  // A candidate without an explicit timestamp cannot be placed on the timeline, so the newest
+  // end of the thread is not proven.
+  if (input.candidates.some((candidate) => !candidate.sentAt)) {
+    return { kind: 'unproven', reason: 'undated_messages' };
+  }
+  const maxMessages = Number.isFinite(input.maxMessages) ? Math.max(0, Math.floor(input.maxMessages)) : 0;
+  const byNewestFirst = [...input.candidates].sort((left, right) => {
+    const leftTime = Date.parse(left.sentAt ?? '');
+    const rightTime = Date.parse(right.sentAt ?? '');
+    if (!Number.isFinite(leftTime) || !Number.isFinite(rightTime)) return 0;
+    return rightTime - leftTime;
+  });
+  const truncated = input.candidates.length > maxMessages;
+  // The window is returned oldest-first, as a conversation reads.
+  return { kind: 'window', messages: byNewestFirst.slice(0, maxMessages).reverse(), truncated };
 }
 
 export interface ExtractedComposerPage {

@@ -6,7 +6,12 @@ import {
   type ConversationThread,
   type ProviderErrorCode
 } from './domain.js';
-import type { ExtractedInboxPage, ExtractedThreadPage } from './facebook-messenger-extract.js';
+import {
+  MESSENGER_EXTRACT_LIMITS,
+  selectMessengerThreadWindow,
+  type ExtractedInboxPage,
+  type ExtractedThreadPage
+} from './facebook-messenger-extract.js';
 import { buildMessengerThreadUrl } from './facebook-messenger-url.js';
 import type { MessengerInboxGraphQLObservation } from './facebook-messenger-inbox-graphql.js';
 
@@ -114,14 +119,20 @@ export type MessengerThreadOutcome =
   | { kind: 'messages'; messages: ConversationMessage[]; coverage: ConversationReadCoverage }
   | { kind: 'error'; code: ProviderErrorCode; message: string };
 
-// The window contract: the extraction scans newest-first, so a successful thread read always
-// covers the tail. Missing diagnostics fail closed to `truncated: true` — an extraction that
-// cannot report its scan bounds has not proven that anything outside its window is absent.
-function threadReadCoverage(diagnostics: ExtractedThreadPage['diagnostics']): ConversationReadCoverage {
+// The window contract: the newest end of the window is established only by explicit timestamps
+// on the message rows, so a returned `tail` window is timestamp-proven. When that proof is
+// unavailable the read fails closed with a typed upstream error instead of guessing an end.
+const UNPROVEN_WINDOW_MESSAGES = {
+  undated_messages: 'The newest message in the Facebook Messenger thread could not be established from explicit timestamps.',
+  scan_bound_exceeded: 'The Facebook Messenger thread renders more rows than the supported scan bound; its newest message could not be established.',
+  missing_diagnostics: 'The Facebook Messenger thread coverage could not be established.'
+} as const;
+
+function threadReadCoverage(diagnostics: ExtractedThreadPage['diagnostics'], truncated: boolean): ConversationReadCoverage {
   return {
     window: 'tail',
     scanned_rows: diagnostics?.scannedRows ?? 0,
-    truncated: diagnostics?.truncated ?? true
+    truncated
   };
 }
 
@@ -153,8 +164,20 @@ export function interpretMessengerThreadPage(input: {
   }
   if (kind === 'unknown') return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger thread page layout was not recognized.' };
 
+  // The newest end of the window is selected from the candidates by their explicit timestamps.
+  // Without that proof the read fails closed: an unproven orientation is never presented as the
+  // newest messages of the thread.
+  const selection = selectMessengerThreadWindow({
+    candidates: input.page.messages,
+    diagnostics: input.page.diagnostics,
+    maxMessages: MESSENGER_EXTRACT_LIMITS.maxMessages
+  });
+  if (selection.kind === 'unproven') {
+    return { kind: 'error', code: 'UPSTREAM_ERROR', message: UNPROVEN_WINDOW_MESSAGES[selection.reason] };
+  }
+
   const messages: ConversationMessage[] = [];
-  for (const extracted of input.page.messages) {
+  for (const extracted of selection.messages) {
     if (!extracted.sender) continue;
     const senderName = extracted.senderName?.trim();
     const candidate = {
@@ -169,5 +192,5 @@ export function interpretMessengerThreadPage(input: {
   if (messages.length === 0) {
     return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger thread messages could not be parsed.' };
   }
-  return { kind: 'messages', messages, coverage: threadReadCoverage(input.page.diagnostics) };
+  return { kind: 'messages', messages, coverage: threadReadCoverage(input.page.diagnostics, selection.truncated) };
 }

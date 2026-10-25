@@ -147,7 +147,8 @@ export class FixtureBackend implements MarketplaceBackend, ConversationBackend {
     const sent = this.sentMessages.get(input.thread_id);
     if (!conversation && !sent) return null;
     const messages = [...(conversation?.messages ?? []), ...(sent ?? [])];
-    // The fixture holds the whole conversation, so its tail-anchored window is complete.
+    // The fixture holds the whole synthetic conversation, so its newest end is complete by
+    // construction: that completeness is the proof behind the tail window.
     return {
       thread_id: input.thread_id,
       messages,

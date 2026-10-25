@@ -86,11 +86,12 @@ export type ConversationMessage = z.infer<typeof conversationMessageSchema>;
 
 // Read-window coverage (#146). A conversation read is a bounded window, not the whole thread, so
 // it must say which end the window is anchored at and whether rows were left unexamined.
-// `window: 'tail'` states the window provably starts at the newest row in the DOM the extraction
-// saw (newest-first scan), independent of thread length; `truncated: true` states rows or
-// messages existed outside the examined window, so an absent token in the window is not proof the
-// message is unsent. Optional on the read result: a host-injected backend that predates this
-// additive field may omit it rather than fail output validation.
+// `window: 'tail'` states the window's newest end was established by the explicit timestamps
+// carried on the message rows — never by DOM order, whose deployed ordering is unvalidated;
+// `truncated: true` states rows or messages existed outside the examined window, so an absent
+// token in the window is not proof the message is unsent. Optional on the read result: a
+// host-injected backend that predates this additive field may omit it rather than fail output
+// validation.
 export const conversationReadCoverageSchema = z.object({
   window: z.literal('tail'),
   scanned_rows: z.number().int().nonnegative(),
