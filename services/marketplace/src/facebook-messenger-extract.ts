@@ -7,10 +7,10 @@ export const MESSENGER_EXTRACT_LIMITS = {
   // cannot be oriented by timestamp and the read fails closed instead of guessing an end.
   maxMessagesScan: 500,
   maxTextLength: 2000,
-  // The maximum total candidate text a read may return. The per-row bound alone would still let a
-  // page with many rows return an unbounded payload, so the collected text is bounded as well.
-  // Exceeding the budget stops the scan, which leaves rendered rows unexamined and therefore
-  // fails the window proof closed rather than returning a window it cannot justify.
+  // The maximum total candidate text a read may collect across the rows it examines. The per-row
+  // bound alone would still let a page with many rows produce an unbounded payload, so the
+  // collected text is bounded as well. Exceeding the budget fails the window proof closed, because
+  // the rows that were not examined could carry the newest timestamp.
   maxCandidateTextLength: 512000,
   maxPreviewLength: 280,
   maxHrefsPerAnchor: 12
@@ -68,6 +68,10 @@ export interface ExtractedThreadPage {
     /** Attributed rows that carry no usable explicit timestamp of their own, so the newest end
      *  of the thread is not proven. */
     undatedMessages: number;
+    /** True when the collected candidate text exceeded its budget. The scan may still have
+     *  examined every rendered row, but the read is over its text budget, so the window it would
+     *  return is not one this contract promises. */
+    candidateTextBudgetExceeded: boolean;
   };
 }
 
@@ -203,7 +207,8 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
     renderedRows: 0,
     scannedRows: 0,
     unattributedRows: 0,
-    undatedMessages: 0
+    undatedMessages: 0,
+    candidateTextBudgetExceeded: false
   };
   // The conversation's own rows are the evidence, so they are collected from the first message log
   // that actually renders rows; only a page without such a log falls back to a document-wide scan.
@@ -282,7 +287,13 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
     };
     messages.push(message);
     collectedTextLength += text.length;
-    if (collectedTextLength > maxCandidateTextLength) break;
+    if (collectedTextLength > maxCandidateTextLength) {
+      // The budget is spent: the scan stops, and the read fails closed even when this was the
+      // last rendered row, because a window collected over budget is not a window this contract
+      // promises to have bounded.
+      diagnostics.candidateTextBudgetExceeded = true;
+      break;
+    }
   }
   return { url, signals, messages, diagnostics };
 }
@@ -322,7 +333,9 @@ export type MessengerWindowOutcome =
  * to decide which end is newest, and the window is ordered by those timestamps rather than by
  * the order the rows happened to render in — the deployed Messenger DOM ordering is unvalidated,
  * so an ordering assumption is not a proof. Messages that share one timestamp keep their relative
- * order among themselves.
+ * order among themselves, and when the window bound cuts through such a group, which of the tied
+ * messages is kept follows the order they were rendered in — the provider gave them the same
+ * timestamp, so nothing distinguishes them.
  *
  * This has no page or browser APIs, so it is unit-testable on the Node side and is applied there
  * after the thin in-page probe collects the candidates.
@@ -342,6 +355,9 @@ export function selectMessengerThreadWindow(input: {
   // A rendered row that was never examined could carry the newest timestamp, so a partially
   // scanned page proves nothing about the newest end.
   if (diagnostics.scannedRows !== diagnostics.renderedRows) return { kind: 'unproven', reason: 'incomplete_scan' };
+  // A read that collected more candidate text than its budget promised is not a bounded read, so
+  // the window it could return is not one this contract claims.
+  if (diagnostics.candidateTextBudgetExceeded) return { kind: 'unproven', reason: 'incomplete_scan' };
   // Every candidate must carry a timestamp that places it on the timeline.
   if (input.candidates.some((candidate) => !candidate.sentAt || !Number.isFinite(Date.parse(candidate.sentAt)))) {
     return { kind: 'unproven', reason: 'undated_messages' };

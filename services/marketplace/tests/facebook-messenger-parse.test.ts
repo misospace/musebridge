@@ -48,7 +48,7 @@ function provenDiagnostics(overrides: Partial<NonNullable<ExtractedThreadPage['d
     renderedRows: 2,
     scannedRows: 2,
     unattributedRows: 0,
-    undatedMessages: 0,
+    undatedMessages: 0, candidateTextBudgetExceeded: false,
     ...overrides
   };
 }
@@ -210,7 +210,7 @@ describe('Messenger page interpretation', () => {
     expect(interpretMessengerThreadPage({
       page: thread({
         messages: [datedMessage(0), { sender: 'you', text: 'Undated candidate' }],
-        diagnostics: provenDiagnostics({ undatedMessages: 1 })
+        diagnostics: provenDiagnostics({ undatedMessages: 1, candidateTextBudgetExceeded: false })
       }),
       baseUrl: 'https://www.facebook.com',
       threadId: '1684432532'
@@ -335,8 +335,8 @@ describe('Messenger page interpretation', () => {
   });
 
   it.each([
-    [{ hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false, renderedRows: 1, scannedRows: 1, unattributedRows: 1, undatedMessages: 0 }, 'The Facebook Messenger article message layout is unsupported; sender attribution was not verified.'],
-    [{ hasMessageLog: true, hasArticleMessages: false, hasExplicitEmptyState: true, renderedRows: 0, scannedRows: 0, unattributedRows: 0, undatedMessages: 0 }, 'The Facebook Messenger empty thread layout could not be verified.']
+    [{ hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false, renderedRows: 1, scannedRows: 1, unattributedRows: 1, undatedMessages: 0, candidateTextBudgetExceeded: false }, 'The Facebook Messenger article message layout is unsupported; sender attribution was not verified.'],
+    [{ hasMessageLog: true, hasArticleMessages: false, hasExplicitEmptyState: true, renderedRows: 0, scannedRows: 0, unattributedRows: 0, undatedMessages: 0, candidateTextBudgetExceeded: false }, 'The Facebook Messenger empty thread layout could not be verified.']
   ])('reports a static unsupported-layout diagnostic without returning content', (diagnostics, message) => {
     const outcome = interpretMessengerThreadPage({
       page: thread({ diagnostics }), baseUrl: 'https://www.facebook.com', threadId: '1684432532'

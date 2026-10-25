@@ -88,7 +88,7 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
       renderedRows: 6,
       scannedRows: 6,
       unattributedRows: 1,
-      undatedMessages: 0
+      undatedMessages: 0, candidateTextBudgetExceeded: false
     });
     expect(classifyMessengerThreadPage(extracted)).toBe('messages');
   });
@@ -227,7 +227,7 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     // part of the evidence the window is proven from.
     expect(extracted.diagnostics).toEqual({
       hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false,
-      renderedRows: 1, scannedRows: 1, unattributedRows: 1, undatedMessages: 0
+      renderedRows: 1, scannedRows: 1, unattributedRows: 1, undatedMessages: 0, candidateTextBudgetExceeded: false
     });
   });
 
@@ -327,6 +327,28 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     expect(window).toEqual({ kind: 'unproven', reason: 'incomplete_scan' });
   });
 
+  it('fails closed when the candidate text budget is spent on the last rendered row', async () => {
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      '<div role="row" aria-label="You said: synthetic">Alpha<time datetime="2026-09-14T10:00:00Z"></time></div>' +
+      '<div role="row" aria-label="You said: synthetic">Bravo<time datetime="2026-09-14T10:01:00Z"></time></div>' +
+      '</main>');
+    const extracted = await page.evaluate(extractMessengerThreadPage, {
+      limits: { ...MESSENGER_EXTRACT_LIMITS, maxCandidateTextLength: 6 }
+    });
+    // Every rendered row was examined here, so the rows alone would prove the window. The read is
+    // still over its text budget, and a window collected over budget is not a bounded window, so
+    // the proof fails closed rather than returning one.
+    expect(extracted.diagnostics?.scannedRows).toBe(2);
+    expect(extracted.diagnostics?.renderedRows).toBe(2);
+    expect(extracted.diagnostics?.candidateTextBudgetExceeded).toBe(true);
+    const window = selectMessengerThreadWindow({
+      candidates: extracted.messages,
+      diagnostics: extracted.diagnostics,
+      maxMessages: MESSENGER_EXTRACT_LIMITS.maxMessages
+    });
+    expect(window).toEqual({ kind: 'unproven', reason: 'incomplete_scan' });
+  });
+
   it('proves the window from explicit timestamps on a virtualized DOM without claiming more coverage than it shows', async () => {
     const base = Date.UTC(2026, 8, 14, 10, 0, 0);
     await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
@@ -389,7 +411,7 @@ describe('selectMessengerThreadWindow (pure window orientation contract)', () =>
     renderedRows: 2,
     scannedRows: 2,
     unattributedRows: 0,
-    undatedMessages: 0,
+    undatedMessages: 0, candidateTextBudgetExceeded: false,
     ...overrides
   });
 
@@ -460,7 +482,7 @@ describe('selectMessengerThreadWindow (pure window orientation contract)', () =>
   it('fails closed when an attributed row was reported without a usable timestamp', () => {
     expect(selectMessengerThreadWindow({
       candidates: [candidate('Dated', '2026-09-14T10:00:00.000Z')],
-      diagnostics: diagnostics({ undatedMessages: 1 }),
+      diagnostics: diagnostics({ undatedMessages: 1, candidateTextBudgetExceeded: false }),
       maxMessages: 50
     })).toEqual({ kind: 'unproven', reason: 'undated_messages' });
   });
@@ -519,6 +541,14 @@ describe('selectMessengerThreadWindow (pure window orientation contract)', () =>
     expect(selectMessengerThreadWindow({
       candidates: [candidate('Dated', '2026-09-14T10:00:00.000Z')],
       diagnostics: diagnostics({ scannedRows: 1, renderedRows: 2 }),
+      maxMessages: 50
+    })).toEqual({ kind: 'unproven', reason: 'incomplete_scan' });
+  });
+
+  it('fails closed when the read collected more candidate text than its budget', () => {
+    expect(selectMessengerThreadWindow({
+      candidates: [candidate('Dated', '2026-09-14T10:00:00.000Z')],
+      diagnostics: diagnostics({ candidateTextBudgetExceeded: true }),
       maxMessages: 50
     })).toEqual({ kind: 'unproven', reason: 'incomplete_scan' });
   });
