@@ -378,6 +378,7 @@ describe('fixture MCP service', () => {
     const thread = structured(await client.callTool({ name: 'messenger_thread_read', arguments: { thread_id: 't-synth-0001' } }));
     expect(thread.messages).toHaveLength(3);
     expect(thread.messages[0].sender).toBe('other');
+    expect(thread.coverage).toEqual({ window: 'tail', scanned_rows: 3, truncated: false });
     expect(structured(await client.callTool({ name: 'messenger_thread_read', arguments: { thread_id: 't-synth-missing' } }))).toEqual({
       ok: false,
       error: { code: 'NOT_FOUND', message: 'No conversation thread matched the supplied identifier.' }
@@ -819,7 +820,7 @@ describe('fixture MCP service', () => {
     expect(result).toEqual({
       ok: true,
       service_version: packageVersion,
-      schema_version: '1.5.0',
+      schema_version: '1.6.0',
       backend: 'status-only',
       facebook_session: { status: 'session_unknown' },
       shopping_backend: 'fixture',
@@ -895,7 +896,7 @@ describe('fixture MCP service', () => {
     expect(customSearch.backend).toBe('consumer-test');
     expect(customFetch.backend).toBe('consumer-test');
     expect(customStatus.backend).toBe('consumer-test');
-    expect(customStatus.schema_version).toBe('1.5.0');
+    expect(customStatus.schema_version).toBe('1.6.0');
     expect(customStatus.capabilities).toEqual([
       { surface: 'marketplace', provider: 'facebook', backend: 'consumer-test' },
       { surface: 'shopping', provider: 'ebay', backend: 'fixture' },
@@ -1131,7 +1132,7 @@ describe('fixture MCP service', () => {
     ]);
     expect(structured(first).listings[0].id).toBe('fixture-chair-002');
     expect(structured(second).listing.state).toBe('sold');
-    expect(structured(third).schema_version).toBe('1.5.0');
+    expect(structured(third).schema_version).toBe('1.6.0');
   });
 
   it('bounds shutdown with both an in-flight backend call and a partial request body', async () => {

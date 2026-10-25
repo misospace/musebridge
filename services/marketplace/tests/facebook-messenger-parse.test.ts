@@ -128,12 +128,18 @@ describe('Messenger page interpretation', () => {
 
   it('maps message attribution and timestamps while omitting malformed rows', () => {
     const outcome = interpretMessengerThreadPage({
-      page: thread({ messages: [
-        { sender: 'other', senderName: 'Synthetic Seller', text: 'Hello', sentAt: '2026-09-14T10:30:00.000Z' },
-        { sender: 'you', text: 'Thanks' },
-        { text: 'Unattributed must not be mapped' },
-        { sender: 'other', senderName: ' ', text: 'bad optional name' }
-      ] }),
+      page: thread({
+        messages: [
+          { sender: 'other', senderName: 'Synthetic Seller', text: 'Hello', sentAt: '2026-09-14T10:30:00.000Z' },
+          { sender: 'you', text: 'Thanks' },
+          { text: 'Unattributed must not be mapped' },
+          { sender: 'other', senderName: ' ', text: 'bad optional name' }
+        ],
+        diagnostics: {
+          hasMessageLog: true, hasArticleMessages: false, hasExplicitEmptyState: false,
+          scannedRows: 4, unattributedRows: 1, truncated: false
+        }
+      }),
       baseUrl: 'https://www.facebook.com',
       threadId: '1684432532'
     });
@@ -141,10 +147,34 @@ describe('Messenger page interpretation', () => {
       { sender: 'other', sender_name: 'Synthetic Seller', text: 'Hello', sent_at: '2026-09-14T10:30:00.000Z' },
       { sender: 'you', text: 'Thanks' },
       { sender: 'other', text: 'bad optional name' }
-    ] });
+    ], coverage: { window: 'tail', scanned_rows: 4, truncated: false } });
     expect(interpretMessengerThreadPage({ page: thread(), baseUrl: 'https://www.facebook.com', threadId: '1684432532' })).toMatchObject({
       kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger thread page layout was not recognized.'
     });
+  });
+
+  it('reports the tail window and truncation from extraction diagnostics', () => {
+    const messages = [{ sender: 'you' as const, text: 'Newest [synthetic-reply-token]' }];
+    const truncated = interpretMessengerThreadPage({
+      page: thread({
+        messages,
+        diagnostics: {
+          hasMessageLog: true, hasArticleMessages: false, hasExplicitEmptyState: false,
+          scannedRows: 50, unattributedRows: 0, truncated: true
+        }
+      }),
+      baseUrl: 'https://www.facebook.com',
+      threadId: '1684432532'
+    });
+    expect(truncated).toMatchObject({ kind: 'messages', coverage: { window: 'tail', scanned_rows: 50, truncated: true } });
+    // An extraction that cannot report its scan bounds has proven nothing outside its window is
+    // absent, so coverage fails closed to truncated rather than claiming full coverage.
+    const withoutDiagnostics = interpretMessengerThreadPage({
+      page: thread({ messages }),
+      baseUrl: 'https://www.facebook.com',
+      threadId: '1684432532'
+    });
+    expect(withoutDiagnostics).toMatchObject({ kind: 'messages', coverage: { window: 'tail', scanned_rows: 0, truncated: true } });
   });
 
   it('does not trust content from a redirected address, but login still wins on a redirected login page', () => {
@@ -195,8 +225,8 @@ describe('Messenger page interpretation', () => {
   });
 
   it.each([
-    [{ hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false, scannedRows: 1, unattributedRows: 1 }, 'The Facebook Messenger article message layout is unsupported; sender attribution was not verified.'],
-    [{ hasMessageLog: true, hasArticleMessages: false, hasExplicitEmptyState: true, scannedRows: 0, unattributedRows: 0 }, 'The Facebook Messenger empty thread layout could not be verified.']
+    [{ hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false, scannedRows: 1, unattributedRows: 1, truncated: false }, 'The Facebook Messenger article message layout is unsupported; sender attribution was not verified.'],
+    [{ hasMessageLog: true, hasArticleMessages: false, hasExplicitEmptyState: true, scannedRows: 0, unattributedRows: 0, truncated: false }, 'The Facebook Messenger empty thread layout could not be verified.']
   ])('reports a static unsupported-layout diagnostic without returning content', (diagnostics, message) => {
     const outcome = interpretMessengerThreadPage({
       page: thread({ diagnostics }), baseUrl: 'https://www.facebook.com', threadId: '1684432532'
@@ -208,7 +238,7 @@ describe('Messenger page interpretation', () => {
     expect(interpretMessengerThreadPage({
       page: thread({
         messages: [{ sender: 'you', text: 'Unrelated widget [synthetic-reply-token]' }],
-        diagnostics: { hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false, scannedRows: 1, unattributedRows: 0 }
+        diagnostics: { hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false, scannedRows: 1, unattributedRows: 0, truncated: false }
       }),
       baseUrl: 'https://www.facebook.com', threadId: '1684432532'
     })).toEqual({ kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger article message layout is unsupported; sender attribution was not verified.' });

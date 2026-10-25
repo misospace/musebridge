@@ -50,6 +50,9 @@ export interface ExtractedThreadPage {
     hasExplicitEmptyState: boolean;
     scannedRows: number;
     unattributedRows: number;
+    // True when the scan stopped before every row present in the DOM was examined — either the
+    // scan cap or the message cap cut it short — so messages may exist outside the window.
+    truncated: boolean;
   };
 }
 
@@ -182,12 +185,22 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
     hasArticleMessages: document.querySelector('[role="log"] [role="article"]') !== null,
     hasExplicitEmptyState: /no messages yet|no conversations|nothing here yet/i.test((messageLog?.textContent ?? '').slice(0, 20_000)),
     scannedRows: 0,
-    unattributedRows: 0
+    unattributedRows: 0,
+    truncated: false
   };
   const rows = document.querySelectorAll('[role="row"]');
+  // Scan newest-first: the last row in DOM order is the thread's tail, so the collected window is
+  // anchored at the latest messages no matter how long the thread is. A head-anchored window made
+  // a just-sent idempotency token invisible to send reconciliation on long threads. The collected
+  // order is reversed at the end so the returned window stays chronological.
   const scanLength = Math.min(rows.length, maxMessagesScan);
-  for (let index = 0; index < scanLength && messages.length < maxMessages; index += 1) {
-    const row = rows[index];
+  for (let offset = 0; offset < scanLength; offset += 1) {
+    if (messages.length >= maxMessages) {
+      // The message cap stopped the scan before every row in the window was examined.
+      diagnostics.truncated = true;
+      break;
+    }
+    const row = rows[rows.length - 1 - offset];
     if (!row) continue;
     diagnostics.scannedRows += 1;
     const label = row.getAttribute('aria-label') ?? '';
@@ -220,6 +233,10 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
     }
     messages.push(message);
   }
+  // Rows older than the scan window were never examined; report that honestly rather than
+  // presenting the tail window as the whole thread.
+  if (scanLength < rows.length) diagnostics.truncated = true;
+  messages.reverse();
   return { url, signals, messages, diagnostics };
 }
 

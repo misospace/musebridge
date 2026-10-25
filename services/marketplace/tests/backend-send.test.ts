@@ -39,7 +39,9 @@ describe('FixtureBackend.sendThread', () => {
       messages: [
         ...bikeFixtureMessages,
         { sender: 'you', text: `${payload.message} [${payload.idempotency_token}]` }
-      ]
+      ],
+      // The fixture holds the whole conversation, so its tail-anchored window is complete.
+      coverage: { window: 'tail', scanned_rows: bikeFixtureMessages.length + 1, truncated: false }
     });
     expect(FIXTURE_CONVERSATIONS.find(({ thread }) => thread.thread_id === payload.thread_id)?.messages).toEqual(bikeFixtureMessages);
   });
@@ -52,7 +54,8 @@ describe('FixtureBackend.sendThread', () => {
     const result = backend.readThread({ thread_id: payload.thread_id }, signal);
     expect(result).toEqual({
       thread_id: payload.thread_id,
-      messages: [{ sender: 'you', text: `${payload.message} [${payload.idempotency_token}]` }]
+      messages: [{ sender: 'you', text: `${payload.message} [${payload.idempotency_token}]` }],
+      coverage: { window: 'tail', scanned_rows: 1, truncated: false }
     });
   });
 

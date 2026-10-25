@@ -429,7 +429,13 @@ export function registerMarketplaceTools(
           );
           output = thread === null
             ? runtimeFailure('NOT_FOUND', 'No conversation thread matched the supplied identifier.')
-            : { ok: true, backend: backendName, thread_id: thread.thread_id, messages: thread.messages };
+            : {
+              ok: true,
+              backend: backendName,
+              thread_id: thread.thread_id,
+              messages: thread.messages,
+              ...(thread.coverage ? { coverage: thread.coverage } : {})
+            };
         } else if (name === 'messenger_prepare') {
           const conversations = options.conversations;
           if (!conversations) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');
@@ -481,9 +487,12 @@ export function registerMarketplaceTools(
               && (error.code === 'TIMEOUT' || error.metadata.submit_triggered === true);
             if (!reconcilable) throw error;
           }
-          // The single observation reads the thread for the idempotency token bound to this
-          // grant; a missing token or a failed read yields 'unknown', and the message is never
-          // resent (provider-action-boundaries: any retry is a new approval decision).
+  // The single observation reads the thread for the idempotency token bound to this
+  // grant; a missing token or a failed read yields 'unknown', and the message is never
+  // resent (provider-action-boundaries: any retry is a new approval decision). The read
+  // window is tail-anchored (ConversationReadCoverage), so the newest messages — where a
+  // just-delivered token appears — are inside the inspected window on threads of any
+  // length; a head-only window once hid the token and pinned successful sends at 'unknown'.
           const delivered = await reconcileSentThread(conversations, sendInput, backendTimeoutMs, extra.signal, shutdownSignal);
           output = { ok: true, backend: backendName, thread_id: sendInput.thread_id, status: delivered ? 'sent' : 'unknown' };
         } else if (name === 'shopping_search') {

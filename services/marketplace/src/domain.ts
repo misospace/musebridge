@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { PROVIDER_SESSION_ASSESSMENTS } from './browser.js';
 
-export const SCHEMA_VERSION = '1.5.0';
+export const SCHEMA_VERSION = '1.6.0';
 export const SERVICE_VERSION = '0.1.0'; // x-release-please-version
 export const MAX_QUERY_LENGTH = 256;
 export const MAX_LOCATION_LENGTH = 256;
@@ -83,7 +83,26 @@ export const conversationMessageSchema = z.object({
 
 export type ConversationThread = z.infer<typeof conversationThreadSchema>;
 export type ConversationMessage = z.infer<typeof conversationMessageSchema>;
-export type ConversationThreadMessages = { thread_id: string; messages: ConversationMessage[] };
+
+// Read-window coverage (#146). A conversation read is a bounded window, not the whole thread, so
+// it must say which end the window is anchored at and whether rows were left unexamined.
+// `window: 'tail'` states the window provably starts at the newest row in the DOM the extraction
+// saw (newest-first scan), independent of thread length; `truncated: true` states rows or
+// messages existed outside the examined window, so an absent token in the window is not proof the
+// message is unsent. Optional on the read result: a host-injected backend that predates this
+// additive field may omit it rather than fail output validation.
+export const conversationReadCoverageSchema = z.object({
+  window: z.literal('tail'),
+  scanned_rows: z.number().int().nonnegative(),
+  truncated: z.boolean()
+}).strict();
+
+export type ConversationReadCoverage = z.infer<typeof conversationReadCoverageSchema>;
+export type ConversationThreadMessages = {
+  thread_id: string;
+  messages: ConversationMessage[];
+  coverage?: ConversationReadCoverage;
+};
 
 // Cross-site shopping contract (#48). `productOffer` is a sibling of `listing`, not a
 // replacement: Facebook tools keep the deployed `listing` contract, and a later comparison
@@ -497,7 +516,8 @@ export const threadReadOutputSchema = z.union([
     ok: z.literal(true),
     backend: backendNameSchema,
     thread_id: conversationThreadIdSchema,
-    messages: z.array(conversationMessageSchema).max(50)
+    messages: z.array(conversationMessageSchema).max(50),
+    coverage: conversationReadCoverageSchema.optional()
   }).strict(),
   runtimeFailureSchema
 ]);

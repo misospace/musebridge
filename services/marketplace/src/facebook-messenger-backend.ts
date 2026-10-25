@@ -280,7 +280,9 @@ export class FacebookMessengerBackend implements ConversationBackend {
 
     const outcome = interpretMessengerThreadPage({ page: extracted, baseUrl: this.probe.baseUrl, threadId: input.thread_id });
     if (outcome.kind === 'error') throw new MarketplaceProviderError(outcome.code, outcome.message);
-    return { thread_id: input.thread_id, messages: [...outcome.messages] };
+    // The coverage is part of the read contract: the window is tail-anchored, and a truncated
+    // scan says so rather than presenting the newest messages as the whole thread.
+    return { thread_id: input.thread_id, messages: [...outcome.messages], coverage: outcome.coverage };
   }
 
   // A draft needs only the conversation context, so it reuses this same thread read — including

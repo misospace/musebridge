@@ -459,7 +459,10 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
         { sender: 'you', text: 'Is the desk available?' },
         { sender: 'other', sender_name: 'Synthetic Seller', text: 'Yes, it is available.10:30' },
         { sender: 'other', sender_name: 'Example Buyer', text: 'Could I pick it up tomorrow?' }
-      ]
+      ],
+      // The six synthetic rows all fit the bounded window (two are not attributed messages),
+      // so the read proves an untruncated tail-anchored scan.
+      coverage: { window: 'tail', scanned_rows: 6, truncated: false }
     });
     expect(requests).toEqual(['/marketplace/inbox/', '/messages/t/1684432532/']);
   });

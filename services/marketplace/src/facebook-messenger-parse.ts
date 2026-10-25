@@ -2,6 +2,7 @@ import {
   conversationMessageSchema,
   conversationThreadSchema,
   type ConversationMessage,
+  type ConversationReadCoverage,
   type ConversationThread,
   type ProviderErrorCode
 } from './domain.js';
@@ -110,8 +111,19 @@ export function classifyMessengerThreadPage(page: ExtractedThreadPage): Messenge
 }
 
 export type MessengerThreadOutcome =
-  | { kind: 'messages'; messages: ConversationMessage[] }
+  | { kind: 'messages'; messages: ConversationMessage[]; coverage: ConversationReadCoverage }
   | { kind: 'error'; code: ProviderErrorCode; message: string };
+
+// The window contract: the extraction scans newest-first, so a successful thread read always
+// covers the tail. Missing diagnostics fail closed to `truncated: true` — an extraction that
+// cannot report its scan bounds has not proven that anything outside its window is absent.
+function threadReadCoverage(diagnostics: ExtractedThreadPage['diagnostics']): ConversationReadCoverage {
+  return {
+    window: 'tail',
+    scanned_rows: diagnostics?.scannedRows ?? 0,
+    truncated: diagnostics?.truncated ?? true
+  };
+}
 
 export function interpretMessengerThreadPage(input: {
   page: ExtractedThreadPage;
@@ -157,5 +169,5 @@ export function interpretMessengerThreadPage(input: {
   if (messages.length === 0) {
     return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger thread messages could not be parsed.' };
   }
-  return { kind: 'messages', messages };
+  return { kind: 'messages', messages, coverage: threadReadCoverage(input.page.diagnostics) };
 }

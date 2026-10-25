@@ -99,8 +99,10 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     const messages = await page.evaluate(extractMessengerThreadPage, {
       limits: { ...MESSENGER_EXTRACT_LIMITS, maxMessages: 3, maxMessagesScan: 5, maxTextLength: 9 }
     });
-    expect(messages.messages).toHaveLength(3);
-    expect(messages.messages[0]?.text).toBe('Message 0');
+    // The window is tail-anchored: the newest rows are always inside it, and the bound keeps the
+    // newest maxMessages attributed rows in chronological order, never the oldest.
+    expect(messages.messages.map((message) => message.text)).toEqual(['Message 5', 'Message 6', 'Message 7']);
+    expect(messages.diagnostics?.truncated).toBe(true);
   });
 
   it('does not attribute the observed article layout or its token-bearing content', async () => {
@@ -113,7 +115,7 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     expect(classifyMessengerThreadPage(extracted)).toBe('unknown');
     expect(extracted.diagnostics).toEqual({
       hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false,
-      scannedRows: 1, unattributedRows: 1
+      scannedRows: 1, unattributedRows: 1, truncated: false
     });
   });
 
@@ -146,13 +148,43 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     // Presence in extracted text is not provider acknowledgement or delivery confirmation.
   });
 
-  it('does not mistake a bounded old message window for the latest reply token', async () => {
+  it('keeps the newest reply token inside the tail window on threads longer than the message cap', async () => {
     await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
       Array.from({ length: MESSENGER_EXTRACT_LIMITS.maxMessages }, () => '<div role="row" aria-label="You said: synthetic">Earlier synthetic message</div>').join('') +
       '<div role="row" aria-label="You said: synthetic">Newest [synthetic-reply-token]</div></main>');
     const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    // A head-anchored window once excluded this newest token, pinning a successful send's
+    // reconciliation at 'unknown' forever. The window must contain the tail instead.
     expect(extracted.messages).toHaveLength(MESSENGER_EXTRACT_LIMITS.maxMessages);
-    expect(extracted.messages.some((message) => message.text.includes('[synthetic-reply-token]'))).toBe(false);
+    expect(extracted.messages[extracted.messages.length - 1]?.text).toContain('[synthetic-reply-token]');
+    // Older messages fell out of the bounded window, and the read says so.
+    expect(extracted.diagnostics?.truncated).toBe(true);
+  });
+
+  it('keeps the newest reply token inside the tail window past the scan cap', async () => {
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      Array.from({ length: MESSENGER_EXTRACT_LIMITS.maxMessagesScan + 40 }, () => '<div role="row" aria-label="You said: synthetic">Earlier synthetic message</div>').join('') +
+      '<div role="row" aria-label="You said: synthetic">Newest [synthetic-reply-token]</div></main>');
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    // The scan cap cannot hide the tail either: rows are examined newest-first, independent of
+    // thread length, so the token is inside the window on a 161-row thread as on a 2-row thread.
+    expect(extracted.messages.some((message) => message.text.includes('[synthetic-reply-token]'))).toBe(true);
+    expect(extracted.diagnostics?.scannedRows).toBeLessThanOrEqual(MESSENGER_EXTRACT_LIMITS.maxMessagesScan);
+    expect(extracted.diagnostics?.truncated).toBe(true);
+  });
+
+  it('reports a virtualized tail-only DOM as an untruncated window that contains the newest token', async () => {
+    // A virtualized message log renders only the newest rows; every row present in the DOM is
+    // inside the examined window, so coverage reports truncation false while the newest token —
+    // the reconciliation target — is visible. Coverage describes the DOM window, not the
+    // provider's total history, and no unvalidated deployed-DOM behavior is assumed here.
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      Array.from({ length: 24 }, () => '<div role="row" aria-label="Synthetic Seller said: synthetic">Rendered earlier reply</div>').join('') +
+      '<div role="row" aria-label="You said: synthetic">Newest [synthetic-reply-token]</div></main>');
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(extracted.messages[extracted.messages.length - 1]?.text).toContain('[synthetic-reply-token]');
+    expect(extracted.diagnostics?.truncated).toBe(false);
+    expect(extracted.diagnostics?.scannedRows).toBe(25);
   });
 });
 
