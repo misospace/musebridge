@@ -85,11 +85,10 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
       hasMessageLog: false,
       hasArticleMessages: false,
       hasExplicitEmptyState: false,
+      renderedRows: 6,
       scannedRows: 6,
       unattributedRows: 1,
-      undatedMessages: 0,
-      scanBoundExceeded: false,
-      truncated: false
+      undatedMessages: 0
     });
     expect(classifyMessengerThreadPage(extracted)).toBe('messages');
   });
@@ -113,8 +112,8 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     // evidence, it does not choose the window, so no DOM-order assumption can leak into it.
     expect(extracted.messages).toHaveLength(8);
     expect(extracted.diagnostics?.scannedRows).toBe(8);
+    expect(extracted.diagnostics?.renderedRows).toBe(8);
     expect(extracted.diagnostics?.undatedMessages).toBe(0);
-    expect(extracted.diagnostics?.scanBoundExceeded).toBe(false);
     const window = selectMessengerThreadWindow({
       candidates: extracted.messages,
       diagnostics: extracted.diagnostics,
@@ -162,6 +161,43 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     expect(extracted.diagnostics?.hasMessageLog).toBe(true);
     expect(extracted.messages.map((message) => message.text)).toEqual(['Conversation reply']);
     expect(extracted.diagnostics?.scannedRows).toBe(1);
+    expect(extracted.diagnostics?.renderedRows).toBe(1);
+  });
+
+  it('reads a row timestamp only from the row own time element', async () => {
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      '<div role="row" aria-label="Synthetic Seller said: direct">Direct marker<time datetime="2026-09-14T10:00:00Z"></time></div>' +
+      '<div role="row" aria-label="Synthetic Seller said: nested">Nested marker<span><time datetime="2026-09-14T11:00:00Z"></time></span></div>' +
+      '</main>');
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    // The row own marker is the only evidence of where the row sits in the timeline; a nested
+    // element timestamp describes something else, so that row stays undated.
+    expect(extracted.messages.map((message) => ({ text: message.text, sentAt: message.sentAt }))).toEqual([
+      { text: 'Direct marker', sentAt: '2026-09-14T10:00:00.000Z' },
+      { text: 'Nested marker', sentAt: undefined }
+    ]);
+    expect(extracted.diagnostics?.undatedMessages).toBe(1);
+    expect(extracted.diagnostics?.scannedRows).toBe(2);
+    expect(extracted.diagnostics?.renderedRows).toBe(2);
+  });
+
+  it('counts an attributed row without any timestamp of its own as undated, with or without text', async () => {
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      '<div role="row" aria-label="You said: synthetic">Undated text</div>' +
+      '<div role="row" aria-label="You sent an attachment"></div>' +
+      '</main>');
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    // Every attributed row must carry its own usable timestamp, so both rows break the proof:
+    // the attachment-only row carries no text, but it is still an attributed row on the timeline.
+    expect(extracted.diagnostics?.undatedMessages).toBe(2);
+    expect(extracted.messages.map((message) => message.text)).toEqual(['Undated text']);
+    expect(extracted.messages[0]?.sentAt).toBeUndefined();
+    const window = selectMessengerThreadWindow({
+      candidates: extracted.messages,
+      diagnostics: extracted.diagnostics,
+      maxMessages: MESSENGER_EXTRACT_LIMITS.maxMessages
+    });
+    expect(window).toEqual({ kind: 'unproven', reason: 'undated_messages' });
   });
 
   it('reports an undated candidate instead of proving a window', async () => {
@@ -191,19 +227,23 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     // part of the evidence the window is proven from.
     expect(extracted.diagnostics).toEqual({
       hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false,
-      scannedRows: 0, unattributedRows: 0, undatedMessages: 0, scanBoundExceeded: false, truncated: false
+      renderedRows: 1, scannedRows: 1, unattributedRows: 1, undatedMessages: 0
     });
   });
 
   it('keeps empty and attachment-only thread layouts unknown without verified contracts', async () => {
-    for (const content of [
-      '<div role="log">No messages yet</div>',
-      '<div role="row" aria-label="You sent an attachment"></div>'
-    ]) {
+    for (const [content, renderedRows] of [
+      ['<div role="log">No messages yet</div>', 0],
+      ['<div role="row" aria-label="You sent an attachment"></div>', 1],
+      ['<div role="row" aria-label="You sent an attachment"><time datetime="2026-09-14T10:34:00Z"></time></div>', 1]
+    ] as const) {
       await page.setContent(`<main><span aria-label="Your account">Synthetic account</span>${content}</main>`);
       const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+      // An attachment-only row is not a message candidate, dated or not: the layout stays
+      // unverified, and an undated attributed row also breaks the timestamp proof.
       expect(extracted.messages).toEqual([]);
       expect(classifyMessengerThreadPage(extracted)).toBe('unknown');
+      expect(extracted.diagnostics?.renderedRows).toBe(renderedRows);
     }
   });
 
@@ -255,14 +295,36 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
     // A row beyond the bound was never examined, so it could carry the newest timestamp: the
     // newest end of the thread is not proven and the read fails closed instead of guessing.
-    expect(extracted.diagnostics?.scanBoundExceeded).toBe(true);
     expect(extracted.diagnostics?.scannedRows).toBe(MESSENGER_EXTRACT_LIMITS.maxMessagesScan);
+    expect(extracted.diagnostics?.renderedRows).toBe(MESSENGER_EXTRACT_LIMITS.maxMessagesScan + 41);
     const window = selectMessengerThreadWindow({
       candidates: extracted.messages,
       diagnostics: extracted.diagnostics,
       maxMessages: MESSENGER_EXTRACT_LIMITS.maxMessages
     });
-    expect(window).toEqual({ kind: 'unproven', reason: 'scan_bound_exceeded' });
+    expect(window).toEqual({ kind: 'unproven', reason: 'incomplete_scan' });
+  });
+
+  it('fails closed when the collected candidate text exceeds its budget', async () => {
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      '<div role="row" aria-label="You said: synthetic">Alpha<time datetime="2026-09-14T10:00:00Z"></time></div>' +
+      '<div role="row" aria-label="You said: synthetic">Bravo<time datetime="2026-09-14T10:01:00Z"></time></div>' +
+      '<div role="row" aria-label="You said: synthetic">Charlie<time datetime="2026-09-14T10:02:00Z"></time></div>' +
+      '<div role="row" aria-label="You said: synthetic">Delta<time datetime="2026-09-14T10:03:00Z"></time></div>' +
+      '</main>');
+    const extracted = await page.evaluate(extractMessengerThreadPage, {
+      limits: { ...MESSENGER_EXTRACT_LIMITS, maxCandidateTextLength: 10 }
+    });
+    // The total candidate text is bounded, so the scan stops early and the rows it did not
+    // examine could carry the newest timestamp: the window proof fails closed.
+    expect(extracted.diagnostics?.scannedRows).toBe(3);
+    expect(extracted.diagnostics?.renderedRows).toBe(4);
+    const window = selectMessengerThreadWindow({
+      candidates: extracted.messages,
+      diagnostics: extracted.diagnostics,
+      maxMessages: MESSENGER_EXTRACT_LIMITS.maxMessages
+    });
+    expect(window).toEqual({ kind: 'unproven', reason: 'incomplete_scan' });
   });
 
   it('proves the window from explicit timestamps on a virtualized DOM without claiming more coverage than it shows', async () => {
@@ -273,7 +335,7 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
       `<div role="row" aria-label="You said: synthetic">Newest [synthetic-reply-token]<time datetime="${new Date(base + 24_000).toISOString()}"></time></div></main>`);
     const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
     expect(extracted.diagnostics?.scannedRows).toBe(25);
-    expect(extracted.diagnostics?.truncated).toBe(false);
+    expect(extracted.diagnostics?.renderedRows).toBe(25);
     const window = selectMessengerThreadWindow({
       candidates: extracted.messages,
       diagnostics: extracted.diagnostics,
@@ -324,11 +386,10 @@ describe('selectMessengerThreadWindow (pure window orientation contract)', () =>
     hasMessageLog: true,
     hasArticleMessages: false,
     hasExplicitEmptyState: false,
+    renderedRows: 2,
     scannedRows: 2,
     unattributedRows: 0,
     undatedMessages: 0,
-    scanBoundExceeded: false,
-    truncated: false,
     ...overrides
   });
 
@@ -388,6 +449,22 @@ describe('selectMessengerThreadWindow (pure window orientation contract)', () =>
     })).toEqual({ kind: 'unproven', reason: 'undated_messages' });
   });
 
+  it('fails closed when a candidate timestamp does not place the message on the timeline', () => {
+    expect(selectMessengerThreadWindow({
+      candidates: [candidate('Dated', '2026-09-14T10:00:00.000Z'), candidate('Unparseable', 'later')],
+      diagnostics: diagnostics(),
+      maxMessages: 50
+    })).toEqual({ kind: 'unproven', reason: 'undated_messages' });
+  });
+
+  it('fails closed when an attributed row was reported without a usable timestamp', () => {
+    expect(selectMessengerThreadWindow({
+      candidates: [candidate('Dated', '2026-09-14T10:00:00.000Z')],
+      diagnostics: diagnostics({ undatedMessages: 1 }),
+      maxMessages: 50
+    })).toEqual({ kind: 'unproven', reason: 'undated_messages' });
+  });
+
   it('keeps the newest messages and reports truncation when there are more candidates than the window', () => {
     const candidates = Array.from({ length: 4 }, (_, index) =>
       candidate(`Message ${index}`, new Date(Date.UTC(2026, 8, 14, 10, 0, index)).toISOString()));
@@ -402,6 +479,35 @@ describe('selectMessengerThreadWindow (pure window orientation contract)', () =>
     });
   });
 
+  it('keeps the relative order of candidates that share one timestamp', () => {
+    const outcome = selectMessengerThreadWindow({
+      candidates: [
+        candidate('First', '2026-09-14T10:00:00.000Z'),
+        candidate('Second', '2026-09-14T10:00:00.000Z'),
+        candidate('Newest', '2026-09-14T11:00:00.000Z')
+      ],
+      diagnostics: diagnostics({ renderedRows: 3, scannedRows: 3 }),
+      maxMessages: 50
+    });
+    expect(outcome).toEqual({
+      kind: 'window',
+      messages: [
+        { sender: 'you', text: 'First', sentAt: '2026-09-14T10:00:00.000Z' },
+        { sender: 'you', text: 'Second', sentAt: '2026-09-14T10:00:00.000Z' },
+        { sender: 'you', text: 'Newest', sentAt: '2026-09-14T11:00:00.000Z' }
+      ],
+      truncated: false
+    });
+  });
+
+  it('returns an empty window when the window bound is zero', () => {
+    expect(selectMessengerThreadWindow({
+      candidates: [candidate('Dated', '2026-09-14T10:00:00.000Z')],
+      diagnostics: diagnostics({ renderedRows: 1, scannedRows: 1 }),
+      maxMessages: 0
+    })).toEqual({ kind: 'window', messages: [], truncated: true });
+  });
+
   it('fails closed when the extraction reports no diagnostics', () => {
     expect(selectMessengerThreadWindow({
       candidates: [candidate('Dated', '2026-09-14T10:00:00.000Z')],
@@ -409,11 +515,11 @@ describe('selectMessengerThreadWindow (pure window orientation contract)', () =>
     })).toEqual({ kind: 'unproven', reason: 'missing_diagnostics' });
   });
 
-  it('fails closed when the scan bound was exceeded', () => {
+  it('fails closed when the scan did not examine every rendered row', () => {
     expect(selectMessengerThreadWindow({
       candidates: [candidate('Dated', '2026-09-14T10:00:00.000Z')],
-      diagnostics: diagnostics({ scanBoundExceeded: true, truncated: true }),
+      diagnostics: diagnostics({ scannedRows: 1, renderedRows: 2 }),
       maxMessages: 50
-    })).toEqual({ kind: 'unproven', reason: 'scan_bound_exceeded' });
+    })).toEqual({ kind: 'unproven', reason: 'incomplete_scan' });
   });
 });

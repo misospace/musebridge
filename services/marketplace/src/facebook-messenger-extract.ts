@@ -2,11 +2,16 @@ export const MESSENGER_EXTRACT_LIMITS = {
   maxThreads: 20,
   maxThreadsScan: 60,
   maxMessages: 50,
-  // The maximum number of rendered message rows a read may examine. Every examined row must be
+  // The maximum number of rendered message rows a read may examine. Every rendered row must be
   // examined for its own explicit timestamp, so a thread that renders more rows than this bound
   // cannot be oriented by timestamp and the read fails closed instead of guessing an end.
   maxMessagesScan: 500,
   maxTextLength: 2000,
+  // The maximum total candidate text a read may return. The per-row bound alone would still let a
+  // page with many rows return an unbounded payload, so the collected text is bounded as well.
+  // Exceeding the budget stops the scan, which leaves rendered rows unexamined and therefore
+  // fails the window proof closed rather than returning a window it cannot justify.
+  maxCandidateTextLength: 512000,
   maxPreviewLength: 280,
   maxHrefsPerAnchor: 12
 } as const;
@@ -53,16 +58,16 @@ export interface ExtractedThreadPage {
     hasMessageLog: boolean;
     hasArticleMessages: boolean;
     hasExplicitEmptyState: boolean;
+    /** Message rows the page rendered in the scanned scope, whether or not they were examined. */
+    renderedRows: number;
+    /** Rows the probe actually examined. A value below `renderedRows` means a rendered row was
+     *  never examined, so it could have carried the newest timestamp. */
     scannedRows: number;
+    /** Rows that carried no recognizable orientation marker, so they are not messages. */
     unattributedRows: number;
-    /** Candidates that carry no usable explicit timestamp, so the newest end is not proven. */
+    /** Attributed rows that carry no usable explicit timestamp of their own, so the newest end
+     *  of the thread is not proven. */
     undatedMessages: number;
-    /** True when the page renders more rows than the scan bound, so not every rendered row could
-     *  be examined and the newest end of the thread is not proven. */
-    scanBoundExceeded: boolean;
-    // True when the scan stopped before every row present in the DOM was examined — so rows may
-    // exist outside the examined window.
-    truncated: boolean;
   };
 }
 
@@ -72,6 +77,7 @@ export interface MessengerExtractionLimits {
   maxMessages: number;
   maxMessagesScan: number;
   maxTextLength: number;
+  maxCandidateTextLength: number;
   maxPreviewLength: number;
   maxHrefsPerAnchor: number;
 }
@@ -168,6 +174,7 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
   const boundedLimit = (value: number): number => Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
   const maxMessagesScan = boundedLimit(limits.maxMessagesScan);
   const maxTextLength = boundedLimit(limits.maxTextLength);
+  const maxCandidateTextLength = boundedLimit(limits.maxCandidateTextLength);
   const body = document.body ?? document.documentElement;
   const pageText = (body.textContent ?? '').slice(0, 20_000);
   const url = location.href.slice(0, 2048);
@@ -193,25 +200,50 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
     hasMessageLog: messageLog !== null,
     hasArticleMessages: document.querySelector('[role="log"] [role="article"]') !== null,
     hasExplicitEmptyState: /no messages yet|no conversations|nothing here yet/i.test((messageLog?.textContent ?? '').slice(0, 20_000)),
+    renderedRows: 0,
     scannedRows: 0,
     unattributedRows: 0,
-    undatedMessages: 0,
-    scanBoundExceeded: false,
-    truncated: false
+    undatedMessages: 0
   };
-  // The conversation's own rows are the evidence, so they are collected from the message log when
-  // the page has one; only a page without a message log falls back to a document-wide scan.
-  const rows = messageLog !== null
-    ? messageLog.querySelectorAll('[role="row"]')
+  // The conversation's own rows are the evidence, so they are collected from the first message log
+  // that actually renders rows; only a page without such a log falls back to a document-wide scan.
+  let rowScope: ParentNode | null = null;
+  for (const log of Array.from(document.querySelectorAll('[role="log"]'))) {
+    if (log.querySelector('[role="row"]') !== null) {
+      rowScope = log;
+      break;
+    }
+  }
+  const rows = rowScope !== null
+    ? rowScope.querySelectorAll('[role="row"]')
     : document.querySelectorAll('[role="row"]');
+  diagnostics.renderedRows = rows.length;
+  // A row's own timestamp is the only evidence of where the row sits in the thread's timeline, so
+  // it must be a direct child of the row: a timestamp on a nested element describes something else
+  // (an attachment, a reaction, a quoted message) and is never borrowed for the row.
+  const ownRowTimestamp = (row: Element): string | undefined => {
+    const children = row.children;
+    for (let index = 0; index < children.length; index += 1) {
+      const child = children[index];
+      if (!child || typeof child.tagName !== 'string' || child.tagName.toLowerCase() !== 'time') continue;
+      const rawDate = child.getAttribute('datetime')?.trim();
+      if (!rawDate) continue;
+      let date: Date;
+      if (/^\d{12,16}$/.test(rawDate)) date = new Date(Number(rawDate));
+      else date = new Date(rawDate);
+      const year = date.getUTCFullYear();
+      if (Number.isFinite(date.getTime()) && year >= 2000 && year <= 2100) return date.toISOString();
+    }
+    return undefined;
+  };
   // Every rendered row is examined: the newest end of the window is proven by explicit timestamps
   // on the rows themselves, so a row that was never examined could be the newest one. DOM order is
   // never used to decide which end is newest. When the page renders more rows than the scan bound,
-  // a subset cannot prove the newest end, so the scan stops and reports the exceeded bound rather
-  // than silently presenting a partial view as the tail.
+  // or when the collected text exceeds its budget, the scan stops and the rows it did not examine
+  // are reported, so the newest end of the thread is not proven and the read fails closed instead
+  // of silently presenting a partial view as the tail.
   const scanLength = Math.min(rows.length, maxMessagesScan);
-  diagnostics.scanBoundExceeded = rows.length > maxMessagesScan;
-  if (diagnostics.scanBoundExceeded) diagnostics.truncated = true;
+  let collectedTextLength = 0;
   for (let offset = 0; offset < scanLength; offset += 1) {
     const row = rows[offset];
     if (!row) continue;
@@ -233,21 +265,24 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
       diagnostics.unattributedRows += 1;
       continue;
     }
+    // Every attributed row must carry a usable explicit timestamp of its own, whether or not it
+    // carries text: an attributed row without one cannot be placed on the thread's timeline, so
+    // the newest end of the thread is not proven.
+    const sentAt = ownRowTimestamp(row);
+    if (!sentAt) diagnostics.undatedMessages += 1;
     const text = (row.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, maxTextLength);
+    // Only an attributed row that carries text is a message; an attachment-only row is not a
+    // candidate, but it still had to carry its own timestamp to keep the proof intact.
     if (!text) continue;
-    const message: ExtractedMessage = { sender, text, ...(senderName ? { senderName } : {}) };
-    const rawDate = row.querySelector('time[datetime]')?.getAttribute('datetime')?.trim();
-    if (rawDate) {
-      let date: Date;
-      if (/^\d{12,16}$/.test(rawDate)) date = new Date(Number(rawDate));
-      else date = new Date(rawDate);
-      const year = date.getUTCFullYear();
-      if (Number.isFinite(date.getTime()) && year >= 2000 && year <= 2100) message.sentAt = date.toISOString();
-    }
-    // An attributed row without a usable explicit timestamp cannot be placed in the thread's
-    // timeline, so it counts against the orientation proof.
-    if (!message.sentAt) diagnostics.undatedMessages += 1;
+    const message: ExtractedMessage = {
+      sender,
+      text,
+      ...(senderName ? { senderName } : {}),
+      ...(sentAt ? { sentAt } : {})
+    };
     messages.push(message);
+    collectedTextLength += text.length;
+    if (collectedTextLength > maxCandidateTextLength) break;
   }
   return { url, signals, messages, diagnostics };
 }
@@ -275,7 +310,7 @@ export function classifyMessengerComposerCount(composerCount: number): Messenger
  * Why the newest end of a thread read window could not be established. Every reason is a
  * fail-closed condition: the read reports a typed upstream error instead of guessing an end.
  */
-export type MessengerWindowUnprovenReason = 'undated_messages' | 'scan_bound_exceeded' | 'missing_diagnostics';
+export type MessengerWindowUnprovenReason = 'undated_messages' | 'incomplete_scan' | 'missing_diagnostics';
 
 export type MessengerWindowOutcome =
   | { kind: 'window'; messages: ExtractedMessage[]; truncated: boolean }
@@ -301,21 +336,30 @@ export function selectMessengerThreadWindow(input: {
   // An extraction that cannot report its scan bounds has proven nothing about the rows it did
   // not examine, so the coverage of the window is unknown.
   if (!diagnostics) return { kind: 'unproven', reason: 'missing_diagnostics' };
-  // More rendered rows than the scan bound means at least one row was never examined, and that
-  // row could carry the newest timestamp.
-  if (diagnostics.scanBoundExceeded) return { kind: 'unproven', reason: 'scan_bound_exceeded' };
-  // A candidate without an explicit timestamp cannot be placed on the timeline, so the newest
-  // end of the thread is not proven.
-  if (input.candidates.some((candidate) => !candidate.sentAt)) {
+  // An attributed row without a usable timestamp of its own cannot be placed on the timeline, so
+  // the newest end of the thread is not proven.
+  if (diagnostics.undatedMessages > 0) return { kind: 'unproven', reason: 'undated_messages' };
+  // A rendered row that was never examined could carry the newest timestamp, so a partially
+  // scanned page proves nothing about the newest end.
+  if (diagnostics.scannedRows !== diagnostics.renderedRows) return { kind: 'unproven', reason: 'incomplete_scan' };
+  // Every candidate must carry a timestamp that places it on the timeline.
+  if (input.candidates.some((candidate) => !candidate.sentAt || !Number.isFinite(Date.parse(candidate.sentAt)))) {
     return { kind: 'unproven', reason: 'undated_messages' };
   }
   const maxMessages = Number.isFinite(input.maxMessages) ? Math.max(0, Math.floor(input.maxMessages)) : 0;
-  const byNewestFirst = [...input.candidates].sort((left, right) => {
-    const leftTime = Date.parse(left.sentAt ?? '');
-    const rightTime = Date.parse(right.sentAt ?? '');
-    if (!Number.isFinite(leftTime) || !Number.isFinite(rightTime)) return 0;
-    return rightTime - leftTime;
-  });
+  // The newest candidates are selected first. Candidates that share one timestamp are ordered by
+  // their reverse input position, so reversing the selected window for presentation restores
+  // their original relative order among themselves.
+  const byNewestFirst = input.candidates
+    .map((candidate, index) => ({ candidate, index }))
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.candidate.sentAt ?? '');
+      const rightTime = Date.parse(right.candidate.sentAt ?? '');
+      if (!Number.isFinite(leftTime) || !Number.isFinite(rightTime)) return 0;
+      if (rightTime !== leftTime) return rightTime - leftTime;
+      return right.index - left.index;
+    })
+    .map((entry) => entry.candidate);
   const truncated = input.candidates.length > maxMessages;
   // The window is returned oldest-first, as a conversation reads.
   return { kind: 'window', messages: byNewestFirst.slice(0, maxMessages).reverse(), truncated };

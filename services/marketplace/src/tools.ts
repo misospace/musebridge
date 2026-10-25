@@ -487,13 +487,13 @@ export function registerMarketplaceTools(
               && (error.code === 'TIMEOUT' || error.metadata.submit_triggered === true);
             if (!reconcilable) throw error;
           }
-  // The single observation reads the thread for the idempotency token bound to this
-  // grant; a missing token or a failed read yields 'unknown', and the message is never
-  // resent (provider-action-boundaries: any retry is a new approval decision). The read
-  // window is tail-anchored within the rendered page (ConversationReadCoverage), so the
-  // newest rows — where a just-delivered token appears — are inside the inspected window
-  // even when the rendered thread is longer than the window; a head-only window once hid
-  // the token and pinned successful sends at 'unknown'.
+          // The single observation reads the thread for the idempotency token bound to this
+          // grant; a missing token or a failed read yields 'unknown', and the message is never
+          // resent (provider-action-boundaries: any retry is a new approval decision). A read that
+          // cannot prove the newest end of the window — an attributed row without a usable
+          // timestamp of its own, a scan that did not examine every rendered row, or an extraction
+          // that cannot report its scan bounds — fails closed, so the reconciliation reports
+          // 'unknown' instead of reading a missing token as proof the message was never sent.
           const delivered = await reconcileSentThread(conversations, sendInput, backendTimeoutMs, extra.signal, shutdownSignal);
           output = { ok: true, backend: backendName, thread_id: sendInput.thread_id, status: delivered ? 'sent' : 'unknown' };
         } else if (name === 'shopping_search') {

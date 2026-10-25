@@ -10,6 +10,7 @@ import {
   MESSENGER_EXTRACT_LIMITS,
   selectMessengerThreadWindow,
   type ExtractedInboxPage,
+  type ExtractedMessage,
   type ExtractedThreadPage
 } from './facebook-messenger-extract.js';
 import { buildMessengerThreadUrl } from './facebook-messenger-url.js';
@@ -124,9 +125,13 @@ export type MessengerThreadOutcome =
 // unavailable the read fails closed with a typed upstream error instead of guessing an end.
 const UNPROVEN_WINDOW_MESSAGES = {
   undated_messages: 'The newest message in the Facebook Messenger thread could not be established from explicit timestamps.',
-  scan_bound_exceeded: 'The Facebook Messenger thread renders more rows than the supported scan bound; its newest message could not be established.',
+  incomplete_scan: 'The Facebook Messenger thread scan did not examine every rendered row; its newest message could not be established.',
   missing_diagnostics: 'The Facebook Messenger thread coverage could not be established.'
 } as const;
+
+// A message that cannot be represented means the window is not the proven window, so the read
+// fails closed instead of returning a partial window as if it were complete.
+const UNREPRESENTABLE_MESSAGE = 'A message in the Facebook Messenger thread window could not be represented.';
 
 function threadReadCoverage(diagnostics: ExtractedThreadPage['diagnostics'], truncated: boolean): ConversationReadCoverage {
   return {
@@ -166,9 +171,13 @@ export function interpretMessengerThreadPage(input: {
 
   // The newest end of the window is selected from the candidates by their explicit timestamps.
   // Without that proof the read fails closed: an unproven orientation is never presented as the
-  // newest messages of the thread.
+  // newest messages of the thread. A candidate that carries no sender is not a message at all, so
+  // it is dropped before the selection: it must not break the proof nor count toward truncation.
+  const attributed = input.page.messages.filter(
+    (candidate): candidate is ExtractedMessage & { sender: 'you' | 'other' } => candidate.sender !== undefined
+  );
   const selection = selectMessengerThreadWindow({
-    candidates: input.page.messages,
+    candidates: attributed,
     diagnostics: input.page.diagnostics,
     maxMessages: MESSENGER_EXTRACT_LIMITS.maxMessages
   });
@@ -178,7 +187,6 @@ export function interpretMessengerThreadPage(input: {
 
   const messages: ConversationMessage[] = [];
   for (const extracted of selection.messages) {
-    if (!extracted.sender) continue;
     const senderName = extracted.senderName?.trim();
     const candidate = {
       sender: extracted.sender,
@@ -187,7 +195,9 @@ export function interpretMessengerThreadPage(input: {
       ...(extracted.sentAt ? { sent_at: extracted.sentAt } : {})
     };
     const parsed = conversationMessageSchema.safeParse(candidate);
-    if (parsed.success) messages.push(parsed.data);
+    // A selected message that cannot be represented means the window is not the proven window.
+    if (!parsed.success) return { kind: 'error', code: 'UPSTREAM_ERROR', message: UNREPRESENTABLE_MESSAGE };
+    messages.push(parsed.data);
   }
   if (messages.length === 0) {
     return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger thread messages could not be parsed.' };

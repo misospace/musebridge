@@ -460,8 +460,9 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
         { sender: 'other', sender_name: 'Synthetic Seller', text: 'Yes, it is available.10:32', sent_at: '2026-09-14T10:32:00.000Z' },
         { sender: 'other', sender_name: 'Example Buyer', text: 'Could I pick it up tomorrow?10:33', sent_at: '2026-09-14T10:33:00.000Z' }
       ],
-      // All six synthetic rows fit the bounded window (two are not attributed messages) and every
-      // attributed row carries an explicit timestamp, so the newest end of the thread is proven.
+      // All six synthetic rows were examined (one carries no orientation marker and one is an
+      // attachment-only row) and every attributed row carries its own explicit timestamp, so the
+      // newest end of the thread is proven.
       coverage: { window: 'tail', scanned_rows: 6, truncated: false }
     });
     expect(requests).toEqual(['/marketplace/inbox/', '/messages/t/1684432532/']);
