@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { PROVIDER_SESSION_ASSESSMENTS } from './browser.js';
 
-export const SCHEMA_VERSION = '1.5.0';
+export const SCHEMA_VERSION = '1.6.0';
 export const SERVICE_VERSION = '0.1.0'; // x-release-please-version
 export const MAX_QUERY_LENGTH = 256;
 export const MAX_LOCATION_LENGTH = 256;
@@ -83,7 +83,31 @@ export const conversationMessageSchema = z.object({
 
 export type ConversationThread = z.infer<typeof conversationThreadSchema>;
 export type ConversationMessage = z.infer<typeof conversationMessageSchema>;
-export type ConversationThreadMessages = { thread_id: string; messages: ConversationMessage[] };
+
+// Read-window coverage (#146). A conversation read is a bounded window, not the whole thread, so
+// it must say which end the window is anchored at and whether older messages were left out.
+// `window: 'tail'` states the window's newest end was established by the explicit timestamps
+// carried on the message rows — never by DOM order, whose deployed ordering is unvalidated — and
+// that the rendered rows were provably the whole message set the page declared; a read that
+// cannot establish either fails closed with a typed upstream error instead of returning a
+// window. `truncated: true` states that older messages existed outside the returned window, so
+// an absent token in the window is not proof the message is unsent. `scanned_rows` counts the
+// rows the read examined: rendered message rows on the browser backend, messages on the
+// fixture backend, which holds the whole synthetic conversation by construction. Optional on the
+// read result: a host-injected backend that predates this additive field may omit it rather than
+// fail output validation.
+export const conversationReadCoverageSchema = z.object({
+  window: z.literal('tail'),
+  scanned_rows: z.number().int().nonnegative(),
+  truncated: z.boolean()
+}).strict();
+
+export type ConversationReadCoverage = z.infer<typeof conversationReadCoverageSchema>;
+export type ConversationThreadMessages = {
+  thread_id: string;
+  messages: ConversationMessage[];
+  coverage?: ConversationReadCoverage;
+};
 
 // Cross-site shopping contract (#48). `productOffer` is a sibling of `listing`, not a
 // replacement: Facebook tools keep the deployed `listing` contract, and a later comparison
@@ -497,7 +521,8 @@ export const threadReadOutputSchema = z.union([
     ok: z.literal(true),
     backend: backendNameSchema,
     thread_id: conversationThreadIdSchema,
-    messages: z.array(conversationMessageSchema).max(50)
+    messages: z.array(conversationMessageSchema).max(50),
+    coverage: conversationReadCoverageSchema.optional()
   }).strict(),
   runtimeFailureSchema
 ]);

@@ -429,7 +429,13 @@ export function registerMarketplaceTools(
           );
           output = thread === null
             ? runtimeFailure('NOT_FOUND', 'No conversation thread matched the supplied identifier.')
-            : { ok: true, backend: backendName, thread_id: thread.thread_id, messages: thread.messages };
+            : {
+              ok: true,
+              backend: backendName,
+              thread_id: thread.thread_id,
+              messages: thread.messages,
+              ...(thread.coverage ? { coverage: thread.coverage } : {})
+            };
         } else if (name === 'messenger_prepare') {
           const conversations = options.conversations;
           if (!conversations) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');
@@ -483,7 +489,13 @@ export function registerMarketplaceTools(
           }
           // The single observation reads the thread for the idempotency token bound to this
           // grant; a missing token or a failed read yields 'unknown', and the message is never
-          // resent (provider-action-boundaries: any retry is a new approval decision).
+          // resent (provider-action-boundaries: any retry is a new approval decision). A read that
+          // cannot prove the newest end of the window — an attributed row without a usable
+          // timestamp of its own, a scan that did not examine every rendered row, an extraction
+          // that cannot report its scan bounds, a page that declares no size for its message set,
+          // or rendered rows that are only part of the set the page declares — fails closed, so
+          // the reconciliation reports 'unknown' instead of reading a missing token as proof the
+          // message was never sent.
           const delivered = await reconcileSentThread(conversations, sendInput, backendTimeoutMs, extra.signal, shutdownSignal);
           output = { ok: true, backend: backendName, thread_id: sendInput.thread_id, status: delivered ? 'sent' : 'unknown' };
         } else if (name === 'shopping_search') {

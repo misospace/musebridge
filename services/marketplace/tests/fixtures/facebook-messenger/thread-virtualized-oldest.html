@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Synthetic virtualized conversation, oldest window</title></head>
+<body>
+  <main role="main">
+    <header><a href="/logout/">Log out</a><span aria-label="Your account">Synthetic account</span></header>
+    <!-- The oldest window of a virtualized message log: the page declares a set of 120
+         messages and renders the first three of them, so the newest declared position stops
+         far before the end of the declared set. The newest end of the thread cannot be proven
+         from the rendered rows. -->
+    <div role="log" aria-label="Synthetic messages" aria-live="polite" aria-setsize="120">
+      <div role="row" aria-setsize="120" aria-posinset="1" aria-label="Synthetic Seller said: Oldest rendered reply.">Oldest rendered reply<time datetime="2026-09-14T10:30:00Z">10:30</time></div>
+      <div role="row" aria-setsize="120" aria-posinset="2" aria-label="You said: Older rendered reply.">Older rendered reply<time datetime="2026-09-14T10:31:00Z">10:31</time></div>
+      <div role="row" aria-setsize="120" aria-posinset="3" aria-label="Synthetic Seller said: Newest rendered reply.">Newest rendered reply<time datetime="2026-09-14T10:32:00Z">10:32</time></div>
+    </div>
+  </main>
+</body>
+</html>

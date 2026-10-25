@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Synthetic conversation without timestamps</title></head>
+<body>
+  <main role="main">
+    <header><a href="/logout/">Log out</a><span aria-label="Your account">Synthetic account</span></header>
+    <section aria-label="Messages">
+      <!-- No explicit timestamps: the newest end of the thread cannot be proven. The set
+           accounting is present and complete, so the missing timestamps are the only reason
+           this thread cannot be certified. -->
+      <div role="row" aria-setsize="2" aria-posinset="1" aria-label="Synthetic Seller said: Hello there.">Hello there.</div>
+      <div role="row" aria-setsize="2" aria-posinset="2" aria-label="You said: Is the desk available?">Is the desk available?</div>
+    </section>
+  </main>
+</body>
+</html>

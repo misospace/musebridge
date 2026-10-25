@@ -8,16 +8,25 @@
 <script>
   const token = '[synthetic-reply-token]';
   const content = [
-    ['You said: synthetic', 'X'.repeat(2000 - token.length) + token],
-    ['Synthetic Seller said: synthetic', 'Quoted ' + token],
-    ['You said: synthetic', 'X'.repeat(2000) + token],
-    ['Unattributed message', token]
+    ['You said: synthetic', 'X'.repeat(2000 - token.length) + token, '2026-09-14T10:30:00Z'],
+    ['Synthetic Seller said: synthetic', 'Quoted ' + token, '2026-09-14T10:31:00Z'],
+    ['You said: synthetic', 'X'.repeat(2000) + token, '2026-09-14T10:32:00Z'],
+    ['Unattributed message', token, '2026-09-14T10:33:00Z']
   ];
-  for (const [label, text] of content) {
+  for (const [index, [label, text, sentAt]] of content.entries()) {
     const row = document.createElement('div');
     row.setAttribute('role', 'row');
     row.setAttribute('aria-label', label);
+    // The page declares the size of the message set and the position of every rendered row in
+    // it, so the rendered rows can be told apart from a window of a longer thread.
+    row.setAttribute('aria-setsize', String(content.length));
+    row.setAttribute('aria-posinset', String(index + 1));
     row.textContent = text;
+    // The explicit timestamp is the only evidence of the message's place in the thread's
+    // timeline, so every attributed row carries one.
+    const time = document.createElement('time');
+    time.setAttribute('datetime', sentAt);
+    row.append(time);
     document.getElementById('synthetic-messages').append(row);
   }
 </script>

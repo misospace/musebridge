@@ -293,7 +293,11 @@ export class FacebookMessengerBackend implements ConversationBackend {
 
     const outcome = interpretMessengerThreadPage({ page: extracted, baseUrl: this.probe.baseUrl, threadId: input.thread_id });
     if (outcome.kind === 'error') throw new MarketplaceProviderError(outcome.code, outcome.message);
-    return { thread_id: input.thread_id, messages: [...outcome.messages] };
+    // The coverage is part of the read contract: the window's newest end is established by the
+    // explicit timestamps on the message rows (never by DOM order), and a truncated window says
+    // so rather than presenting the newest messages as the whole thread. An orientation that
+    // cannot be proven is a typed upstream error, never a window.
+    return { thread_id: input.thread_id, messages: [...outcome.messages], coverage: outcome.coverage };
   }
 
   // A draft needs only the conversation context, so it reuses this same thread read — including
