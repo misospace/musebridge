@@ -189,10 +189,11 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
     truncated: false
   };
   const rows = document.querySelectorAll('[role="row"]');
-  // Scan newest-first: the last row in DOM order is the thread's tail, so the collected window is
-  // anchored at the latest messages no matter how long the thread is. A head-anchored window made
-  // a just-sent idempotency token invisible to send reconciliation on long threads. The collected
-  // order is reversed at the end so the returned window stays chronological.
+  // Scan newest-first, starting at the last row in DOM order. The window claim is deliberately
+  // scoped to the observed DOM: the collected window contains the newest rows of the rendered
+  // log, independent of how long the thread is beyond what the page renders. A head-anchored
+  // window made a just-sent idempotency token invisible to send reconciliation on long threads.
+  // The collected order is reversed at the end so the returned window stays chronological.
   const scanLength = Math.min(rows.length, maxMessagesScan);
   for (let offset = 0; offset < scanLength; offset += 1) {
     if (messages.length >= maxMessages) {
