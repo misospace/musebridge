@@ -295,7 +295,7 @@ export const statusSuccessSchema = z.object({
   service_version: z.literal(SERVICE_VERSION),
   schema_version: z.literal(SCHEMA_VERSION),
   backend: backendNameSchema,
-  /** Deprecated alias of `marketplace_session.status` for pre-1.7 consumers; identical value whenever both are present. */
+  /** Deprecated alias of the marketplace-scope assessment for pre-1.7 consumers; when `marketplace_session` reports `disabled` this keeps the legacy browser-derived value. */
   facebook_session: facebookSessionSchema.optional(),
   /** Marketplace-scope Facebook session state, or `disabled` when the marketplace surface is not served by the Facebook backend (#147). */
   marketplace_session: surfaceSessionSchema.optional(),
