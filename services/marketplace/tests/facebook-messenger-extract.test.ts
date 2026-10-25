@@ -88,7 +88,15 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
       renderedRows: 6,
       scannedRows: 6,
       unattributedRows: 1,
-      undatedMessages: 0, candidateTextBudgetExceeded: false
+      undatedMessages: 0, candidateTextBudgetExceeded: false,
+      // The page declared a set of six items and rendered exactly those six rows, so the
+      // rendered rows are the whole message set and their positions agree with that count.
+      declaredSetSize: 6,
+      setSizeConflict: false,
+      attestedRows: 6,
+      positionedRows: 6,
+      newestPosition: 6,
+      distinctPositions: 6
     });
     expect(classifyMessengerThreadPage(extracted)).toBe('messages');
   });
@@ -105,7 +113,7 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     expect(inbox.threads[0]?.preview).toHaveLength(12);
 
     const threadHtml = '<!doctype html><html><body><main><a href="/logout/">Log out</a>' +
-      Array.from({ length: 8 }, (_, index) => `<div role="row" aria-label="Synthetic Seller said: ${index}">Message ${index}<time datetime="2026-09-14T10:0${index}:00Z"></time></div>`).join('') + '</main></body></html>';
+      Array.from({ length: 8 }, (_, index) => `<div role="row" aria-setsize="8" aria-label="Synthetic Seller said: ${index}">Message ${index}<time datetime="2026-09-14T10:0${index}:00Z"></time></div>`).join('') + '</main></body></html>';
     await page.setContent(threadHtml, { waitUntil: 'domcontentloaded' });
     const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
     // Every rendered row is examined and every attributed row is a candidate: the probe collects
@@ -114,6 +122,9 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     expect(extracted.diagnostics?.scannedRows).toBe(8);
     expect(extracted.diagnostics?.renderedRows).toBe(8);
     expect(extracted.diagnostics?.undatedMessages).toBe(0);
+    // The page declared the size of its message set, so the eight rendered rows are provably
+    // the whole set and the window can be certified.
+    expect(extracted.diagnostics?.declaredSetSize).toBe(8);
     const window = selectMessengerThreadWindow({
       candidates: extracted.messages,
       diagnostics: extracted.diagnostics,
@@ -131,13 +142,18 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
   });
 
   it('anchors the window on the timestamp-newest message even when the DOM order is newest-first', async () => {
-    await page.setContent('<main><span aria-label="Your account">Synthetic account</span><div role="log">' +
-      '<div role="row" aria-label="Synthetic Seller said: newest">Newest reply<time datetime="2026-09-14T12:00:00Z"></time></div>' +
-      '<div role="row" aria-label="Synthetic Seller said: oldest">Oldest reply<time datetime="2026-09-14T10:00:00Z"></time></div>' +
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span><div role="log" aria-setsize="2">' +
+      '<div role="row" aria-setsize="2" aria-label="Synthetic Seller said: newest">Newest reply<time datetime="2026-09-14T12:00:00Z"></time></div>' +
+      '<div role="row" aria-setsize="2" aria-label="Synthetic Seller said: oldest">Oldest reply<time datetime="2026-09-14T10:00:00Z"></time></div>' +
       '</div></main>');
     const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
     // The probe reports the candidates in DOM order; it never decides which end is newest.
     expect(extracted.messages.map((message) => message.text)).toEqual(['Newest reply', 'Oldest reply']);
+    // The message log declares the size of its set and each row attests that it belongs to it,
+    // so the two rendered rows are the whole set.
+    expect(extracted.diagnostics?.declaredSetSize).toBe(2);
+    expect(extracted.diagnostics?.renderedRows).toBe(2);
+    expect(extracted.diagnostics?.attestedRows).toBe(2);
     const window = selectMessengerThreadWindow({
       candidates: extracted.messages,
       diagnostics: extracted.diagnostics,
@@ -227,7 +243,15 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     // part of the evidence the window is proven from.
     expect(extracted.diagnostics).toEqual({
       hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false,
-      renderedRows: 1, scannedRows: 1, unattributedRows: 1, undatedMessages: 0, candidateTextBudgetExceeded: false
+      renderedRows: 1, scannedRows: 1, unattributedRows: 1, undatedMessages: 0, candidateTextBudgetExceeded: false,
+      // The only rendered row is a navigation entry outside the conversation, so this page
+      // declares no size for a message set: the read never certifies it as a window.
+      declaredSetSize: undefined,
+      setSizeConflict: false,
+      attestedRows: 0,
+      positionedRows: 0,
+      newestPosition: undefined,
+      distinctPositions: 0
     });
   });
 
@@ -268,8 +292,8 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     const base = Date.UTC(2026, 8, 14, 10, 0, 0);
     await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
       Array.from({ length: MESSENGER_EXTRACT_LIMITS.maxMessages }, (_, index) =>
-        `<div role="row" aria-label="You said: synthetic">Earlier synthetic message<time datetime="${new Date(base + index * 1000).toISOString()}"></time></div>`).join('') +
-      `<div role="row" aria-label="You said: synthetic">Newest [synthetic-reply-token]<time datetime="${new Date(base + 60_000).toISOString()}"></time></div></main>`);
+        `<div role="row" aria-setsize="${MESSENGER_EXTRACT_LIMITS.maxMessages + 1}" aria-label="You said: synthetic">Earlier synthetic message<time datetime="${new Date(base + index * 1000).toISOString()}"></time></div>`).join('') +
+      `<div role="row" aria-setsize="${MESSENGER_EXTRACT_LIMITS.maxMessages + 1}" aria-label="You said: synthetic">Newest [synthetic-reply-token]<time datetime="${new Date(base + 60_000).toISOString()}"></time></div></main>`);
     const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
     const window = selectMessengerThreadWindow({
       candidates: extracted.messages,
@@ -353,11 +377,14 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     const base = Date.UTC(2026, 8, 14, 10, 0, 0);
     await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
       Array.from({ length: 24 }, (_, index) =>
-        `<div role="row" aria-label="Synthetic Seller said: synthetic">Rendered earlier reply<time datetime="${new Date(base + index * 1000).toISOString()}"></time></div>`).join('') +
-      `<div role="row" aria-label="You said: synthetic">Newest [synthetic-reply-token]<time datetime="${new Date(base + 24_000).toISOString()}"></time></div></main>`);
+        `<div role="row" aria-setsize="25" aria-label="Synthetic Seller said: synthetic">Rendered earlier reply<time datetime="${new Date(base + index * 1000).toISOString()}"></time></div>`).join('') +
+      `<div role="row" aria-setsize="25" aria-label="You said: synthetic">Newest [synthetic-reply-token]<time datetime="${new Date(base + 24_000).toISOString()}"></time></div></main>`);
     const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
     expect(extracted.diagnostics?.scannedRows).toBe(25);
     expect(extracted.diagnostics?.renderedRows).toBe(25);
+    // The page declared the size of its message set, so the rendered rows are provably the
+    // whole set: the window is certified without claiming more coverage than the page shows.
+    expect(extracted.diagnostics?.declaredSetSize).toBe(25);
     const window = selectMessengerThreadWindow({
       candidates: extracted.messages,
       diagnostics: extracted.diagnostics,
@@ -367,6 +394,150 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     if (window.kind !== 'window') throw new Error('expected a proven window');
     expect(window.messages[window.messages.length - 1]?.text).toContain('[synthetic-reply-token]');
     expect(window.truncated).toBe(false);
+  });
+
+  it('fails closed when the page renders only a window of the message set it declares', async () => {
+    const html = readFileSync(new URL('./fixtures/facebook-messenger/thread-virtualized-subset.html', import.meta.url), 'utf8');
+    await page.setContent(html, { waitUntil: 'domcontentloaded' });
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    // The layout is recognized and every rendered row was examined, but the page declares a
+    // set of 120 messages and renders three of them: the newest message was never rendered,
+    // so the rendered rows can never be certified as the thread's tail.
+    expect(classifyMessengerThreadPage(extracted)).toBe('messages');
+    expect(extracted.diagnostics?.renderedRows).toBe(3);
+    expect(extracted.diagnostics?.scannedRows).toBe(3);
+    expect(extracted.diagnostics?.declaredSetSize).toBe(120);
+    expect(extracted.diagnostics?.positionedRows).toBe(3);
+    expect(extracted.diagnostics?.distinctPositions).toBe(3);
+    expect(extracted.diagnostics?.newestPosition).toBe(102);
+    const window = selectMessengerThreadWindow({
+      candidates: extracted.messages,
+      diagnostics: extracted.diagnostics,
+      maxMessages: MESSENGER_EXTRACT_LIMITS.maxMessages
+    });
+    expect(window).toEqual({ kind: 'unproven', reason: 'incomplete_rendered_set' });
+  });
+
+  it('fails closed when the rendered window is the oldest part of the declared message set', async () => {
+    const html = readFileSync(new URL('./fixtures/facebook-messenger/thread-virtualized-oldest.html', import.meta.url), 'utf8');
+    await page.setContent(html, { waitUntil: 'domcontentloaded' });
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    // The rendered rows are the first three of a declared set of 120, so the newest declared
+    // position stops far before the end of the set and the newest message is not among them.
+    expect(extracted.diagnostics?.renderedRows).toBe(3);
+    expect(extracted.diagnostics?.declaredSetSize).toBe(120);
+    expect(extracted.diagnostics?.positionedRows).toBe(3);
+    expect(extracted.diagnostics?.distinctPositions).toBe(3);
+    expect(extracted.diagnostics?.newestPosition).toBe(3);
+    const window = selectMessengerThreadWindow({
+      candidates: extracted.messages,
+      diagnostics: extracted.diagnostics,
+      maxMessages: MESSENGER_EXTRACT_LIMITS.maxMessages
+    });
+    expect(window).toEqual({ kind: 'unproven', reason: 'incomplete_rendered_set' });
+  });
+
+  it('fails closed when the declared positions stop before the end of the declared set', async () => {
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      '<div role="row" aria-setsize="3" aria-posinset="1" aria-label="Synthetic Seller said: first">First reply<time datetime="2026-09-14T10:00:00Z"></time></div>' +
+      '<div role="row" aria-setsize="3" aria-posinset="2" aria-label="You said: second">Second reply<time datetime="2026-09-14T10:01:00Z"></time></div>' +
+      '<div role="row" aria-setsize="3" aria-label="Synthetic Seller said: third">Third reply<time datetime="2026-09-14T10:02:00Z"></time></div>' +
+      '</main>');
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    // The rendered rows match the declared set size, but the rows that declare a position stop
+    // at the second one, so the declared accounting does not cover the whole set.
+    expect(extracted.diagnostics?.renderedRows).toBe(3);
+    expect(extracted.diagnostics?.declaredSetSize).toBe(3);
+    expect(extracted.diagnostics?.positionedRows).toBe(2);
+    expect(extracted.diagnostics?.distinctPositions).toBe(2);
+    expect(extracted.diagnostics?.newestPosition).toBe(2);
+    const window = selectMessengerThreadWindow({
+      candidates: extracted.messages,
+      diagnostics: extracted.diagnostics,
+      maxMessages: MESSENGER_EXTRACT_LIMITS.maxMessages
+    });
+    expect(window).toEqual({ kind: 'unproven', reason: 'incomplete_rendered_set' });
+  });
+
+  it('treats the ARIA unknown-size marker as no declared set size', async () => {
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      '<div role="log" aria-setsize="-1">' +
+      '<div role="row" aria-label="Synthetic Seller said: first">First reply<time datetime="2026-09-14T10:00:00Z"></time></div>' +
+      '</div></main>');
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    // `-1` is the ARIA "unknown size" marker, so the page declares no size at all and the one
+    // rendered row cannot be told apart from a window of a longer thread.
+    expect(extracted.diagnostics?.renderedRows).toBe(1);
+    expect(extracted.diagnostics?.declaredSetSize).toBeUndefined();
+    const window = selectMessengerThreadWindow({
+      candidates: extracted.messages,
+      diagnostics: extracted.diagnostics,
+      maxMessages: MESSENGER_EXTRACT_LIMITS.maxMessages
+    });
+    expect(window).toEqual({ kind: 'unproven', reason: 'missing_set_accounting' });
+  });
+
+  it('fails closed when the scope holds rows of another set beside the message rows', async () => {
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      '<div role="log" aria-setsize="5">' +
+      '<div role="row" aria-setsize="5" aria-label="Synthetic Seller said: first">First reply<time datetime="2026-09-14T10:00:00Z"></time></div>' +
+      '<div role="row" aria-setsize="5" aria-label="You said: second">Second reply<time datetime="2026-09-14T10:01:00Z"></time></div>' +
+      '<div role="row" aria-setsize="5" aria-label="Synthetic Seller said: third">Third reply<time datetime="2026-09-14T10:02:00Z"></time></div>' +
+      '<div role="grid">' +
+      '<div role="row">Unrelated navigation row</div><div role="row">Unrelated navigation row</div>' +
+      '</div></div></main>');
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    // The scope renders five rows and declares a set of five, but only the three message rows
+    // attest that they belong to that set: the other two rows belong to a nested set, so the
+    // count alone must not certify the rendered rows as the whole message set.
+    expect(extracted.diagnostics?.renderedRows).toBe(5);
+    expect(extracted.diagnostics?.declaredSetSize).toBe(5);
+    expect(extracted.diagnostics?.attestedRows).toBe(3);
+    const window = selectMessengerThreadWindow({
+      candidates: extracted.messages,
+      diagnostics: extracted.diagnostics,
+      maxMessages: MESSENGER_EXTRACT_LIMITS.maxMessages
+    });
+    expect(window).toEqual({ kind: 'unproven', reason: 'incomplete_rendered_set' });
+  });
+
+  it('certifies a set whose container counts it with aria-rowcount and positions its rows', async () => {
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      '<div role="grid" aria-rowcount="2">' +
+      '<div role="row" aria-posinset="1" aria-label="Synthetic Seller said: first">First reply<time datetime="2026-09-14T10:00:00Z"></time></div>' +
+      '<div role="row" aria-posinset="2" aria-label="You said: second">Second reply<time datetime="2026-09-14T10:01:00Z"></time></div>' +
+      '</div></main>');
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    // `aria-rowcount` is the container counter for a row set, and every row declares its own
+    // position in that set, so the two rendered rows are provably the whole set.
+    expect(extracted.diagnostics?.declaredSetSize).toBe(2);
+    expect(extracted.diagnostics?.attestedRows).toBe(2);
+    expect(extracted.diagnostics?.newestPosition).toBe(2);
+    const window = selectMessengerThreadWindow({
+      candidates: extracted.messages,
+      diagnostics: extracted.diagnostics,
+      maxMessages: MESSENGER_EXTRACT_LIMITS.maxMessages
+    });
+    expect(window.kind).toBe('window');
+    expect(window.kind === 'window' ? window.truncated : null).toBe(false);
+  });
+
+  it('fails closed when the container and the rows declare different set sizes', async () => {
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      '<div role="log" aria-setsize="3">' +
+      '<div role="row" aria-setsize="4" aria-label="Synthetic Seller said: first">First reply<time datetime="2026-09-14T10:00:00Z"></time></div>' +
+      '<div role="row" aria-setsize="4" aria-label="You said: second">Second reply<time datetime="2026-09-14T10:01:00Z"></time></div>' +
+      '</div></main>');
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    // The container and the rows describe different sets, so the scope holds more than one set
+    // and nothing in it can be certified as the whole message set.
+    expect(extracted.diagnostics?.setSizeConflict).toBe(true);
+    const window = selectMessengerThreadWindow({
+      candidates: extracted.messages,
+      diagnostics: extracted.diagnostics,
+      maxMessages: MESSENGER_EXTRACT_LIMITS.maxMessages
+    });
+    expect(window).toEqual({ kind: 'unproven', reason: 'incomplete_rendered_set' });
   });
 });
 
@@ -404,16 +575,29 @@ describe('classifyMessengerComposerCount (pure composer decision contract)', () 
 // window is established only by the explicit timestamps carried on the message rows, so the
 // decision is applied on the Node side and runs locally without Chromium.
 describe('selectMessengerThreadWindow (pure window orientation contract)', () => {
-  const diagnostics = (overrides: Partial<NonNullable<ExtractedThreadPage['diagnostics']>> = {}) => ({
-    hasMessageLog: true,
-    hasArticleMessages: false,
-    hasExplicitEmptyState: false,
-    renderedRows: 2,
-    scannedRows: 2,
-    unattributedRows: 0,
-    undatedMessages: 0, candidateTextBudgetExceeded: false,
-    ...overrides
-  });
+  // A proven window describes a page that declared the size of its message set, rendered exactly
+  // that many rows, and had every rendered row attest that it belongs to that set. The declared
+  // size follows the rendered rows unless a case states a different one, and an explicitly absent
+  // size states that the page declared none.
+  const diagnostics = (overrides: Partial<NonNullable<ExtractedThreadPage['diagnostics']>> = {}) => {
+    const renderedRows = overrides.renderedRows ?? 2;
+    const declaredSetSize = Object.hasOwn(overrides, 'declaredSetSize') ? overrides.declaredSetSize : renderedRows;
+    return {
+      hasMessageLog: true,
+      hasArticleMessages: false,
+      hasExplicitEmptyState: false,
+      renderedRows,
+      scannedRows: overrides.scannedRows ?? renderedRows,
+      unattributedRows: 0,
+      undatedMessages: 0, candidateTextBudgetExceeded: false,
+      declaredSetSize,
+      setSizeConflict: false,
+      attestedRows: renderedRows,
+      positionedRows: 0,
+      distinctPositions: 0,
+      ...overrides
+    };
+  };
 
   const candidate = (text: string, sentAt?: string) => ({
     sender: 'you' as const,
@@ -551,5 +735,112 @@ describe('selectMessengerThreadWindow (pure window orientation contract)', () =>
       diagnostics: diagnostics({ candidateTextBudgetExceeded: true }),
       maxMessages: 50
     })).toEqual({ kind: 'unproven', reason: 'incomplete_scan' });
+  });
+
+  it('fails closed when the page reports no size for its message set', () => {
+    // A page that declares no set size gives no way to tell the rendered rows apart from a
+    // window of a longer thread, so the newest end of the thread is not proven.
+    expect(selectMessengerThreadWindow({
+      candidates: [candidate('Dated', '2026-09-14T10:00:00.000Z')],
+      diagnostics: diagnostics({ declaredSetSize: undefined }),
+      maxMessages: 50
+    })).toEqual({ kind: 'unproven', reason: 'missing_set_accounting' });
+  });
+
+  it('fails closed when a rendered row attests no membership in the declared set', () => {
+    // A row of another set — a nested list, a grid of unrelated rows — can make the rendered
+    // count match the declared size by coincidence, so every row must attest its membership.
+    expect(selectMessengerThreadWindow({
+      candidates: [candidate('Dated', '2026-09-14T10:00:00.000Z')],
+      diagnostics: diagnostics({ renderedRows: 3, scannedRows: 3, declaredSetSize: 3, attestedRows: 2 }),
+      maxMessages: 50
+    })).toEqual({ kind: 'unproven', reason: 'incomplete_rendered_set' });
+  });
+
+  it('fails closed when the scope declares conflicting set sizes', () => {
+    // The container and the rows describe different sets, so the scope holds more than one set.
+    expect(selectMessengerThreadWindow({
+      candidates: [candidate('Dated', '2026-09-14T10:00:00.000Z')],
+      diagnostics: diagnostics({ setSizeConflict: true }),
+      maxMessages: 50
+    })).toEqual({ kind: 'unproven', reason: 'incomplete_rendered_set' });
+  });
+
+  it('fails closed when the declared set size is larger than the rendered rows', () => {
+    // The virtualized-subset case: the page declared a longer set than it rendered, so the
+    // rows the read examined are a window and the newest message may not be among them.
+    expect(selectMessengerThreadWindow({
+      candidates: [candidate('Dated', '2026-09-14T10:00:00.000Z')],
+      diagnostics: diagnostics({ renderedRows: 3, scannedRows: 3, declaredSetSize: 120 }),
+      maxMessages: 50
+    })).toEqual({ kind: 'unproven', reason: 'incomplete_rendered_set' });
+  });
+
+  it('fails closed when the declared set size is smaller than the rendered rows', () => {
+    // A declared size that counts fewer items than the rows carry is a stale or fabricated
+    // count, so the rendered rows cannot be certified as the whole set.
+    expect(selectMessengerThreadWindow({
+      candidates: [candidate('Dated', '2026-09-14T10:00:00.000Z')],
+      diagnostics: diagnostics({ renderedRows: 3, scannedRows: 3, declaredSetSize: 1 }),
+      maxMessages: 50
+    })).toEqual({ kind: 'unproven', reason: 'incomplete_rendered_set' });
+  });
+
+  it('fails closed when two rows claim the same position in the set', () => {
+    expect(selectMessengerThreadWindow({
+      candidates: [candidate('Dated', '2026-09-14T10:00:00.000Z')],
+      diagnostics: diagnostics({
+        renderedRows: 3,
+        scannedRows: 3,
+        declaredSetSize: 3,
+        positionedRows: 3,
+        distinctPositions: 2,
+        newestPosition: 3
+      }),
+      maxMessages: 50
+    })).toEqual({ kind: 'unproven', reason: 'incomplete_rendered_set' });
+  });
+
+  it('fails closed when the newest declared position stops before the end of the set', () => {
+    // The positioned rows do not reach the declared size, so the set the page declared is
+    // longer than the rows that carry its accounting.
+    expect(selectMessengerThreadWindow({
+      candidates: [candidate('Dated', '2026-09-14T10:00:00.000Z')],
+      diagnostics: diagnostics({
+        renderedRows: 3,
+        scannedRows: 3,
+        declaredSetSize: 3,
+        positionedRows: 2,
+        distinctPositions: 2,
+        newestPosition: 2
+      }),
+      maxMessages: 50
+    })).toEqual({ kind: 'unproven', reason: 'incomplete_rendered_set' });
+  });
+
+  it('proves the window when the declared set size and the declared positions agree', () => {
+    const outcome = selectMessengerThreadWindow({
+      candidates: [
+        candidate('Older', '2026-09-14T10:00:00.000Z'),
+        candidate('Newest', '2026-09-14T12:00:00.000Z')
+      ],
+      diagnostics: diagnostics({
+        renderedRows: 2,
+        scannedRows: 2,
+        declaredSetSize: 2,
+        positionedRows: 2,
+        distinctPositions: 2,
+        newestPosition: 2
+      }),
+      maxMessages: 50
+    });
+    expect(outcome).toEqual({
+      kind: 'window',
+      messages: [
+        { sender: 'you', text: 'Older', sentAt: '2026-09-14T10:00:00.000Z' },
+        { sender: 'you', text: 'Newest', sentAt: '2026-09-14T12:00:00.000Z' }
+      ],
+      truncated: false
+    });
   });
 });

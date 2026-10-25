@@ -121,12 +121,15 @@ export type MessengerThreadOutcome =
   | { kind: 'error'; code: ProviderErrorCode; message: string };
 
 // The window contract: the newest end of the window is established only by explicit timestamps
-// on the message rows, so a returned `tail` window is timestamp-proven. When that proof is
-// unavailable the read fails closed with a typed upstream error instead of guessing an end.
+// on the message rows, and the rendered rows must be provably the whole message set, so a
+// returned `tail` window is timestamp-proven and complete. When that proof is unavailable the
+// read fails closed with a typed upstream error instead of guessing an end.
 const UNPROVEN_WINDOW_MESSAGES = {
   undated_messages: 'The newest message in the Facebook Messenger thread could not be established from explicit timestamps.',
   incomplete_scan: 'The Facebook Messenger thread scan did not examine every rendered row; its newest message could not be established.',
-  missing_diagnostics: 'The Facebook Messenger thread coverage could not be established.'
+  missing_diagnostics: 'The Facebook Messenger thread coverage could not be established.',
+  missing_set_accounting: 'The Facebook Messenger thread did not report the size of its message set; its newest message could not be established.',
+  incomplete_rendered_set: 'The Facebook Messenger thread rendered only part of its message set; its newest message could not be established.'
 } as const;
 
 // A message that cannot be represented means the window is not the proven window, so the read
