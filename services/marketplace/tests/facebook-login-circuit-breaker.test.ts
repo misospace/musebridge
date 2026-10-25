@@ -123,6 +123,18 @@ describe('FacebookLoginCircuitBreaker', () => {
       expect(gate.snapshot(50)).toEqual({ status: 'cooldown', failures: 2, blockedForMs: 100 });
     });
 
+    it('holds credential attempts in the other scope back while a scope cooldown is active', () => {
+      const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
+      const permit = gate.beginAttempt('marketplace', 0)!;
+      gate.settleAttempt(permit, 'failure', 0);
+      expect(gate.snapshot(10)).toEqual({ status: 'cooldown', failures: 1, blockedForMs: 40 });
+      // The cooldown window is account-wide: the two profiles share one Facebook account, so the
+      // other scope may not submit a credential while the cooldown stands.
+      expect(gate.beginAttempt('messenger', 10)).toBeUndefined();
+      // The refusal lasts only as long as the cooldown: once it expires the other scope may try.
+      expect(gate.beginAttempt('messenger', 50)).toBeDefined();
+    });
+
     it('keeps a separate failure counter and cooldown per scope', () => {
       const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 5 });
       gate.recordCycleFailure('marketplace', 0);

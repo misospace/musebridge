@@ -219,6 +219,31 @@ describe('Facebook backend login gate', () => {
     await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
   });
 
+  it('closes a Marketplace-owned challenge hard open with its own probe-verified usable session', async () => {
+    const state = setup(new FacebookLoginCircuitBreaker({ baseCooldownMs: 60_000, maxCooldownMs: 120_000, maxFailures: 3 }));
+    mockProbe(state.marketplaceProbe, [captchaRequired]);
+    const attempt = mockLogin(state.marketplaceLogin, ['timeout']);
+    // The Marketplace scope observes the challenge, so it owns the account-wide hard open.
+    await expect(state.marketplace.search(search, signal())).rejects.toMatchObject({
+      name: 'ProviderError',
+      code: 'CAPTCHA_REQUIRED',
+      message: 'Facebook Marketplace requires a captcha challenge.'
+    });
+    expect(attempt).not.toHaveBeenCalled();
+    expect(state.gate.snapshot()).toEqual({ status: 'open', reason: 'challenge' });
+
+    // The Marketplace scope's own probe verifies a usable session, so it closes its own open.
+    mockProbe(state.marketplaceProbe, [usable]);
+    await expect(marketplaceSession(state.marketplace)).resolves.toBeUndefined();
+    expect(state.gate.snapshot()).toEqual({ status: 'closed' });
+
+    // A later credential attempt is allowed again in the Marketplace scope.
+    mockProbe(state.marketplaceProbe, [loginRequired]);
+    await expectLoginRequired(state.marketplace.search(search, signal()), 'Facebook Marketplace requires login.');
+    expect(attempt).toHaveBeenCalledTimes(1);
+    await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
+  });
+
   it('hard-opens the shared gate when the Marketplace probe observes a captcha', async () => {
     const state = setup(new FacebookLoginCircuitBreaker({ baseCooldownMs: 60_000, maxCooldownMs: 120_000, maxFailures: 3 }));
     mockProbe(state.marketplaceProbe, [captchaRequired, loginRequired]);
