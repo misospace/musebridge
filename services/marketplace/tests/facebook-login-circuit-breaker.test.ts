@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   FACEBOOK_LOGIN_GATE_DEFAULTS,
-  FacebookLoginCircuitBreaker,
-  type FacebookLoginScope
+  FacebookLoginCircuitBreaker
 } from '../src/facebook-login-circuit-breaker.js';
 
 describe('FacebookLoginCircuitBreaker', () => {
@@ -252,73 +251,70 @@ describe('FacebookLoginCircuitBreaker', () => {
     });
   });
 
-  describe('challenge notifications', () => {
-    it('notifies a subscriber with the observing scope once the gate has opened', () => {
+  describe('permit revocation', () => {
+    it('aborts the active permit when a challenge is recorded in the same scope', () => {
       const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
-      const seen: FacebookLoginScope[] = [];
-      const observed: string[] = [];
-      gate.subscribeChallenge((scope) => {
-        seen.push(scope);
-        // The gate state is already updated when the listener runs, so the open the challenge
-        // caused is visible to the listener.
-        observed.push(gate.snapshot(0).status);
-      });
-      gate.recordChallenge('messenger', 0);
-      expect(seen).toEqual(['messenger']);
-      expect(observed).toEqual(['open']);
+      const permit = gate.beginAttempt('marketplace', 0)!;
+      expect(permit.signal.aborted).toBe(false);
+      gate.recordChallenge('marketplace', 0);
+      // The permit is revoked by the challenge, whatever scope recorded it.
+      expect(permit.signal.aborted).toBe(true);
+      expect(gate.snapshot(0)).toEqual({ status: 'open', reason: 'challenge' });
     });
 
-    it('notifies a subscriber when an attempt settles as a challenge', () => {
+    it('aborts the active permit when a challenge is recorded in the other scope', () => {
       const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
-      const seen: FacebookLoginScope[] = [];
-      gate.subscribeChallenge((scope) => seen.push(scope));
+      const permit = gate.beginAttempt('marketplace', 0)!;
+      expect(permit.signal.aborted).toBe(false);
+      // A challenge is a fact about the account, so the other scope's probe revokes this scope's
+      // attempt too.
+      gate.recordChallenge('messenger', 0);
+      expect(permit.signal.aborted).toBe(true);
+    });
+
+    it('charges no retry budget to the scope whose attempt a challenge revoked', () => {
+      const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
+      const permit = gate.beginAttempt('marketplace', 0)!;
+      // The Messenger scope observes a challenge while the Marketplace attempt is in flight.
+      gate.recordChallenge('messenger', 0);
+      expect(permit.signal.aborted).toBe(true);
+      // The revoked attempt is abandoned rather than failed, so the Marketplace scope spends no
+      // retry budget on it and the account closes cleanly once the owning scope verifies a
+      // session.
+      gate.settleAttempt(permit, 'abandoned', 0);
+      gate.recordSuccess('messenger', 0);
+      expect(gate.snapshot(0)).toEqual({ status: 'closed' });
+    });
+
+    it('leaves a settled permit unrevoked when a challenge is recorded later', () => {
+      const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
+      const permit = gate.beginAttempt('marketplace', 0)!;
+      gate.settleAttempt(permit, 'abandoned', 0);
+      gate.recordChallenge('messenger', 0);
+      // The permit already concluded, so nothing is left to revoke.
+      expect(permit.signal.aborted).toBe(false);
+    });
+
+    it('does not revoke a permit that reported the challenge itself', () => {
+      const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
       const permit = gate.beginAttempt('marketplace', 0)!;
       gate.settleAttempt(permit, 'challenge', 0);
-      expect(seen).toEqual(['marketplace']);
+      // The attempt reported the challenge, so it has already stopped submitting credentials.
+      expect(permit.signal.aborted).toBe(false);
       expect(gate.snapshot(0)).toEqual({ status: 'open', reason: 'challenge' });
     });
 
-    it('notifies a subscriber when a challenge is recorded while an open already stands', () => {
+    it('grants a permit whose signal starts unrevoked and refuses to grant one while the gate is open', () => {
       const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
-      const seen: FacebookLoginScope[] = [];
-      gate.subscribeChallenge((scope) => seen.push(scope));
-      gate.recordChallenge('marketplace', 0);
-      // The standing open keeps its owner, but the later observer is still told about the
-      // challenge, so an attempt it owns can be revoked.
+      const permit = gate.beginAttempt('marketplace', 0)!;
+      // The revocation channel is armed together with the grant, so a fresh permit starts live.
+      expect(permit.signal.aborted).toBe(false);
+      gate.settleAttempt(permit, 'abandoned', 0);
       gate.recordChallenge('messenger', 0);
-      expect(seen).toEqual(['marketplace', 'messenger']);
-    });
-
-    it('stops notifying after the subscription is cancelled', () => {
-      const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
-      const seen: FacebookLoginScope[] = [];
-      const unsubscribe = gate.subscribeChallenge((scope) => seen.push(scope));
-      unsubscribe();
-      gate.recordChallenge('messenger', 0);
-      expect(seen).toEqual([]);
-      // Cancelling twice is harmless.
-      expect(() => unsubscribe()).not.toThrow();
-      // A challenge reported by a settled attempt is not notified either.
-      const other = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
-      const otherSeen: FacebookLoginScope[] = [];
-      other.subscribeChallenge((scope) => otherSeen.push(scope))();
-      const permit = other.beginAttempt('marketplace', 0)!;
-      other.settleAttempt(permit, 'challenge', 0);
-      expect(otherSeen).toEqual([]);
-    });
-
-    it('keeps the gate usable when a listener throws', () => {
-      const gate = new FacebookLoginCircuitBreaker({ baseCooldownMs: 50, maxCooldownMs: 200, maxFailures: 3 });
-      const seen: FacebookLoginScope[] = [];
-      gate.subscribeChallenge(() => {
-        throw new Error('listener failure');
-      });
-      gate.subscribeChallenge((scope) => seen.push(scope));
-      // The throwing listener neither corrupts the gate nor breaks the caller, and the other
-      // listener is still told about the challenge.
-      expect(() => gate.recordChallenge('messenger', 0)).not.toThrow();
-      expect(seen).toEqual(['messenger']);
       expect(gate.snapshot(0)).toEqual({ status: 'open', reason: 'challenge' });
+      // The hard open refuses every scope, so no further permit is granted.
+      expect(gate.beginAttempt('marketplace', 0)).toBeUndefined();
+      expect(gate.beginAttempt('messenger', 0)).toBeUndefined();
     });
   });
 

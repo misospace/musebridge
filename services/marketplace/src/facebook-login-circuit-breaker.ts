@@ -23,6 +23,12 @@ export interface FacebookLoginAttemptPermit {
   readonly id: symbol;
   /** The scope that asked for the attempt; the outcome is attributed to it when it settles. */
   readonly scope: FacebookLoginScope;
+  /**
+   * The revocation channel of this attempt. The gate aborts it when a challenge is recorded while
+   * the permit is the active attempt, so the attempt can be stopped before it submits any
+   * further credentials. It is armed in the same synchronous call that grants the permit.
+   */
+  readonly signal: AbortSignal;
 }
 
 export type FacebookLoginGateSnapshot =
@@ -60,13 +66,15 @@ export class FacebookLoginCircuitBreaker {
   private openReason: 'failures' | 'challenge' | undefined;
   private openScope: FacebookLoginScope | undefined;
   private activePermit: FacebookLoginAttemptPermit | undefined;
-  private readonly settled = new WeakSet<object>();
   /**
-   * The listeners told about a recorded challenge. A challenge is a fact about the account, so a
-   * credential attempt that is already in flight has to learn about it: the backends subscribe
-   * here and abort the attempt they own before it can submit any further credentials.
+   * The revocation channel of the active attempt. It is armed in the same synchronous call that
+   * grants the permit, so a challenge recorded at any later moment always finds it live. There
+   * used to be a listener channel here instead: it existed only to deliver the revocation, and a
+   * revocation whose delivery depends on the caller registering in the right order is exactly the
+   * race this gate has to close.
    */
-  private readonly challengeListeners = new Set<(scope: FacebookLoginScope) => void>();
+  private activeRevocation: AbortController | undefined;
+  private readonly settled = new WeakSet<object>();
 
   constructor(options: FacebookLoginCircuitBreakerOptions = {}) {
     this.baseCooldownMs = options.baseCooldownMs ?? FACEBOOK_LOGIN_GATE_DEFAULTS.baseCooldownMs;
@@ -102,11 +110,16 @@ export class FacebookLoginCircuitBreaker {
       this.applyFailure(claiming, now);
       return undefined;
     }
+    const revocation = new AbortController();
     const permit: FacebookLoginAttemptPermit = Object.freeze({
       id: Symbol('facebook-login-attempt'),
-      scope
+      scope,
+      signal: revocation.signal
     });
+    // The permit and its revocation channel are armed together, so no challenge can slip in
+    // between the grant and the moment the attempt becomes revocable.
     this.activePermit = permit;
+    this.activeRevocation = revocation;
     return permit;
   }
 
@@ -120,6 +133,7 @@ export class FacebookLoginCircuitBreaker {
     if (this.activePermit !== permit) throw new TypeError('permit was not granted by this circuit breaker');
     this.settled.add(permit);
     this.activePermit = undefined;
+    this.activeRevocation = undefined;
     // The outcome belongs to the scope that asked for the attempt; another scope's claim, counter,
     // cooldown, and hard-open ownership are never touched here.
     const scope = permit.scope;
@@ -139,8 +153,9 @@ export class FacebookLoginCircuitBreaker {
         // cycle for the scope that hit it.
         this.applyFailure(scope, now);
       }
-      // The gate state is already updated, so a listener sees the open the challenge caused.
-      this.notifyChallenge(scope);
+      // The attempt reported the challenge itself, so it has already stopped submitting
+      // credentials and its own signal is deliberately not aborted. The single-permit rule means
+      // no other attempt can be in flight, so there is nothing left to revoke.
     } else if (outcome === 'accepted') {
       // The login self-classified as authenticated, but no probe has confirmed a usable session
       // yet, so the claim stands until a probe verifies it or the next attempt grades it.
@@ -169,35 +184,10 @@ export class FacebookLoginCircuitBreaker {
       // cycle for the scope that hit it.
       this.applyFailure(scope, now);
     }
-    // The gate state is already updated, so a listener sees the open the challenge caused.
-    this.notifyChallenge(scope);
-  }
-
-  /**
-   * Registers a listener that is told whenever a challenge is recorded, whether the session probe
-   * observed it (`recordChallenge`) or a credential attempt reported it (`settleAttempt(permit,
-   * 'challenge')`). The notified scope is the scope that observed the challenge, so a listener can
-   * tell whose profile hit it.
-   *
-   * A listener must not throw: a throwing listener is swallowed, so it can neither corrupt the
-   * gate nor break the caller that recorded the challenge. The gate has no logger, so there is
-   * nowhere to report such a failure. The returned function unsubscribes the listener; calling it
-   * more than once is harmless.
-   */
-  subscribeChallenge(listener: (scope: FacebookLoginScope) => void): () => void {
-    if (typeof listener !== 'function') throw new TypeError('listener must be a function');
-    // Each registration gets its own wrapper, so registering the same function twice keeps two
-    // independent subscriptions and unsubscribing one leaves the other in place.
-    const wrapped = (scope: FacebookLoginScope): void => {
-      listener(scope);
-    };
-    this.challengeListeners.add(wrapped);
-    let subscribed = true;
-    return () => {
-      if (!subscribed) return;
-      subscribed = false;
-      this.challengeListeners.delete(wrapped);
-    };
+    // The gate state is already updated, so the revoked attempt sees the open the challenge
+    // caused. A challenge is a fact about the account, so the permit that is active right now is
+    // revoked whatever scope recorded it.
+    this.revokeActivePermit();
   }
 
   recordCycleFailure(scope: FacebookLoginScope, now = Date.now()): void {
@@ -269,18 +259,23 @@ export class FacebookLoginCircuitBreaker {
   }
 
   /**
-   * Tells every subscriber that a challenge was recorded. The gate state is already updated when
-   * this runs. A listener that throws is swallowed: it must not corrupt the gate (the state is
-   * already written) nor propagate into the caller that recorded the challenge.
+   * Revokes the permit that is active right now, if any. The gate state is already updated when
+   * this runs, so the revoked attempt's abort handler sees the open the challenge caused.
+   *
+   * The revocation has taken effect once `abort()` returns, so a synchronous failure of the call
+   * itself is swallowed here: it must not propagate into the caller that recorded the challenge.
+   * A failure raised by an abort listener is Node's business, not the gate's: it is reported
+   * asynchronously and never reaches this caller.
    */
-  private notifyChallenge(scope: FacebookLoginScope): void {
-    for (const listener of [...this.challengeListeners]) {
-      try {
-        listener(scope);
-      } catch {
-        // The gate has no logger and a listener must never break the caller that recorded the
-        // challenge, so the failure is swallowed here.
-      }
+  private revokeActivePermit(): void {
+    const revocation = this.activeRevocation;
+    if (revocation === undefined) return;
+    if (revocation.signal.aborted) return;
+    try {
+      revocation.abort(new Error('A Facebook login challenge was recorded'));
+    } catch {
+      // The revocation has already taken effect, so the failure must not reach the caller that
+      // recorded the challenge.
     }
   }
 

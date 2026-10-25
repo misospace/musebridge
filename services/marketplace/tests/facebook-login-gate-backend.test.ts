@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { BrowserSessionManager } from '../src/browser.js';
 import { FacebookSessionProbe } from '../src/facebook.js';
 import { FacebookCredentialLogin } from '../src/facebook-login.js';
-import { FacebookLoginCircuitBreaker } from '../src/facebook-login-circuit-breaker.js';
+import { FacebookLoginCircuitBreaker, type FacebookLoginScope } from '../src/facebook-login-circuit-breaker.js';
 import { FacebookMarketplaceBackend } from '../src/facebook-marketplace-backend.js';
 import { FacebookMessengerBackend } from '../src/facebook-messenger-backend.js';
 import { searchInputSchema, threadsListInputSchema } from '../src/domain.js';
@@ -68,6 +68,21 @@ function mockInFlightAttempt(login: FacebookCredentialLogin): {
     });
   });
   return { signal: () => received, submitted: () => submitted };
+}
+
+/**
+ * Records a challenge in the window between the gate granting the permit and the credential
+ * attempt starting: the grant is intercepted and the challenge is recorded synchronously right
+ * after the permit is granted. The backends defer the attempt by one microtask, so the challenge
+ * lands exactly in that window, before any credential could be submitted.
+ */
+function challengeOnGrant(gate: FacebookLoginCircuitBreaker, scope: FacebookLoginScope) {
+  const grant = gate.beginAttempt.bind(gate);
+  vi.spyOn(gate, 'beginAttempt').mockImplementation((requested: FacebookLoginScope, now?: number) => {
+    const permit = grant(requested, now);
+    if (permit) gate.recordChallenge(scope, now);
+    return permit;
+  });
 }
 
 /**
@@ -314,6 +329,62 @@ describe('Facebook backend login gate', () => {
     // A plain login requirement is the credential path's business: it grades one failed cycle and
     // leaves the gate in a cooldown, never the challenge hard open.
     expect(state.gate.snapshot()).toMatchObject({ status: 'cooldown', failures: 1 });
+    await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
+  });
+
+  it('submits no credentials when a challenge lands between the Marketplace permit grant and the attempt', async () => {
+    const state = setup(new FacebookLoginCircuitBreaker({ baseCooldownMs: 60_000, maxCooldownMs: 120_000, maxFailures: 3 }));
+    mockProbe(state.marketplaceProbe, [loginRequired]);
+    const attempt = mockLogin(state.marketplaceLogin);
+    // The Messenger scope observes a challenge in the window between the gate granting the
+    // Marketplace permit and the credential attempt starting.
+    challengeOnGrant(state.gate, 'messenger');
+
+    await expectLoginRequired(state.marketplace.search(search, signal()), 'Facebook Marketplace requires login.');
+    // The revoked attempt never started, so no credential was submitted.
+    expect(attempt).not.toHaveBeenCalled();
+    expect(state.gate.snapshot()).toEqual({ status: 'open', reason: 'challenge' });
+    await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
+  });
+
+  it('submits no credentials when a challenge lands between the Messenger permit grant and the attempt', async () => {
+    const state = setup(new FacebookLoginCircuitBreaker({ baseCooldownMs: 60_000, maxCooldownMs: 120_000, maxFailures: 3 }));
+    mockProbe(state.messengerProbe, [loginRequired]);
+    const attempt = mockLogin(state.messengerLogin);
+    // The Marketplace scope observes a challenge in the window between the gate granting the
+    // Messenger permit and the credential attempt starting.
+    challengeOnGrant(state.gate, 'marketplace');
+
+    await expect(messengerSession(state.messenger)).rejects.toMatchObject({
+      name: 'ProviderError',
+      code: 'LOGIN_REQUIRED',
+      message: 'Facebook login is required to read Marketplace conversations.'
+    });
+    // The revoked attempt never started, so no credential was submitted.
+    expect(attempt).not.toHaveBeenCalled();
+    expect(state.gate.snapshot()).toEqual({ status: 'open', reason: 'challenge' });
+    await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
+  });
+
+  it('charges no retry budget to a scope whose attempt a challenge cut short', async () => {
+    const state = setup(new FacebookLoginCircuitBreaker({ baseCooldownMs: 60_000, maxCooldownMs: 120_000, maxFailures: 3 }));
+    mockProbe(state.marketplaceProbe, [loginRequired]);
+    // The Messenger scope observes a challenge while the Marketplace attempt is running, and the
+    // attempt concludes with a failed login rather than throwing.
+    const attempt = vi.spyOn(state.marketplaceLogin, 'attempt').mockImplementation(async () => {
+      state.gate.recordChallenge('messenger', Date.now());
+      return { outcome: 'timeout' as const, code: 'LOGIN_REQUIRED' as const };
+    });
+
+    await expectLoginRequired(state.marketplace.search(search, signal()), 'Facebook Marketplace requires login.');
+    expect(attempt).toHaveBeenCalledTimes(1);
+    expect(state.gate.snapshot()).toEqual({ status: 'open', reason: 'challenge' });
+    // The Messenger scope owns the open and closes it with its own verified session.
+    mockProbe(state.messengerProbe, [usable]);
+    await expect(messengerSession(state.messenger)).resolves.toBeUndefined();
+    // The revoked attempt was abandoned rather than failed, so the Marketplace scope spends no
+    // retry budget on it.
+    expect(state.gate.snapshot()).toEqual({ status: 'closed' });
     await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
   });
 

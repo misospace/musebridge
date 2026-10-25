@@ -327,21 +327,27 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
   }
 
   private async performCredentialLogin(permit: FacebookLoginAttemptPermit): Promise<{ recovered: boolean; code?: FacebookProbeCode }> {
-    // A challenge recorded while this attempt is in flight revokes it: the attempt is aborted
-    // before it can submit any further credentials. The challenge is a fact about the account, so
-    // the other scope's probe can revoke this scope's attempt too.
-    const challenge = new AbortController();
-    let revoked = false;
-    const unsubscribe = this.loginGate.subscribeChallenge(() => {
-      revoked = true;
-      challenge.abort(new Error('A Facebook login challenge was recorded'));
-    });
-    const attemptSignal = AbortSignal.any([this.loginController.signal, challenge.signal]);
+    // The gate arms the revocation of this attempt together with the grant, so a challenge
+    // recorded while the attempt is in flight aborts it before it can submit any further
+    // credentials. The challenge is a fact about the account, so the other scope's probe can
+    // revoke this scope's attempt too.
+    const attemptSignal = AbortSignal.any([this.loginController.signal, permit.signal]);
+    // A challenge recorded between the grant and this point already revoked the permit, so the
+    // attempt must not start at all: no credential is submitted.
+    if (permit.signal.aborted) {
+      this.loginGate.settleAttempt(permit, 'abandoned');
+      throw new ProviderError('LOGIN_REQUIRED', 'Facebook Marketplace requires login.');
+    }
     try {
       const outcome = await this.login!.attempt(attemptSignal);
+      // A challenge recorded while this attempt was running revoked it, so a revoked attempt that
+      // failed is abandoned rather than counted as a failure: the scope spends no retry budget on
+      // an attempt the challenge cut short. A challenge the attempt itself hit still counts as a
+      // failed cycle for its scope, and a self-reported success still leaves an unverified claim.
       this.loginGate.settleAttempt(permit, outcome.outcome === 'challenge'
         ? 'challenge'
-        : outcome.outcome === 'authenticated' ? 'accepted' : 'failure');
+        : outcome.outcome === 'authenticated' ? 'accepted'
+          : permit.signal.aborted ? 'abandoned' : 'failure');
       if (outcome.outcome !== 'authenticated') {
         return { recovered: false, ...(outcome.code !== undefined ? { code: outcome.code } : {}) };
       }
@@ -351,7 +357,7 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
         this.loginGate.settleAttempt(permit, 'abandoned');
         throw this.loginController.signal.reason ?? error;
       }
-      if (revoked) {
+      if (permit.signal.aborted) {
         // The attempt was revoked by a challenge, not by a login failure: it is abandoned, so the
         // scope spends no retry budget on it, and the request reports the plain login requirement.
         this.loginGate.settleAttempt(permit, 'abandoned');
@@ -364,8 +370,6 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
       this.loginGate.settleAttempt(permit, 'failure');
       if (error instanceof ProviderError) throw error;
       throw new ProviderError('UPSTREAM_ERROR', 'The Facebook session could not be established.');
-    } finally {
-      unsubscribe();
     }
   }
 
