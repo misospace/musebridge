@@ -273,10 +273,17 @@ export class FacebookMessengerBackend implements ConversationBackend {
         });
         const extractOptions = { limits: MESSENGER_EXTRACT_LIMITS };
         let result = await page.evaluate(extractMessengerThreadPage, extractOptions);
+        let resultKind = classifyMessengerThreadPage(result);
         const deadline = Date.now() + this.settleTimeoutMs;
-        while (classifyMessengerThreadPage(result) === 'unknown' && Date.now() < deadline && !taskSignal.aborted) {
+        // An unrecognized layout keeps settling, and so does an unverified absence: a page can
+        // show the unavailable notice before its conversation rows render, so absence counts as
+        // verified only when it survives the same settle window (#150).
+        while ((resultKind === 'unknown' || resultKind === 'unavailable') && Date.now() < deadline && !taskSignal.aborted) {
           await sleepUntilAbort(200, taskSignal);
-          if (!taskSignal.aborted) result = await page.evaluate(extractMessengerThreadPage, extractOptions);
+          if (!taskSignal.aborted) {
+            result = await page.evaluate(extractMessengerThreadPage, extractOptions);
+            resultKind = classifyMessengerThreadPage(result);
+          }
         }
         if (taskSignal.aborted) throw taskSignal.reason ?? new Error('Browser operation aborted');
         return result;
@@ -376,7 +383,9 @@ export class FacebookMessengerBackend implements ConversationBackend {
         const extractOptions = { limits: MESSENGER_EXTRACT_LIMITS };
         let pageKind = classifyMessengerThreadPage(await page.evaluate(extractMessengerThreadPage, extractOptions));
         const deadline = Date.now() + this.settleTimeoutMs;
-        while (pageKind === 'unknown' && Date.now() < deadline && !taskSignal.aborted) {
+        // Same settle rule as the read path: an early notice must survive the window before it
+        // ends the verification either way (#150).
+        while ((pageKind === 'unknown' || pageKind === 'unavailable') && Date.now() < deadline && !taskSignal.aborted) {
           await sleepUntilAbort(200, taskSignal);
           if (!taskSignal.aborted) {
             pageKind = classifyMessengerThreadPage(await page.evaluate(extractMessengerThreadPage, extractOptions));

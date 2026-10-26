@@ -531,6 +531,14 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
     }
   );
 
+  it('reports a verified absence as a null draft so messenger_prepare answers NOT_FOUND', async () => {
+    // The prepare path goes through the real thread read, not a stubbed one: the same verified
+    // absence the read reports as null must reach the tool as a null draft (#150).
+    configure('inbox-normal.html', 'thread-unavailable.html');
+    const backend = createBackend({ settleTimeoutMs: 200 });
+    await expect(backend.prepareDraft(sendInput(), new AbortController().signal)).resolves.toBeNull();
+  });
+
   it('reads bounded attributed token text through the backend without inventing delivery confirmation', async () => {
     configure('inbox-normal.html', 'thread-token-bounds.html');
     const result = await createBackend().readThread(readInput(), new AbortController().signal);
