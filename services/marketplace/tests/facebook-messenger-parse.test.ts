@@ -78,6 +78,19 @@ function datedMessage(index: number, overrides: Record<string, unknown> = {}) {
   };
 }
 
+// The extraction report of a page that rendered no message-like structure at all: no log, no
+// collected row, and no row outside the scope. Verified absence requires this proof.
+function absentPageDiagnostics() {
+  return provenDiagnostics({
+    hasMessageLog: false,
+    rowScope: 'none',
+    renderedRows: 0,
+    scannedRows: 0,
+    declaredSetSize: 0,
+    attestedRows: 0
+  });
+}
+
 describe('Messenger page interpretation', () => {
   it('classifies inbox states with challenge precedence and distinguishes empty from unknown', () => {
     expect(classifyMessengerInboxPage(inbox({ threads: [{ threadId: 'abc' }] }))).toBe('threads');
@@ -167,7 +180,7 @@ describe('Messenger page interpretation', () => {
   });
 
   it('classifies a standalone unavailable notice, but never over a conversation, a log, or a challenge', () => {
-    expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true }))).toBe('unavailable');
+    expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true, diagnostics: absentPageDiagnostics() }))).toBe('unavailable');
     // A rendered conversation wins: notice wording inside live content never selects absence.
     expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true, messages: [{ sender: 'you', text: 'Hello' }] }))).toBe('messages');
     // A page that still renders a message log contradicts the notice, so it stays unrecognized.
@@ -175,6 +188,37 @@ describe('Messenger page interpretation', () => {
       hasUnavailableMarker: true,
       diagnostics: provenDiagnostics({ renderedRows: 0, scannedRows: 0, declaredSetSize: 0, attestedRows: 0 })
     }))).toBe('unknown');
+    // A no-log row whose sender label is unrecognized is message-like structure the notice
+    // cannot disprove: an ambiguous layout stays unknown, never a verified absence.
+    expect(classifyMessengerThreadPage(thread({
+      hasUnavailableMarker: true,
+      diagnostics: provenDiagnostics({
+        hasMessageLog: false,
+        rowScope: 'page_container',
+        renderedRows: 1,
+        scannedRows: 1,
+        declaredSetSize: 1,
+        attestedRows: 1,
+        unattributedRows: 1
+      })
+    }))).toBe('unknown');
+    // An ambiguous scope hides rendered rows the report never examined, so a notice cannot
+    // verify absence over them either.
+    expect(classifyMessengerThreadPage(thread({
+      hasUnavailableMarker: true,
+      diagnostics: provenDiagnostics({
+        hasMessageLog: false,
+        rowScope: 'ambiguous',
+        renderedRows: 0,
+        scannedRows: 0,
+        declaredSetSize: 0,
+        attestedRows: 0,
+        roleRowsOutsideScope: 2
+      })
+    }))).toBe('unknown');
+    // Without an extraction report nothing proves the page rendered no row structure, so the
+    // notice alone is not a verified absence.
+    expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true }))).toBe('unknown');
     // Without the authenticated marker the notice is not a verified absence for this session.
     expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true, signals: { ...authenticatedSignals, hasAuthenticatedMarker: false } }))).toBe('unknown');
     // Auth challenges keep their precedence over the notice.
@@ -185,8 +229,26 @@ describe('Messenger page interpretation', () => {
 
   it('returns the unavailable outcome only for a verified absence at the requested thread', () => {
     expect(interpretMessengerThreadPage({
-      page: thread({ hasUnavailableMarker: true }), baseUrl: 'https://www.facebook.com', threadId: '1684432532'
+      page: thread({ hasUnavailableMarker: true, diagnostics: absentPageDiagnostics() }), baseUrl: 'https://www.facebook.com', threadId: '1684432532'
     })).toEqual({ kind: 'unavailable' });
+    // The review's exact case: an authenticated requested-thread page whose only row is a
+    // no-log, unattributed `role="row"` quoting the notice. The notice cannot disprove the row
+    // the page rendered, so the layout is ambiguous and stays a typed upstream error.
+    expect(interpretMessengerThreadPage({
+      page: thread({
+        hasUnavailableMarker: true,
+        diagnostics: provenDiagnostics({
+          hasMessageLog: false,
+          rowScope: 'page_container',
+          renderedRows: 1,
+          scannedRows: 1,
+          declaredSetSize: 1,
+          attestedRows: 1,
+          unattributedRows: 1
+        })
+      }),
+      baseUrl: 'https://www.facebook.com', threadId: '1684432532'
+    })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger thread page layout was not recognized.' });
     // A redirect stays the ambiguous typed error: content served at another address proves
     // nothing about the requested thread, notice or not.
     expect(interpretMessengerThreadPage({

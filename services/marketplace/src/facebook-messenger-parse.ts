@@ -116,9 +116,19 @@ export function classifyMessengerThreadPage(page: ExtractedThreadPage): Messenge
     if (page.messages.length > 0) return 'messages';
     // A rendered conversation wins over the notice text above, so notice wording inside a live
     // thread never selects this state. An authenticated page that renders an explicit
-    // unavailable notice stands alone as verified absence only when no message log contradicts
-    // it; a log plus a notice is a self-contradictory layout and stays unknown.
-    if (page.hasUnavailableMarker && page.diagnostics?.hasMessageLog !== true) return 'unavailable';
+    // unavailable notice stands alone as verified absence only when the extraction report proves
+    // the page rendered no message-like structure at all: no message log, no collected row
+    // (even an unattributed one the probe would not read), no row rendered outside the collected
+    // scope, and no missing report that could hide any of them. A page whose report is absent or
+    // contradicts the notice is an ambiguous layout and stays unknown.
+    const diagnostics = page.diagnostics;
+    if (
+      page.hasUnavailableMarker &&
+      diagnostics !== undefined &&
+      !diagnostics.hasMessageLog &&
+      diagnostics.renderedRows === 0 &&
+      diagnostics.roleRowsOutsideScope === 0
+    ) return 'unavailable';
   }
   return 'unknown';
 }

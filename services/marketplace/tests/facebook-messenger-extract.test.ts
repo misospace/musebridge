@@ -143,6 +143,21 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     expect(contradicting.hasUnavailableMarker).toBe(true);
     expect(contradicting.diagnostics?.hasMessageLog).toBe(true);
     expect(classifyMessengerThreadPage(contradicting)).toBe('unknown');
+
+    // A no-log row with an unrecognized sender label quoting the notice is still row structure
+    // the notice cannot disprove: the report shows a rendered, unattributed row, so the layout
+    // is ambiguous and never verifies absence.
+    const noLogRowHtml = '<!doctype html><html><body><main><a href="/logout/">Log out</a>' +
+      '<div role="row" aria-label="Some unrecognized label">This content isn\'t available right now</div>' +
+      '</main></body></html>';
+    await page.setContent(noLogRowHtml, { waitUntil: 'domcontentloaded' });
+    const noLogRow = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(noLogRow.hasUnavailableMarker).toBe(true);
+    expect(noLogRow.messages).toEqual([]);
+    expect(noLogRow.diagnostics?.hasMessageLog).toBe(false);
+    expect(noLogRow.diagnostics?.renderedRows).toBe(1);
+    expect(noLogRow.diagnostics?.unattributedRows).toBe(1);
+    expect(classifyMessengerThreadPage(noLogRow)).toBe('unknown');
   });
 
   it('collects every attributed candidate and lets the window selection bound the messages', async () => {
