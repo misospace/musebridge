@@ -11,6 +11,7 @@ import type { MarketplaceBackend } from '../src/backend.js';
 import { createMarketplaceService, type MarketplaceService } from '../src/service.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { createFakePlaywrightHarness } from './helpers/fake-browser-playwright.js';
 
 const browserAvailable = existsSync(chromium.executablePath());
 if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
@@ -214,6 +215,48 @@ describe('browser launch args', () => {
 
     await manager.close();
     expect(calls).toContainEqual({ method: 'Target.setDiscoverTargets', params: { discover: false } });
+  });
+});
+
+describe('interactive lease ownership', () => {
+  it('re-establishes the interactive ownership when a previous begin outlived its lease', async () => {
+    const harness = createFakePlaywrightHarness({ settleTimeoutMs: 10, launchTimeoutMs: 1_000 });
+    profileDirs.push(harness.profileDir);
+    const manager = harness.manager;
+    managers.push(manager);
+
+    let releaseGate!: () => void;
+    let markStarted!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const blocked = manager.runExclusive(new AbortController().signal, async () => {
+      markStarted();
+      await gate;
+    });
+    await started;
+    const headlessContext = harness.contexts[0];
+    expect(headlessContext).toBeDefined();
+
+    // The lease ends while its begin is still waiting for the queued headless work.
+    const staleBegin = manager.beginInteractive();
+    await manager.closeInteractive();
+    manager.endInteractive();
+
+    releaseGate();
+    await blocked;
+    await staleBegin;
+    expect(headlessContext?.closed).toBe(false);
+
+    const begin = manager.beginInteractive();
+    await begin;
+    expect(manager.getInfo().interactive).toBe(true);
+    expect(manager.profileTakeoverSignal.aborted).toBe(true);
+    expect(headlessContext?.closed).toBe(true);
+    await expect(manager.openInteractive({ headless: true })).resolves.toBeDefined();
+
+    manager.endInteractive();
+    await manager.closeInteractive();
+    await manager.close();
   });
 });
 

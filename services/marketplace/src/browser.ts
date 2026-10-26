@@ -81,6 +81,7 @@ export class BrowserSessionManager {
   private interactive = false;
   private interactiveLaunchInvalidated = false;
   private interactiveBegin: Promise<void> | undefined;
+  private interactiveBeginGeneration = 0;
   private interactiveLaunch: Promise<BrowserContext> | undefined;
   private interactiveLaunchGeneration = 0;
   private headlessLaunch: Promise<BrowserContext> | undefined;
@@ -231,9 +232,12 @@ export class BrowserSessionManager {
 
   beginInteractive(): Promise<void> {
     if (this.closed) return Promise.reject(new BrowserUnavailableError('Browser session is closed'));
-    if (this.interactiveBegin) return this.interactiveBegin;
-    if (this.interactive) return Promise.resolve();
+    // The interactive ownership, not the begin promise, decides whether a lease is already in
+    // place: a begin that outlived its lease is stale and must never be adopted by the next one.
+    if (this.interactive) return this.interactiveBegin ?? Promise.resolve();
     this.interactive = true;
+    this.interactiveBeginGeneration += 1;
+    const generation = this.interactiveBeginGeneration;
     // The lease owns the profile from this moment on, so an in-flight credential attempt must
     // stop before it submits any credential into it. The takeover is signalled synchronously,
     // before the queued headless work is awaited, so the lease never waits for that attempt.
@@ -252,6 +256,9 @@ export class BrowserSessionManager {
     const begin = (async (): Promise<void> => {
       await queuedWork;
       if (headlessLaunch) await headlessLaunch.catch(() => undefined);
+      // A superseded begin must not close the shared headless context: the attempt that owns
+      // the profile now owns that decision.
+      if (generation !== this.interactiveBeginGeneration) return;
       if (this.pendingTeardown) {
         const teardown = this.pendingTeardown;
         this.pendingTeardown = undefined;
@@ -457,6 +464,10 @@ export class BrowserSessionManager {
     this.interactive = false;
     this.lastAssessment = 'session_unknown';
     this.lastFailure = undefined;
+    // The ended lease's begin must not touch the shared browser state any more: the next lease
+    // owns the profile now, so the pending begin is dropped and invalidated.
+    this.interactiveBegin = undefined;
+    this.interactiveBeginGeneration += 1;
     // The profile is usable again, so the takeover channel is replaced by a live one: the ended
     // lease keeps its aborted signal, and the next lease signals its own takeover.
     this.takeoverController = new AbortController();
