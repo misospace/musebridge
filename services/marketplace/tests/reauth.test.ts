@@ -11,6 +11,7 @@ import { createReauthAdminServer } from '../src/admin.js';
 import { assertFacebookOrigin } from '../src/facebook.js';
 import { parseDisplayNumber, ReauthManager } from '../src/reauth.js';
 import { FakeReauthRuntime } from './helpers/fake-reauth-runtime.js';
+import { createFakePlaywrightHarness } from './helpers/fake-browser-playwright.js';
 
 const browserAvailable = existsSync(chromium.executablePath());
 if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
@@ -461,6 +462,54 @@ browserTests('reauth manager with Chromium', () => {
     await expect(browser.runExclusive(new AbortController().signal, async (page) => {
       await page.goto(`${synthetic.origin}/`);
     })).resolves.toBeUndefined();
+  });
+});
+
+describe('reauth lease ownership', () => {
+  it('starts a new lease after a begin outlived its previous lease', async () => {
+    const harness = createFakePlaywrightHarness({ settleTimeoutMs: 10, launchTimeoutMs: 1_000 });
+    profileDirs.push(harness.profileDir);
+    const browser = harness.manager;
+    managers.push(browser);
+    const runtime = makeRuntime();
+    const reauth = makeReauth(browser, runtime);
+
+    let releaseGate!: () => void;
+    let markStarted!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const blocked = browser.runExclusive(new AbortController().signal, async () => {
+      markStarted();
+      await gate;
+    });
+    await started;
+
+    // The lease ends while its begin is still waiting for the queued headless work.
+    const staleBegin = browser.beginInteractive();
+    await browser.closeInteractive();
+    browser.endInteractive();
+
+    // The next lease must not adopt the stale begin: it re-establishes the interactive
+    // ownership instead. The gate is released only once the lease asked for its begin, so
+    // the stale begin is still pending at that moment.
+    const originalBeginInteractive = browser.beginInteractive.bind(browser);
+    let notifyBegin!: () => void;
+    const beginCalled = new Promise<void>((resolve) => { notifyBegin = resolve; });
+    browser.beginInteractive = (): Promise<void> => {
+      const begin = originalBeginInteractive();
+      notifyBegin();
+      return begin;
+    };
+
+    const starting = reauth.start();
+    await beginCalled;
+    releaseGate();
+    await blocked;
+    await staleBegin;
+
+    const lease = await starting;
+    expect(reauth.status()).toMatchObject({ phase: 'active', lease: { id: lease.id } });
+    await reauth.stop();
   });
 });
 
