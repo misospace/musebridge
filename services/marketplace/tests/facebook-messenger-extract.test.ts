@@ -9,7 +9,7 @@ import {
   selectMessengerThreadWindow
 } from '../src/facebook-messenger-extract.js';
 import { MESSENGER_THREAD_PATH } from '../src/facebook-messenger-url.js';
-import { classifyMessengerInboxPage, classifyMessengerThreadPage } from '../src/facebook-messenger-parse.js';
+import { classifyMessengerInboxPage, classifyMessengerThreadPage, interpretMessengerThreadPage } from '../src/facebook-messenger-parse.js';
 import type { ExtractedThreadPage } from '../src/facebook-messenger-extract.js';
 
 const browserAvailable = existsSync(chromium.executablePath());
@@ -85,6 +85,10 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
       hasMessageLog: false,
       hasArticleMessages: false,
       hasExplicitEmptyState: false,
+      // The page has no message log, so the rows are collected from the one container that holds
+      // the declared message set, and every rendered row is inside that scope.
+      rowScope: 'page_container',
+      roleRowsOutsideScope: 0,
       renderedRows: 6,
       scannedRows: 6,
       unattributedRows: 1,
@@ -243,9 +247,12 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     // part of the evidence the window is proven from.
     expect(extracted.diagnostics).toEqual({
       hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false,
-      renderedRows: 1, scannedRows: 1, unattributedRows: 1, undatedMessages: 0, candidateTextBudgetExceeded: false,
-      // The only rendered row is a navigation entry outside the conversation, so this page
-      // declares no size for a message set: the read never certifies it as a window.
+      // The message log renders no rows, so it is still the scope of the conversation: the row
+      // the page rendered outside it is counted, never collected.
+      rowScope: 'message_log',
+      roleRowsOutsideScope: 1,
+      renderedRows: 0, scannedRows: 0, unattributedRows: 0, undatedMessages: 0, candidateTextBudgetExceeded: false,
+      // The scope declares no size for a message set, so the read never certifies a window.
       declaredSetSize: undefined,
       setSizeConflict: false,
       attestedRows: 0,
@@ -539,6 +546,222 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     });
     expect(window).toEqual({ kind: 'unproven', reason: 'incomplete_rendered_set' });
   });
+
+  it('collects every rendered row from the one container that holds them and certifies no window', async () => {
+    // The page has no message log, so the scope is the one container that holds every rendered
+    // row: the rows the page rendered beside the conversation are part of that scope.
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      '<section>' +
+      '<div role="row" aria-setsize="2" aria-posinset="1" aria-label="Synthetic Seller said: first">First reply<time datetime="2026-09-14T10:00:00Z"></time></div>' +
+      '<div role="row" aria-setsize="2" aria-posinset="2" aria-label="You said: second">Second reply<time datetime="2026-09-14T10:01:00Z"></time></div>' +
+      '</section>' +
+      '<div>' +
+      '<div role="row">Unrelated widget row</div>' +
+      '<div role="row" aria-label="Someone Else said: not a message">Not a message<time datetime="2026-09-14T11:00:00Z"></time></div>' +
+      '</div></main>', { waitUntil: 'domcontentloaded' });
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(extracted.diagnostics?.rowScope).toBe('page_container');
+    expect(extracted.diagnostics?.renderedRows).toBe(4);
+    // The scope holds every rendered row, so no row lies outside it.
+    expect(extracted.diagnostics?.roleRowsOutsideScope).toBe(0);
+    // Only the two conversation rows declare the set, so the page's own accounting does not
+    // cover the rows the scope holds and nothing here can be certified as the whole set.
+    expect(extracted.diagnostics?.declaredSetSize).toBe(2);
+    const window = selectMessengerThreadWindow({
+      candidates: extracted.messages,
+      diagnostics: extracted.diagnostics,
+      maxMessages: MESSENGER_EXTRACT_LIMITS.maxMessages
+    });
+    expect(window).toEqual({ kind: 'unproven', reason: 'incomplete_rendered_set' });
+    expect(interpretMessengerThreadPage({
+      page: extracted,
+      baseUrl: 'https://www.facebook.com',
+      threadId: '1684432532'
+    })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+  });
+
+  it('fails closed when a widget group declares its own set beside the conversation', async () => {
+    // The widget group declares a set of its own, but a set declaration proves only that a row
+    // belongs to some set: it never makes that set the message set. The scope is the one
+    // container that holds every rendered row, so the widget's rows are collected with the
+    // conversation's, and the page's accounting covers two of the three rendered rows: the
+    // window fails closed instead of returning the widget's rows as a proven tail.
+    await page.setContent('<main role="main"><span aria-label="Your account">Synthetic account</span>' +
+      '<div role="row" aria-label="Synthetic Seller said: hello">Hello<time datetime="2026-09-14T10:00:00Z"></time></div>' +
+      '<div role="grid" aria-setsize="2">' +
+      '<div role="row" aria-setsize="2" aria-posinset="1" aria-label="Someone Else said: widget one">Widget one<time datetime="2026-09-14T11:00:00Z"></time></div>' +
+      '<div role="row" aria-setsize="2" aria-posinset="2" aria-label="Someone Else said: widget two">Widget two<time datetime="2026-09-14T11:01:00Z"></time></div>' +
+      '</div></main>', { waitUntil: 'domcontentloaded' });
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    // The scope is the one container that holds every rendered row, the widget group included.
+    expect(extracted.diagnostics?.rowScope).toBe('page_container');
+    expect(extracted.diagnostics?.renderedRows).toBe(3);
+    expect(extracted.diagnostics?.roleRowsOutsideScope).toBe(0);
+    // The declared set covers the two widget rows only, so the scope holds more rows than the
+    // page's accounting covers.
+    expect(extracted.diagnostics?.declaredSetSize).toBe(2);
+    const window = selectMessengerThreadWindow({
+      candidates: extracted.messages,
+      diagnostics: extracted.diagnostics,
+      maxMessages: MESSENGER_EXTRACT_LIMITS.maxMessages
+    });
+    expect(window).toEqual({ kind: 'unproven', reason: 'incomplete_rendered_set' });
+    const outcome = interpretMessengerThreadPage({
+      page: extracted,
+      baseUrl: 'https://www.facebook.com',
+      threadId: '1684432532'
+    });
+    expect(outcome).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+    // The widget rows never reach a returned window.
+    expect(outcome).not.toHaveProperty('messages');
+    expect(JSON.stringify(outcome)).not.toContain('Widget one');
+  });
+
+  it('keeps an attributed row outside the message log out of the collection', async () => {
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      '<div role="log" aria-label="Synthetic messages">' +
+      '<div role="row" aria-setsize="2" aria-posinset="1" aria-label="Synthetic Seller said: first">First reply<time datetime="2026-09-14T10:00:00Z"></time></div>' +
+      '<div role="row" aria-setsize="2" aria-posinset="2" aria-label="You said: second">Second reply<time datetime="2026-09-14T10:01:00Z"></time></div>' +
+      '</div>' +
+      '<div>' +
+      '<div role="row" aria-label="Someone Else said: not a message">Not a message<time datetime="2026-09-14T11:00:00Z"></time></div>' +
+      '</div></main>', { waitUntil: 'domcontentloaded' });
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    // The message log is the scope, so the attributed row the page rendered beside it is not
+    // part of the conversation and is not collected.
+    expect(extracted.diagnostics?.rowScope).toBe('message_log');
+    expect(extracted.diagnostics?.renderedRows).toBe(2);
+    expect(extracted.diagnostics?.roleRowsOutsideScope).toBe(1);
+    expect(extracted.messages.map((message) => message.text)).toEqual(['First reply', 'Second reply']);
+    const window = selectMessengerThreadWindow({
+      candidates: extracted.messages,
+      diagnostics: extracted.diagnostics,
+      maxMessages: MESSENGER_EXTRACT_LIMITS.maxMessages
+    });
+    expect(window.kind).toBe('window');
+  });
+
+  it('fails closed when the rendered rows are spread across the page', async () => {
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      '<div role="row" aria-label="Synthetic Seller said: in the main region">Main region reply<time datetime="2026-09-14T10:00:00Z"></time></div>' +
+      '</main>' +
+      '<footer>' +
+      '<div role="row" aria-label="Synthetic Seller said: in the footer">Footer reply<time datetime="2026-09-14T10:01:00Z"></time></div>' +
+      '</footer>', { waitUntil: 'domcontentloaded' });
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    // The rows share no container other than the document itself and they do not share a parent
+    // either, so there is no scope to trust and the read collects nothing at all.
+    expect(extracted.diagnostics?.rowScope).toBe('ambiguous');
+    expect(extracted.diagnostics?.renderedRows).toBe(0);
+    expect(extracted.diagnostics?.scannedRows).toBe(0);
+    expect(extracted.diagnostics?.roleRowsOutsideScope).toBe(2);
+    expect(extracted.messages).toEqual([]);
+    expect(classifyMessengerThreadPage(extracted)).toBe('unknown');
+    // An unrecognized layout stays a typed upstream error, never an empty success.
+    expect(interpretMessengerThreadPage({
+      page: extracted,
+      baseUrl: 'https://www.facebook.com',
+      threadId: '1684432532'
+    })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+  });
+
+  it('fails closed when the page renders more than one log with rows', async () => {
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      '<div role="log" aria-label="First conversation">' +
+      '<div role="row" aria-label="Synthetic Seller said: first">First log reply<time datetime="2026-09-14T10:00:00Z"></time></div>' +
+      '</div>' +
+      '<div role="log" aria-label="Second conversation">' +
+      '<div role="row" aria-label="Synthetic Seller said: second">Second log reply<time datetime="2026-09-14T10:01:00Z"></time></div>' +
+      '</div></main>', { waitUntil: 'domcontentloaded' });
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    // Two logs render rows, so neither can be told apart as the conversation: nothing is
+    // collected and the read fails closed instead of taking one of them.
+    expect(extracted.diagnostics?.rowScope).toBe('ambiguous');
+    expect(extracted.diagnostics?.renderedRows).toBe(0);
+    expect(extracted.diagnostics?.roleRowsOutsideScope).toBe(2);
+    expect(extracted.messages).toEqual([]);
+    expect(classifyMessengerThreadPage(extracted)).toBe('unknown');
+    expect(interpretMessengerThreadPage({
+      page: extracted,
+      baseUrl: 'https://www.facebook.com',
+      threadId: '1684432532'
+    })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+  });
+
+  it('fails closed when a message log is nested inside another message log', async () => {
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      '<div role="log" aria-label="Outer conversation">' +
+      '<div role="log" aria-label="Inner conversation">' +
+      '<div role="row" aria-label="Synthetic Seller said: nested">Nested reply<time datetime="2026-09-14T10:00:00Z"></time></div>' +
+      '</div></div></main>', { waitUntil: 'domcontentloaded' });
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    // Both logs render the row, so neither can be told apart as the conversation: the read
+    // collects nothing instead of guessing which log holds it.
+    expect(extracted.diagnostics?.rowScope).toBe('ambiguous');
+    expect(extracted.diagnostics?.renderedRows).toBe(0);
+    expect(extracted.diagnostics?.roleRowsOutsideScope).toBe(1);
+    expect(extracted.messages).toEqual([]);
+    expect(interpretMessengerThreadPage({
+      page: extracted,
+      baseUrl: 'https://www.facebook.com',
+      threadId: '1684432532'
+    })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+  });
+
+  it('does not collect rows outside a message log that renders no rows', async () => {
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      '<div role="log" aria-label="Synthetic messages"></div>' +
+      '<div>' +
+      '<div role="row" aria-label="Someone Else said: not a message">Not a message<time datetime="2026-09-14T11:00:00Z"></time></div>' +
+      '</div></main>', { waitUntil: 'domcontentloaded' });
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    // The message log still names the conversation, so the row the page rendered beside it is
+    // not part of it: the scope holds no rows and the read stays unrecognized.
+    expect(extracted.diagnostics?.rowScope).toBe('message_log');
+    expect(extracted.diagnostics?.renderedRows).toBe(0);
+    expect(extracted.diagnostics?.scannedRows).toBe(0);
+    expect(extracted.diagnostics?.roleRowsOutsideScope).toBe(1);
+    expect(extracted.messages).toEqual([]);
+    expect(classifyMessengerThreadPage(extracted)).toBe('unknown');
+    expect(interpretMessengerThreadPage({
+      page: extracted,
+      baseUrl: 'https://www.facebook.com',
+      threadId: '1684432532'
+    })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+  });
+
+  it('reports no scope at all when the page renders no rows', async () => {
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      '<p>Synthetic conversation without any row</p></main>', { waitUntil: 'domcontentloaded' });
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    // There is no log and no row, so there is no scope to collect from and nothing to report
+    // outside it.
+    expect(extracted.diagnostics?.rowScope).toBe('none');
+    expect(extracted.diagnostics?.renderedRows).toBe(0);
+    expect(extracted.diagnostics?.roleRowsOutsideScope).toBe(0);
+    expect(extracted.messages).toEqual([]);
+  });
+
+  it('does not certify a set from a plain container own aria-setsize', async () => {
+    await page.setContent('<main><span aria-label="Your account">Synthetic account</span>' +
+      '<div role="list" aria-setsize="2">' +
+      '<div role="row" aria-posinset="1" aria-label="Synthetic Seller said: first">First reply<time datetime="2026-09-14T10:00:00Z"></time></div>' +
+      '<div role="row" aria-posinset="2" aria-label="You said: second">Second reply<time datetime="2026-09-14T10:01:00Z"></time></div>' +
+      '</div></main>', { waitUntil: 'domcontentloaded' });
+    const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    // A plain container is not a set container: only the message log's own counter counts, so
+    // the container's own `aria-setsize` certifies nothing and the read has no set accounting.
+    // A row's parent `aria-rowcount` remains the standard counter for a grid, table or
+    // treegrid, which the case above covers.
+    expect(extracted.diagnostics?.rowScope).toBe('page_container');
+    expect(extracted.diagnostics?.declaredSetSize).toBeUndefined();
+    const window = selectMessengerThreadWindow({
+      candidates: extracted.messages,
+      diagnostics: extracted.diagnostics,
+      maxMessages: MESSENGER_EXTRACT_LIMITS.maxMessages
+    });
+    expect(window).toEqual({ kind: 'unproven', reason: 'missing_set_accounting' });
+  });
 });
 
 // Non-browser unit test: verifies the pure composer decision contract (count ->
@@ -595,7 +818,11 @@ describe('selectMessengerThreadWindow (pure window orientation contract)', () =>
       attestedRows: renderedRows,
       positionedRows: 0,
       distinctPositions: 0,
-      ...overrides
+      ...overrides,
+      // The scope the rows were collected from and the rows the page rendered outside it belong
+      // to the extraction report, so a hand-built report carries them too.
+      rowScope: overrides.rowScope ?? 'message_log',
+      roleRowsOutsideScope: overrides.roleRowsOutsideScope ?? 0
     };
   };
 

@@ -58,6 +58,17 @@ export interface ExtractedThreadPage {
     hasMessageLog: boolean;
     hasArticleMessages: boolean;
     hasExplicitEmptyState: boolean;
+    /** The scope the message rows were collected from: the page's message log (`message_log`),
+     *  the one container that holds the rendered rows (`page_container`), no scope at all
+     *  because the page rendered no rows at all — no log and no row (`none`), or no trusted scope
+     *  because the page offered more than one candidate (`ambiguous`). A message log that
+     *  renders no row is still a `message_log` scope: it names the conversation even though it
+     *  holds no row. */
+    rowScope: 'message_log' | 'page_container' | 'none' | 'ambiguous';
+    /** How many `[role="row"]` elements the page rendered OUTSIDE the collected scope. It is a
+     *  count only: no row outside the scope is read, so it can never carry page content into a
+     *  read. It is the total number of rendered rows when there is no scope at all. */
+    roleRowsOutsideScope: number;
     /** Message rows the page rendered in the scanned scope, whether or not they were examined. */
     renderedRows: number;
     /** Rows the probe actually examined. A value below `renderedRows` means a rendered row was
@@ -222,37 +233,6 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
   };
   const messages: ExtractedMessage[] = [];
   const messageLog = document.querySelector('[role="log"]');
-  const diagnostics = {
-    hasMessageLog: messageLog !== null,
-    hasArticleMessages: document.querySelector('[role="log"] [role="article"]') !== null,
-    hasExplicitEmptyState: /no messages yet|no conversations|nothing here yet/i.test((messageLog?.textContent ?? '').slice(0, 20_000)),
-    renderedRows: 0,
-    scannedRows: 0,
-    unattributedRows: 0,
-    undatedMessages: 0,
-    candidateTextBudgetExceeded: false,
-    declaredSetSize: undefined as number | undefined,
-    setSizeConflict: false,
-    attestedRows: 0,
-    positionedRows: 0,
-    newestPosition: undefined as number | undefined,
-    distinctPositions: 0
-  };
-  // The conversation's own rows are the evidence, so they are collected from the first message log
-  // that actually renders rows; only a page without such a log falls back to a document-wide scan.
-  let rowScope: ParentNode | null = null;
-  let rowScopeElement: Element | null = null;
-  for (const log of Array.from(document.querySelectorAll('[role="log"]'))) {
-    if (log.querySelector('[role="row"]') !== null) {
-      rowScope = log;
-      rowScopeElement = log;
-      break;
-    }
-  }
-  const rows = rowScope !== null
-    ? rowScope.querySelectorAll('[role="row"]')
-    : document.querySelectorAll('[role="row"]');
-  diagnostics.renderedRows = rows.length;
   // The accessibility set accounting is the only observable statement of how many items the
   // message set holds. A virtualized log can render just a window of that set — including a
   // window that omits the newest messages entirely — so the rendered rows are only the whole
@@ -267,16 +247,105 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
     if (!Number.isSafeInteger(parsed) || parsed < minimum) return undefined;
     return parsed;
   };
+  const diagnostics = {
+    hasMessageLog: messageLog !== null,
+    hasArticleMessages: document.querySelector('[role="log"] [role="article"]') !== null,
+    hasExplicitEmptyState: /no messages yet|no conversations|nothing here yet/i.test((messageLog?.textContent ?? '').slice(0, 20_000)),
+    rowScope: 'none' as 'message_log' | 'page_container' | 'none' | 'ambiguous',
+    roleRowsOutsideScope: 0,
+    renderedRows: 0,
+    scannedRows: 0,
+    unattributedRows: 0,
+    undatedMessages: 0,
+    candidateTextBudgetExceeded: false,
+    declaredSetSize: undefined as number | undefined,
+    setSizeConflict: false,
+    attestedRows: 0,
+    positionedRows: 0,
+    newestPosition: undefined as number | undefined,
+    distinctPositions: 0
+  };
+  // The conversation's own rows are the evidence, so they are collected from exactly one scope:
+  // the page's message log when it renders rows, and otherwise the one container that holds the
+  // rendered rows. A document-wide collection would take an unrelated widget row for a message,
+  // so a page that offers more than one candidate scope yields no rows at all and the read fails
+  // closed instead of guessing which rows are the conversation. A row that declares a set size
+  // proves only that it belongs to some set, never that the set is the message set, so no set
+  // declaration selects the scope.
+  let rowScope: Element | null = null;
+  let rowScopeKind: 'message_log' | 'page_container' | 'none' | 'ambiguous' = 'none';
+  const logs = Array.from(document.querySelectorAll('[role="log"]'));
+  const logsWithRows = logs.filter((log) => log.querySelector('[role="row"]') !== null);
+  if (logsWithRows.length === 1) {
+    // One message log renders the conversation's rows, so it is the scope and the rows the page
+    // rendered beside it are not part of the conversation.
+    rowScope = logsWithRows[0] ?? null;
+    rowScopeKind = 'message_log';
+  } else if (logsWithRows.length > 1) {
+    // More than one log renders rows, so no log can be told apart as the conversation: nothing
+    // is collected and the read fails closed.
+    rowScopeKind = 'ambiguous';
+  } else if (logs.length > 0) {
+    // A message log that renders no rows still names the conversation, so a row the page
+    // rendered beside it is not part of it and is not collected.
+    rowScope = logs[0] ?? null;
+    rowScopeKind = 'message_log';
+  } else {
+    // Without a message log the rendered rows are the conversation, and they are collected from
+    // the one container that holds them: the nearest common ancestor of every rendered row.
+    const documentRows = Array.from(document.querySelectorAll('[role="row"]'));
+    const firstRow = documentRows[0];
+    if (!firstRow) {
+      // The page rendered no rows at all, so there is nothing to collect.
+      rowScopeKind = 'none';
+    } else {
+      // The nearest common ancestor of the rows is the one container that holds them all.
+      let common: Element | null = firstRow.parentElement;
+      while (common !== null) {
+        const candidate = common;
+        if (documentRows.every((row) => candidate.contains(row))) break;
+        common = candidate.parentElement;
+      }
+      if (common !== null && common !== document.body && common !== document.documentElement) {
+        rowScope = common;
+        rowScopeKind = 'page_container';
+      } else {
+        // The rows share no container other than the document itself, so they are only trusted
+        // when they all sit in the same parent: that parent is then the one container that
+        // holds them. A page that spreads them over several parents offers more than one
+        // candidate scope, so nothing is collected and the read fails closed.
+        const sharedParent = documentRows.every((row) => row.parentElement === firstRow.parentElement)
+          ? firstRow.parentElement
+          : null;
+        if (sharedParent !== null) {
+          rowScope = sharedParent;
+          rowScopeKind = 'page_container';
+        } else {
+          rowScopeKind = 'ambiguous';
+        }
+      }
+    }
+  }
+  const rows: Element[] = rowScope !== null ? Array.from(rowScope.querySelectorAll('[role="row"]')) : [];
+  diagnostics.rowScope = rowScopeKind;
+  diagnostics.renderedRows = rows.length;
+  // The rows the page rendered outside the collected scope are counted but never read: they are
+  // the rows a document-wide collection would have taken, and the count says how much of the
+  // page the scope does not cover.
+  diagnostics.roleRowsOutsideScope = document.querySelectorAll('[role="row"]').length - rows.length;
   // Every declared size for this scope must agree: the container's counter and the rows' own
   // declarations describe the same set, so two different values mean the scope holds more than
   // one set and nothing here can be certified.
   const declaredSetSizes: number[] = [];
-  if (rowScopeElement) {
-    const containerSetSize = declaredCount(rowScopeElement.getAttribute('aria-setsize'), 0);
+  // Only the message log counts as the set container: it is the conversation's own container,
+  // and it may declare the size of the set it holds. A plain container is not a set container,
+  // so its own counter says nothing about the message set and is never read.
+  if (rowScopeKind === 'message_log' && rowScope) {
+    const containerSetSize = declaredCount(rowScope.getAttribute('aria-setsize'), 0);
     if (containerSetSize !== undefined) declaredSetSizes.push(containerSetSize);
     // The standard container counter for a row set is `aria-rowcount` on a grid, table or
     // treegrid; `role="log"` is a live region and carries no set semantics of its own.
-    const containerRowCount = declaredCount(rowScopeElement.getAttribute('aria-rowcount'), 0);
+    const containerRowCount = declaredCount(rowScope.getAttribute('aria-rowcount'), 0);
     if (containerRowCount !== undefined) declaredSetSizes.push(containerRowCount);
   }
   const rowSetSizes: (number | undefined)[] = [];
