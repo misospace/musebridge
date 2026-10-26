@@ -60,7 +60,11 @@ function provenDiagnostics(overrides: Partial<NonNullable<ExtractedThreadPage['d
     attestedRows: renderedRows,
     positionedRows: 0,
     distinctPositions: 0,
-    ...overrides
+    ...overrides,
+    // The scope the rows were collected from and the rows the page rendered outside it belong to
+    // the extraction report, so a hand-built report carries them too.
+    rowScope: overrides.rowScope ?? 'message_log',
+    roleRowsOutsideScope: overrides.roleRowsOutsideScope ?? 0
   };
 }
 
@@ -421,8 +425,8 @@ describe('Messenger page interpretation', () => {
   });
 
   it.each([
-    [{ hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false, renderedRows: 1, scannedRows: 1, unattributedRows: 1, undatedMessages: 0, candidateTextBudgetExceeded: false, declaredSetSize: 1, setSizeConflict: false, attestedRows: 1, positionedRows: 0, distinctPositions: 0 }, 'The Facebook Messenger article message layout is unsupported; sender attribution was not verified.'],
-    [{ hasMessageLog: true, hasArticleMessages: false, hasExplicitEmptyState: true, renderedRows: 0, scannedRows: 0, unattributedRows: 0, undatedMessages: 0, candidateTextBudgetExceeded: false, declaredSetSize: 0, setSizeConflict: false, attestedRows: 0, positionedRows: 0, distinctPositions: 0 }, 'The Facebook Messenger empty thread layout could not be verified.']
+    [{ hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false, rowScope: 'message_log' as const, roleRowsOutsideScope: 0, renderedRows: 1, scannedRows: 1, unattributedRows: 1, undatedMessages: 0, candidateTextBudgetExceeded: false, declaredSetSize: 1, setSizeConflict: false, attestedRows: 1, positionedRows: 0, distinctPositions: 0 }, 'The Facebook Messenger article message layout is unsupported; sender attribution was not verified.'],
+    [{ hasMessageLog: true, hasArticleMessages: false, hasExplicitEmptyState: true, rowScope: 'message_log' as const, roleRowsOutsideScope: 0, renderedRows: 0, scannedRows: 0, unattributedRows: 0, undatedMessages: 0, candidateTextBudgetExceeded: false, declaredSetSize: 0, setSizeConflict: false, attestedRows: 0, positionedRows: 0, distinctPositions: 0 }, 'The Facebook Messenger empty thread layout could not be verified.']
   ])('reports a static unsupported-layout diagnostic without returning content', (diagnostics, message) => {
     const outcome = interpretMessengerThreadPage({
       page: thread({ diagnostics }), baseUrl: 'https://www.facebook.com', threadId: '1684432532'
