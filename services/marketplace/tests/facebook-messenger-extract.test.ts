@@ -192,17 +192,38 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
 
     // Repeated plain message-like blocks that carry the message row's attribution grammar in
     // their `aria-label` — everything but the `role="row"` attribute — are message structure the
-    // notice cannot disprove either, so the layout never verifies absence.
+    // notice cannot disprove either, so the layout never verifies absence. The notice wording is
+    // rendered text here, so the page really is a candidate for verified absence and the
+    // message-like counter is what keeps it out of that state.
     const labelledBlocksHtml = '<!doctype html><html><body><main><a href="/logout/">Log out</a>' +
-      '<div aria-label="Synthetic Seller said: This content isn\'t available right now">Read it here</div>' +
-      '<div aria-label="Synthetic Buyer said: Still unavailable for me">Same here</div>' +
+      '<div aria-label="Synthetic Seller said: This content isn\'t available right now">This content isn\'t available right now</div>' +
+      '<div aria-label="Synthetic Buyer said: This conversation isn\'t available right now">This conversation isn\'t available right now</div>' +
       '</main></body></html>';
     await page.setContent(labelledBlocksHtml, { waitUntil: 'domcontentloaded' });
     const labelledBlocks = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
     expect(labelledBlocks.hasUnavailableMarker).toBe(true);
+    expect(labelledBlocks.messages).toEqual([]);
+    expect(labelledBlocks.diagnostics?.hasMessageLog).toBe(false);
     expect(labelledBlocks.diagnostics?.renderedRows).toBe(0);
+    expect(labelledBlocks.diagnostics?.roleRowsOutsideScope).toBe(0);
     expect(labelledBlocks.diagnostics?.messageLikeBlocks).toBe(2);
     expect(classifyMessengerThreadPage(labelledBlocks)).toBe('unknown');
+
+    // The same wording that exists only in an accessible name is not a notice the page renders,
+    // so it never reaches the absence proof: the page stays unrecognized and typed. Reading the
+    // notice out of attributes would widen the set of pages that can verify absence, so this
+    // boundary stays pinned.
+    const labelOnlyNoticeHtml = '<!doctype html><html><body><main><a href="/logout/">Log out</a>' +
+      '<div aria-label="This content isn\'t available right now">Read it here</div>' +
+      '</main></body></html>';
+    await page.setContent(labelOnlyNoticeHtml, { waitUntil: 'domcontentloaded' });
+    const labelOnlyNotice = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(labelOnlyNotice.hasUnavailableMarker).toBe(false);
+    // Nothing else blocks this page: the missing marker is the only reason it stays unknown, so
+    // a marker read out of attributes would turn it into a verified absence.
+    expect(labelOnlyNotice.diagnostics?.renderedRows).toBe(0);
+    expect(labelOnlyNotice.diagnostics?.messageLikeBlocks).toBe(0);
+    expect(classifyMessengerThreadPage(labelOnlyNotice)).toBe('unknown');
   });
 
   it('collects every attributed candidate and lets the window selection bound the messages', async () => {
