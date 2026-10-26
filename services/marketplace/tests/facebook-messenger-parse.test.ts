@@ -26,6 +26,7 @@ function inbox(overrides: Partial<ExtractedInboxPage> = {}): ExtractedInboxPage 
     signals: { ...authenticatedSignals },
     hasEmptyStateMarker: false,
     threads: [],
+    threadsScanSaturated: false,
     ...overrides
   };
 }
@@ -175,6 +176,12 @@ describe('Messenger page interpretation', () => {
     expect(interpretMessengerInboxPage({
       page: inbox({ threads: [{ threadId: '90000000' }, { threadId: '90000001' }, { threadId: '90000002' }] }),
       baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 20, maxExtractedThreads: 3
+    })).toMatchObject({ kind: 'threads', truncated: true });
+    // A page that left candidate anchors unread after the scan bound could carry a valid thread
+    // row beyond it, so the DOM fallback cannot present the rows it saw as an exhausted listing.
+    expect(interpretMessengerInboxPage({
+      page: inbox({ threads: [{ threadId: '90000000' }], threadsScanSaturated: true }),
+      baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 20
     })).toMatchObject({ kind: 'threads', truncated: true });
   });
 

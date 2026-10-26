@@ -118,10 +118,11 @@ export function interpretMessengerInboxPage(input: {
     return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger inbox threads could not be parsed.' };
   }
   // The DOM fallback is a bounded recent listing, never a proven-complete one: rows dropped by
-  // the caller's limit or left beyond the extractor's own collection cap mean more threads may
-  // exist, so the result stays honestly `truncated` (#151).
+  // the caller's limit, left beyond the extractor's own collection cap, or anchors the scan
+  // never reached mean more threads may exist, so the result stays honestly `truncated` (#151).
   const collectionCap = input.maxExtractedThreads ?? MESSENGER_EXTRACT_LIMITS.maxThreads;
-  const truncated = input.page.threads.length > input.limit
+  const truncated = input.page.threadsScanSaturated
+    || input.page.threads.length > input.limit
     || input.page.threads.length >= collectionCap;
   return { kind: 'threads', threads, truncated };
 }
