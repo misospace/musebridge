@@ -33,7 +33,7 @@ import {
   buildMessengerThreadUrl,
   MESSENGER_THREAD_PATH
 } from './facebook-messenger-url.js';
-import { assertFacebookOrigin, FacebookSessionProbe, type FacebookProbeCode } from './facebook.js';
+import { assertFacebookOrigin, FacebookSessionProbe, isFacebookAuthClassCode, type FacebookProbeCode } from './facebook.js';
 import { FacebookCredentialLogin } from './facebook-login.js';
 import { FacebookLoginCircuitBreaker, type FacebookLoginAttemptPermit, type FacebookLoginScope } from './facebook-login-circuit-breaker.js';
 import {
@@ -238,7 +238,10 @@ export class FacebookMessengerBackend implements ConversationBackend {
       limit: input.limit,
       graphql
     });
-    if (outcome.kind === 'error') throw new MarketplaceProviderError(outcome.code, outcome.message);
+    if (outcome.kind === 'error') {
+      this.recordObservedAuthFailure(outcome.code);
+      throw new MarketplaceProviderError(outcome.code, outcome.message);
+    }
     if (outcome.kind === 'empty') return [];
     return [...outcome.threads];
   }
@@ -292,12 +295,32 @@ export class FacebookMessengerBackend implements ConversationBackend {
     }
 
     const outcome = interpretMessengerThreadPage({ page: extracted, baseUrl: this.probe.baseUrl, threadId: input.thread_id });
-    if (outcome.kind === 'error') throw new MarketplaceProviderError(outcome.code, outcome.message);
+    if (outcome.kind === 'error') {
+      this.recordObservedAuthFailure(outcome.code);
+      throw new MarketplaceProviderError(outcome.code, outcome.message);
+    }
     // The coverage is part of the read contract: the window's newest end is established by the
     // explicit timestamps on the message rows (never by DOM order), and a truncated window says
     // so rather than presenting the newest messages as the whole thread. An orientation that
     // cannot be proven is a typed upstream error, never a window.
     return { thread_id: input.thread_id, messages: [...outcome.messages], coverage: outcome.coverage };
+  }
+
+  /**
+   * A page that itself shows a login, captcha, or checkpoint means the session this profile
+   * holds has expired or been challenged, even when the last probe assessed it usable. Downgrade
+   * the cached assessment so `marketplace_status` stops reporting the stale Messenger verdict
+   * until a probe or re-auth records a fresh one (#147).
+   */
+  private recordObservedAuthFailure(code: ProviderErrorCode): void {
+    if (!isFacebookAuthClassCode(code)) return;
+    this.browser.assessSession('session_needs_reauth');
+    // A captcha or checkpoint a page observed is a challenge only a human can clear, so it
+    // hard-opens the shared gate for every scope exactly like the probe path does (issue #144):
+    // the scope that first observes the challenge owns that open, so no other scope's request
+    // may submit credentials while it stands. A plain login requirement stays the recoverable
+    // credential path's business and never hard-opens the gate.
+    if (code !== 'LOGIN_REQUIRED') this.loginGate.recordChallenge(LOGIN_SCOPE);
   }
 
   // A draft needs only the conversation context, so it reuses this same thread read — including
@@ -356,6 +379,18 @@ export class FacebookMessengerBackend implements ConversationBackend {
         }
         if (taskSignal.aborted) throw taskSignal.reason ?? new Error('Browser operation aborted');
         if (pageKind !== 'messages') {
+          // The same observation rule as the read paths (#147): a login, captcha, or checkpoint
+          // on the thread page proves the Messenger session is no longer usable, so downgrade
+          // the cached assessment before reporting the failure. Nothing was typed, so no message
+          // was triggered.
+          if (pageKind === 'login' || pageKind === 'captcha' || pageKind === 'checkpoint') {
+            this.browser.assessSession('session_needs_reauth');
+            // A captcha or checkpoint on the verification page is a challenge only a human can
+            // clear, so it hard-opens the shared gate like the probe path does (issue #144);
+            // nothing was typed, and a plain login requirement stays the recoverable credential
+            // path's business.
+            if (pageKind !== 'login') this.loginGate.recordChallenge(LOGIN_SCOPE);
+          }
           throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook Messenger thread could not be verified before sending.');
         }
 

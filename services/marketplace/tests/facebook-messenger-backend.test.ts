@@ -428,6 +428,33 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
     expect(requests).toEqual(['/marketplace/inbox/']);
   });
 
+  it('downgrades a cached usable assessment when the inbox page shows a login challenge', async () => {
+    configure('inbox-login.html');
+    const backend = createBackend();
+    // The probe (as a fresh usable assessment would) says usable; the inbox page itself then
+    // shows a login form, so the cached verdict must not survive the observation (#147).
+    vi.spyOn(backend['probe'], 'probeSession').mockResolvedValue({ status: 'session_usable', outcome: 'messages_authenticated' });
+    await expectProviderError(
+      backend.listThreads(listInput(), new AbortController().signal),
+      'LOGIN_REQUIRED',
+      'Facebook login is required to read Marketplace conversations.'
+    );
+    expect(backend['browser'].getInfo().status).toBe('session_needs_reauth');
+  });
+
+  it('downgrades a cached usable assessment when a thread page shows a login challenge', async () => {
+    // The thread route serves the login fixture: reading it observes the auth-class failure.
+    configure('inbox-normal.html', 'inbox-login.html');
+    const backend = createBackend();
+    vi.spyOn(backend['probe'], 'probeSession').mockResolvedValue({ status: 'session_usable', outcome: 'messages_authenticated' });
+    await expectProviderError(
+      backend.readThread(readInput(), new AbortController().signal),
+      'LOGIN_REQUIRED',
+      'Facebook login is required to read Marketplace conversations.'
+    );
+    expect(backend['browser'].getInfo().status).toBe('session_needs_reauth');
+  });
+
   it('uses the shared credential recovery path after a Messenger login probe', async () => {
     configure();
     const backend = createBackend();
@@ -719,5 +746,66 @@ describe('Facebook Messenger backend prepareDraft', () => {
     vi.spyOn(backend, 'readThread').mockResolvedValue(null);
 
     await expect(backend.prepareDraft(draftInput, new AbortController().signal)).resolves.toBeNull();
+  });
+});
+
+// These cases drive the serialized browser task through the runExclusive seam with a controlled
+// page, so the observed-auth-failure downgrade is covered even where Chromium cannot launch.
+describe('Messenger result-page session downgrade', () => {
+  const loginSignals = {
+    hasPasswordInput: false, hasLoginForm: true, hasCheckpointForm: false, hasCaptchaFrame: false,
+    hasMainLandmark: true, hasAuthenticatedMarker: false, hasLoginPrompt: false,
+    mentionsCheckpoint: false, mentionsCaptcha: false
+  };
+
+  function driveThreadPageWithLogin(backend: FacebookMessengerBackend): BrowserSessionManager {
+    const manager = backend['browser'] as BrowserSessionManager;
+    const inboxPage = { url: `${origin}/marketplace/inbox/`, signals: loginSignals, hasEmptyStateMarker: false, threads: [] };
+    const threadPage = { url: `${origin}/messages/t/1684432532/`, signals: loginSignals, messages: [] };
+    const page = {
+      goto: async () => undefined,
+      on: () => undefined,
+      off: () => undefined,
+      evaluate: async (_fn: unknown, arg: unknown) =>
+        typeof (arg as { threadPath?: unknown })?.threadPath === 'string' ? inboxPage : threadPage
+    };
+    vi.spyOn(manager, 'runExclusive').mockImplementation(async (signal, task) => task(page as never, signal));
+    vi.spyOn(backend['probe'], 'probeSession').mockResolvedValue({ status: 'session_usable', outcome: 'messages_authenticated' });
+    return manager;
+  }
+
+  it('downgrades the cached assessment when the inbox page shows a login challenge', async () => {
+    const backend = createBackend();
+    const manager = driveThreadPageWithLogin(backend);
+    const assess = vi.spyOn(manager, 'assessSession');
+    await expectProviderError(
+      backend.listThreads(listInput(), new AbortController().signal),
+      'LOGIN_REQUIRED',
+      'Facebook login is required to read Marketplace conversations.'
+    );
+    expect(assess).toHaveBeenCalledWith('session_needs_reauth');
+  });
+
+  it('downgrades the cached assessment when a thread page shows a login challenge', async () => {
+    const backend = createBackend();
+    const manager = driveThreadPageWithLogin(backend);
+    const assess = vi.spyOn(manager, 'assessSession');
+    await expectProviderError(
+      backend.readThread(readInput(), new AbortController().signal),
+      'LOGIN_REQUIRED',
+      'Facebook login is required to read Marketplace conversations.'
+    );
+    expect(assess).toHaveBeenCalledWith('session_needs_reauth');
+  });
+
+  it('downgrades the cached assessment when the send verification page shows a login challenge', async () => {
+    const backend = createBackend();
+    const manager = driveThreadPageWithLogin(backend);
+    const assess = vi.spyOn(manager, 'assessSession');
+    await expectProviderError(
+      backend.sendThread(sendInput(), new AbortController().signal),
+      'UPSTREAM_ERROR'
+    );
+    expect(assess).toHaveBeenCalledWith('session_needs_reauth');
   });
 });

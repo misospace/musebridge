@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { PROVIDER_SESSION_ASSESSMENTS } from './browser.js';
 
-export const SCHEMA_VERSION = '1.6.0';
+export const SCHEMA_VERSION = '1.7.0';
 export const SERVICE_VERSION = '0.1.0'; // x-release-please-version
 export const MAX_QUERY_LENGTH = 256;
 export const MAX_LOCATION_LENGTH = 256;
@@ -272,6 +272,18 @@ export const facebookSessionSchema = z.object({
   status: z.enum(PROVIDER_SESSION_ASSESSMENTS)
 }).strict();
 
+/**
+ * The per-surface session states `marketplace_status` reports (#147): the three browser
+ * assessments plus `disabled`, which means no Facebook browser scope drives that surface at all
+ * — distinct from `session_unknown`, an existing scope whose profile was never assessed.
+ */
+export const SURFACE_SESSION_STATUSES = [...PROVIDER_SESSION_ASSESSMENTS, 'disabled'] as const;
+export type SurfaceSessionStatus = typeof SURFACE_SESSION_STATUSES[number];
+
+export const surfaceSessionSchema = z.object({
+  status: z.enum(SURFACE_SESSION_STATUSES)
+}).strict();
+
 export const capabilitySchema = z.object({
   surface: z.enum(['marketplace', 'shopping', 'messenger', 'events', 'social']),
   provider: z.enum(['facebook', 'ebay', 'ticketmaster', 'threads']),
@@ -283,7 +295,12 @@ export const statusSuccessSchema = z.object({
   service_version: z.literal(SERVICE_VERSION),
   schema_version: z.literal(SCHEMA_VERSION),
   backend: backendNameSchema,
+  /** Deprecated alias of the marketplace-scope assessment for pre-1.7 consumers; when `marketplace_session` reports `disabled` this keeps the legacy browser-derived value. */
   facebook_session: facebookSessionSchema.optional(),
+  /** Marketplace-scope Facebook session state, or `disabled` when the marketplace surface is not served by the Facebook backend (#147). */
+  marketplace_session: surfaceSessionSchema.optional(),
+  /** Messenger-scope Facebook session state, or `disabled` when no Messenger browser scope is configured (#147). */
+  messenger_session: surfaceSessionSchema.optional(),
   shopping_backend: backendNameSchema.optional(),
   events_backend: backendNameSchema.optional(),
   threads_backend: backendNameSchema.optional(),

@@ -464,6 +464,16 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
         backendTimeoutMs,
         shutdownSignal: shutdownController.signal,
         sessionAssessment: () => toProviderSessionAssessment(browser.getInfo()),
+        // Per-surface session states (#147): each surface reports its own profile's assessment,
+        // so a Messenger profile that needs re-auth can never hide behind a healthy Marketplace
+        // report. 'disabled' marks a surface with no Facebook browser scope at all (fixture
+        // marketplace backend, or Messenger turned off), distinct from an unassessed profile.
+        marketplaceSessionAssessment: () => selectedBackendKind === 'facebook' && options.backend === undefined
+          ? toProviderSessionAssessment(browser.getInfo())
+          : 'disabled',
+        messengerSessionAssessment: () => messengerBrowser === undefined
+          ? 'disabled'
+          : toProviderSessionAssessment(messengerBrowser.getInfo()),
         conversations,
         shopping,
         events,

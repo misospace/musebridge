@@ -29,6 +29,7 @@ import {
   SERVICE_VERSION,
   statusInputSchema,
   statusOutputSchema,
+  type SurfaceSessionStatus,
   providerErrorSchema,
   runtimeFailureSchema,
   type RuntimeFailure,
@@ -165,7 +166,7 @@ export const TOOLS = [
   },
   {
     name: 'marketplace_status',
-    description: 'Report service and schema versions, the configured backend name, and the Facebook session state.',
+    description: 'Report service and schema versions, the configured backend name, and the per-surface Facebook session state (marketplace and messenger).',
     inputSchema: statusInputSchema,
     outputSchema: statusOutputSchema,
     definition: { riskClass: 'read', scope: marketplaceScope }
@@ -277,7 +278,12 @@ export interface MarketplaceToolOptions {
   backendName?: string;
   backendTimeoutMs?: number;
   shutdownSignal?: AbortSignal;
+  /** Deprecated source for the legacy `facebook_session` field; reports the marketplace-scope assessment. */
   sessionAssessment?: () => ProviderSessionAssessment;
+  /** Marketplace-scope Facebook session state, or `'disabled'` when the marketplace surface is not served by the Facebook backend (#147). */
+  marketplaceSessionAssessment?: () => SurfaceSessionStatus;
+  /** Messenger-scope Facebook session state, or `'disabled'` when no Messenger browser scope is configured (#147). */
+  messengerSessionAssessment?: () => SurfaceSessionStatus;
   /** Per-call host seam for approval grants; receives the validated action request (including the payload digest) so a host can correlate it with its own approval records. Grants must come from the host, never from tool arguments. This service does not issue grants. */
   approvalGrant?: (request: ActionRequest) => unknown;
   authorizer?: ActionAuthorizer;
@@ -567,6 +573,8 @@ export function registerMarketplaceTools(
             : { ok: true, backend: threads.name, media_id: repliesInput.media_id, replies: result.replies, truncated: result.truncated };
         } else {
           const sessionAssessment = options.sessionAssessment;
+          const marketplaceSessionAssessment = options.marketplaceSessionAssessment;
+          const messengerSessionAssessment = options.messengerSessionAssessment;
           output = {
             ok: true,
             service_version: SERVICE_VERSION,
@@ -576,6 +584,8 @@ export function registerMarketplaceTools(
             events_backend: options.events?.name,
             threads_backend: options.threads?.name,
             ...(sessionAssessment ? { facebook_session: { status: sessionAssessment() } } : {}),
+            ...(marketplaceSessionAssessment ? { marketplace_session: { status: marketplaceSessionAssessment() } } : {}),
+            ...(messengerSessionAssessment ? { messenger_session: { status: messengerSessionAssessment() } } : {}),
             capabilities: [
               { surface: marketplaceScope.surface, provider: marketplaceScope.provider, backend: backendName },
               { surface: shoppingScope.surface, provider: shoppingScope.provider, backend: options.shopping?.name ?? null },

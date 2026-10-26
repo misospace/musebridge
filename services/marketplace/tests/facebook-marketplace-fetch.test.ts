@@ -232,13 +232,15 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace fetch', () => {
     expect(synthetic.requests).toEqual(['/marketplace/']);
   });
 
-  it('fails closed when login appears after a usable session probe', async () => {
+  it('fails closed when login appears after a usable session probe and downgrades the cached assessment', async () => {
     synthetic.configure('results-normal.html', 'results-normal.html');
     synthetic.configureItem('item-login.html');
-    const { backend } = createBackend();
+    const { backend, browser } = createBackend();
 
     await expectProviderError(backend.fetch(fetchInput({ id: itemId }), signal()), 'LOGIN_REQUIRED');
     expect(synthetic.requests).toEqual(['/marketplace/', `/marketplace/item/${itemId}/`]);
+    // The usable probe verdict must not survive an observed auth-class failure on the item page (#147).
+    expect(browser.getInfo().status).toBe('session_needs_reauth');
   });
 
   it('rejects an item page whose location cannot be parsed without returning a partial listing', async () => {

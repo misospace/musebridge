@@ -110,11 +110,31 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace backend', () => {
     expect(synthetic.requests).toEqual(['/marketplace/']);
   });
 
-  it('detects authentication loss on the search page', async () => {
+  it('detects authentication loss on the search page and downgrades the cached assessment', async () => {
     synthetic.configure('results-normal.html', 'login.html');
-    const { backend } = createBackend();
+    const { backend, browser } = createBackend();
     await expectProviderError(backend.search(searchInput(), new AbortController().signal), 'LOGIN_REQUIRED');
     expect(synthetic.requests).toEqual(['/marketplace/', '/marketplace/nyc/search/?query=bike']);
+    // The usable probe verdict must not survive an observed auth-class failure on the result page (#147).
+    expect(browser.getInfo().status).toBe('session_needs_reauth');
+  });
+
+  it.each([
+    ['checkpoint.html', 'SESSION_INVALID'],
+    ['captcha.html', 'CAPTCHA_REQUIRED']
+  ] as const)('downgrades the cached assessment when the search page shows %s', async (fixture, code) => {
+    synthetic.configure('results-normal.html', fixture);
+    const { backend, browser } = createBackend();
+    await expectProviderError(backend.search(searchInput(), new AbortController().signal), code);
+    expect(browser.getInfo().status).toBe('session_needs_reauth');
+  });
+
+  it('keeps the usable assessment when a result-page failure is not auth-class', async () => {
+    synthetic.configure('results-normal.html', 'rate-limited.html');
+    const { backend, browser } = createBackend();
+    await expectProviderError(backend.search(searchInput(), new AbortController().signal), 'RATE_LIMITED');
+    // A rate limit says nothing about authentication, so the last probe verdict stands.
+    expect(browser.getInfo().status).toBe('session_usable');
   });
 
   it('returns a typed upstream error rather than treating an unknown layout as empty', async () => {
@@ -248,5 +268,52 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace backend', () => {
     expect(() => new FacebookMarketplaceBackend({ browser, probe, maxCards: 0 })).toThrow(RangeError);
     expect(() => new FacebookMarketplaceBackend({ browser, probe, maxCards: 61 })).toThrow(RangeError);
     expect(() => new FacebookMarketplaceBackend({ browser: {} as BrowserSessionManager, probe })).toThrow(TypeError);
+  });
+});
+
+// These cases drive the serialized browser task through the runExclusive seam with a controlled
+// page, so the observed-auth-failure downgrade is covered even where Chromium cannot launch.
+describe('Facebook Marketplace result-page session downgrade', () => {
+  const signals = (overrides: Record<string, boolean>) => ({
+    hasCaptcha: false, hasCheckpoint: false, hasLoginForm: false,
+    hasRateLimitNotice: false, hasNoResultsNotice: false, ...overrides
+  });
+
+  function driveResultPage(backend: FacebookMarketplaceBackend, kind: 'login' | 'checkpoint' | 'captcha' | 'rate-limit'): void {
+    const manager = backend['browser'] as BrowserSessionManager;
+    const extraction = {
+      url: `${synthetic.origin}/marketplace/nyc/search/`,
+      signals: signals(
+        kind === 'login' ? { hasLoginForm: true }
+          : kind === 'checkpoint' ? { hasCheckpoint: true }
+            : kind === 'captcha' ? { hasCaptcha: true }
+              : { hasRateLimitNotice: true }
+      ),
+      cards: []
+    };
+    const page = { goto: async () => undefined, evaluate: async () => extraction };
+    vi.spyOn(manager, 'runExclusive').mockImplementation(async (signal, task) =>
+      task(page as never, signal));
+    vi.spyOn(backend['probe'], 'probeSession').mockResolvedValue({ status: 'session_usable', outcome: 'marketplace_authenticated' });
+  }
+
+  it.each([
+    ['login', 'LOGIN_REQUIRED'],
+    ['checkpoint', 'SESSION_INVALID'],
+    ['captcha', 'CAPTCHA_REQUIRED']
+  ] as const)('downgrades the cached assessment when the result page shows %s', async (kind, code) => {
+    const { backend, browser } = createBackend();
+    driveResultPage(backend, kind);
+    const assess = vi.spyOn(browser, 'assessSession');
+    await expectProviderError(backend.search(searchInput(), new AbortController().signal), code);
+    expect(assess).toHaveBeenCalledWith('session_needs_reauth');
+  });
+
+  it('leaves the cached assessment alone for a non-auth result-page failure', async () => {
+    const { backend, browser } = createBackend();
+    driveResultPage(backend, 'rate-limit');
+    const assess = vi.spyOn(browser, 'assessSession');
+    await expectProviderError(backend.search(searchInput(), new AbortController().signal), 'RATE_LIMITED');
+    expect(assess).not.toHaveBeenCalled();
   });
 });

@@ -5,7 +5,7 @@ import { FacebookCredentialLogin } from '../src/facebook-login.js';
 import { FacebookLoginCircuitBreaker, type FacebookLoginScope } from '../src/facebook-login-circuit-breaker.js';
 import { FacebookMarketplaceBackend } from '../src/facebook-marketplace-backend.js';
 import { FacebookMessengerBackend } from '../src/facebook-messenger-backend.js';
-import { searchInputSchema, threadsListInputSchema } from '../src/domain.js';
+import { fetchInputSchema, searchInputSchema, threadReadInputSchema, threadsListInputSchema, threadSendInputSchema } from '../src/domain.js';
 
 const loginRequired = { status: 'session_needs_reauth', code: 'LOGIN_REQUIRED', outcome: 'login_required' } as const;
 const captchaRequired = { status: 'session_needs_reauth', code: 'CAPTCHA_REQUIRED', outcome: 'captcha' } as const;
@@ -502,6 +502,139 @@ describe('Facebook backend login gate', () => {
     // The Marketplace cooldown still holds, so the second request never submits credentials.
     await expectLoginRequired(state.marketplace.search(search, signal()), 'Facebook Marketplace requires login.');
     expect(attempt).toHaveBeenCalledTimes(1);
+    await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
+  });
+
+  // Page-observed challenges (#161 review): a captcha or checkpoint a page loaded under the
+  // session is as much a fact about the account as a probe result, so it must hard-open the
+  // shared gate too — the other scope may not start a credential attempt on its strength.
+  type ObservedPageKind = 'login' | 'captcha' | 'checkpoint';
+  const observedPageSignals = (kind: ObservedPageKind) => ({
+    hasPasswordInput: false, hasLoginForm: kind === 'login',
+    hasCheckpointForm: kind === 'checkpoint', hasCaptchaFrame: kind === 'captcha',
+    hasMainLandmark: true, hasAuthenticatedMarker: false, hasLoginPrompt: false,
+    mentionsCheckpoint: kind === 'checkpoint', mentionsCaptcha: kind === 'captcha'
+  });
+
+  function driveObservedPage(manager: BrowserSessionManager, extraction: Record<string, unknown>): void {
+    // listThreads also registers a response collector on the page; a no-op handler stands in
+    // for it because the observed challenge is decided by the extracted page, not by responses.
+    const page = { goto: async () => undefined, on: () => undefined, off: () => undefined, evaluate: async () => extraction };
+    vi.spyOn(manager, 'runExclusive').mockImplementation(async (signal, task) =>
+      task(page as never, signal));
+  }
+
+  it('hard-opens the shared gate when a Marketplace result page observes a captcha', async () => {
+    const state = setup(new FacebookLoginCircuitBreaker({ baseCooldownMs: 60_000, maxCooldownMs: 120_000, maxFailures: 3 }));
+    mockProbe(state.marketplaceProbe, [usable]);
+    driveObservedPage(state.browser, {
+      url: 'http://127.0.0.1:1234/marketplace/nyc/search/?query=bike',
+      signals: { hasCaptcha: true, hasCheckpoint: false, hasLoginForm: false, hasRateLimitNotice: false, hasNoResultsNotice: false },
+      cards: []
+    });
+    await expect(state.marketplace.search(search, signal())).rejects.toMatchObject({
+      name: 'ProviderError', code: 'CAPTCHA_REQUIRED'
+    });
+    expect(state.gate.snapshot()).toEqual({ status: 'open', reason: 'challenge' });
+    // The hard open is account-wide: the Messenger scope may not submit credentials either.
+    mockProbe(state.messengerProbe, [loginRequired]);
+    const messengerAttempt = mockLogin(state.messengerLogin);
+    await expect(messengerSession(state.messenger)).rejects.toMatchObject({
+      name: 'ProviderError', code: 'LOGIN_REQUIRED'
+    });
+    expect(messengerAttempt).not.toHaveBeenCalled();
+    await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
+  });
+
+  it('hard-opens the shared gate when a Messenger thread page observes a checkpoint', async () => {
+    const state = setup(new FacebookLoginCircuitBreaker({ baseCooldownMs: 60_000, maxCooldownMs: 120_000, maxFailures: 3 }));
+    mockProbe(state.messengerProbe, [usable]);
+    driveObservedPage(state.messengerBrowser, {
+      url: 'http://127.0.0.1:1234/messages/t/1684432532/',
+      signals: observedPageSignals('checkpoint'),
+      messages: []
+    });
+    await expect(state.messenger.readThread(threadReadInputSchema.parse({ thread_id: '1684432532' }), signal()))
+      .rejects.toMatchObject({ name: 'ProviderError', code: 'SESSION_INVALID' });
+    expect(state.gate.snapshot()).toEqual({ status: 'open', reason: 'challenge' });
+    // The hard open is account-wide: the Marketplace scope may not submit credentials either.
+    mockProbe(state.marketplaceProbe, [loginRequired]);
+    const attempt = mockLogin(state.marketplaceLogin);
+    await expectLoginRequired(state.marketplace.search(search, signal()), 'Facebook Marketplace requires login.');
+    expect(attempt).not.toHaveBeenCalled();
+    await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
+  });
+
+  it('hard-opens the shared gate when the send verification page observes a captcha', async () => {
+    const state = setup(new FacebookLoginCircuitBreaker({ baseCooldownMs: 60_000, maxCooldownMs: 120_000, maxFailures: 3 }));
+    mockProbe(state.messengerProbe, [usable]);
+    driveObservedPage(state.messengerBrowser, {
+      url: 'http://127.0.0.1:1234/messages/t/1684432532/',
+      signals: observedPageSignals('captcha'),
+      messages: []
+    });
+    // The pre-submit verification page downgrades and hard-opens the gate; nothing was typed.
+    await expect(state.messenger.sendThread(threadSendInputSchema.parse({
+      thread_id: '1684432532', message: 'Synthetic send sentinel', idempotency_token: '0123456789abcdef'
+    }), signal())).rejects.toMatchObject({ name: 'ProviderError', code: 'UPSTREAM_ERROR' });
+    expect(state.gate.snapshot()).toEqual({ status: 'open', reason: 'challenge' });
+    await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
+  });
+
+  it('hard-opens the shared gate when a Marketplace item page observes a captcha', async () => {
+    const state = setup(new FacebookLoginCircuitBreaker({ baseCooldownMs: 60_000, maxCooldownMs: 120_000, maxFailures: 3 }));
+    mockProbe(state.marketplaceProbe, [usable]);
+    driveObservedPage(state.browser, {
+      url: 'http://127.0.0.1:1234/marketplace/item/100000000000001/',
+      signals: { hasCaptcha: true, hasCheckpoint: false, hasLoginForm: false, hasRateLimitNotice: false, hasNoResultsNotice: false },
+      hasUnavailableNotice: false, title: null, priceText: null, locationText: null,
+      descriptionText: null, stateText: null, bodyText: '', imageUrls: [],
+      sellerHref: null, sellerName: null, timeDateTime: null
+    });
+    await expect(state.marketplace.fetch(fetchInputSchema.parse({ id: '100000000000001' }), signal()))
+      .rejects.toMatchObject({ name: 'ProviderError', code: 'CAPTCHA_REQUIRED' });
+    expect(state.gate.snapshot()).toEqual({ status: 'open', reason: 'challenge' });
+    // The hard open is account-wide: the Messenger scope may not submit credentials either.
+    mockProbe(state.messengerProbe, [loginRequired]);
+    const messengerAttempt = mockLogin(state.messengerLogin);
+    await expect(messengerSession(state.messenger)).rejects.toMatchObject({
+      name: 'ProviderError', code: 'LOGIN_REQUIRED'
+    });
+    expect(messengerAttempt).not.toHaveBeenCalled();
+    await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
+  });
+
+  it('hard-opens the shared gate when a Messenger inbox page observes a captcha', async () => {
+    const state = setup(new FacebookLoginCircuitBreaker({ baseCooldownMs: 60_000, maxCooldownMs: 120_000, maxFailures: 3 }));
+    mockProbe(state.messengerProbe, [usable]);
+    driveObservedPage(state.messengerBrowser, {
+      url: 'http://127.0.0.1:1234/marketplace/inbox/',
+      signals: observedPageSignals('captcha'),
+      hasEmptyStateMarker: false, threads: []
+    });
+    await expect(state.messenger.listThreads(threads, signal()))
+      .rejects.toMatchObject({ name: 'ProviderError', code: 'CAPTCHA_REQUIRED' });
+    expect(state.gate.snapshot()).toEqual({ status: 'open', reason: 'challenge' });
+    // The hard open is account-wide: the Marketplace scope may not submit credentials either.
+    mockProbe(state.marketplaceProbe, [loginRequired]);
+    const attempt = mockLogin(state.marketplaceLogin);
+    await expectLoginRequired(state.marketplace.search(search, signal()), 'Facebook Marketplace requires login.');
+    expect(attempt).not.toHaveBeenCalled();
+    await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
+  });
+
+  it('does not hard-open the shared gate when a page observes only a plain login requirement', async () => {
+    const state = setup(new FacebookLoginCircuitBreaker({ baseCooldownMs: 60_000, maxCooldownMs: 120_000, maxFailures: 3 }));
+    mockProbe(state.marketplaceProbe, [usable]);
+    driveObservedPage(state.browser, {
+      url: 'http://127.0.0.1:1234/marketplace/nyc/search/?query=bike',
+      signals: { hasCaptcha: false, hasCheckpoint: false, hasLoginForm: true, hasRateLimitNotice: false, hasNoResultsNotice: false },
+      cards: []
+    });
+    await expectLoginRequired(state.marketplace.search(search, signal()), 'Facebook Marketplace requires login.');
+    // A plain login requirement stays the recoverable credential path's business, so the gate
+    // keeps its closed state and a later credential attempt is not blocked by a hard open.
+    expect(state.gate.snapshot()).toEqual({ status: 'closed' });
     await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
   });
 });
