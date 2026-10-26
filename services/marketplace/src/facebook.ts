@@ -182,7 +182,7 @@ export function classifyFacebookSession(
   if (snapshot.hasCaptchaFrame || snapshot.mentionsCaptcha) {
     // Dormant markup is not proof of a visible challenge, nor permission to log in or read.
     // Legacy snapshots without visibility observations keep the existing conservative verdict.
-    if (surface === 'messenger' && snapshot.captchaSignals && !hasVisibleCaptcha(snapshot.captchaSignals)) {
+    if (snapshot.captchaSignals && !hasVisibleCaptchaEvidence(snapshot.captchaSignals, surface)) {
       return { status: 'session_unknown', outcome: 'ambiguous' };
     }
     return { status: 'session_needs_reauth', outcome: 'captcha', code: 'CAPTCHA_REQUIRED' };
@@ -318,6 +318,18 @@ async function observeSignal(locator: Locator): Promise<{ matched: boolean; visi
 
 function hasVisibleCaptcha(signals: FacebookCaptchaSignals): boolean {
   return signals.iframeVisible || signals.idVisible || signals.testIdVisible || signals.textVisible;
+}
+
+/**
+ * Whether the snapshot carries visible evidence of a genuine challenge. Structural captcha
+ * markup and challenge phrases are relevant signals on both surfaces. On Marketplace the bare
+ * word "captcha" in visible text is arbitrary listing/feed content, so it never asserts a
+ * captcha on its own; Messenger keeps counting visible challenge text (#85).
+ */
+function hasVisibleCaptchaEvidence(signals: FacebookCaptchaSignals, surface: 'marketplace' | 'messenger'): boolean {
+  if (signals.iframeVisible || signals.idVisible || signals.testIdVisible) return true;
+  if (signals.notRobotVisible || signals.verifyHumanVisible) return true;
+  return surface === 'messenger' && signals.textVisible;
 }
 
 function hasDecisiveSignal(snapshot: FacebookPageSnapshot, baseUrl: string, surface: 'marketplace' | 'messenger'): boolean {
