@@ -23,7 +23,8 @@ const fixtures = new Map([
   'inbox-buttons-graphql.html', 'inbox-buttons-graphql-delayed.html', 'inbox-buttons-graphql-paginated.html', 'inbox-buttons-graphql-stalled.html',
   'inbox-graphql-error-dom.html',
   'thread-normal.html', 'thread-layout-changed.html', 'thread-articles-unattributed.html', 'thread-empty.html', 'thread-token-bounds.html',
-  'thread-composer.html', 'thread-no-composer.html', 'thread-two-composers.html', 'thread-undated.html'
+  'thread-composer.html', 'thread-no-composer.html', 'thread-two-composers.html', 'thread-undated.html',
+  'thread-unavailable.html', 'thread-nonexistent.html'
 ].map((name) => [name, readFileSync(new URL(name, fixtureDir), 'utf8')]));
 
 let server: Server;
@@ -519,6 +520,17 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
     );
   });
 
+  it.each(['thread-unavailable.html', 'thread-nonexistent.html'])(
+    'reports the verified absence in thread fixture %s as null so the tool can answer NOT_FOUND',
+    async (fixture) => {
+      configure('inbox-normal.html', fixture);
+      const backend = createBackend({ settleTimeoutMs: 200 });
+      await expect(backend.readThread(readInput(), new AbortController().signal)).resolves.toBeNull();
+      // A verified absence carries no auth challenge, so the usable session assessment stands.
+      expect(backend['browser'].getInfo().status).not.toBe('session_needs_reauth');
+    }
+  );
+
   it('reads bounded attributed token text through the backend without inventing delivery confirmation', async () => {
     configure('inbox-normal.html', 'thread-token-bounds.html');
     const result = await createBackend().readThread(readInput(), new AbortController().signal);
@@ -571,6 +583,23 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
 
   it('does not return another conversation for a redirected thread id', async () => {
     configure();
+    const backend = createBackend();
+    vi.spyOn(backend['probe'], 'probeSession').mockResolvedValue({
+      status: 'session_usable', outcome: 'messages_authenticated'
+    });
+    threadRedirectTarget = '/messages/t/99999/';
+    await expect(backend.readThread(readInput(), new AbortController().signal)).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR',
+      message: 'The Facebook Messenger thread page was not reached at the requested thread.'
+    });
+    await backend.close();
+  }, 15_000);
+
+  it('does not report NOT_FOUND for an unavailable notice reached through a redirect', async () => {
+    // The notice content is served after a redirect away from the requested thread. A redirect
+    // stays the typed ambiguity it was: only content reached at the requested address can
+    // verify an absence (#150).
+    configure('inbox-normal.html', 'thread-unavailable.html');
     const backend = createBackend();
     vi.spyOn(backend['probe'], 'probeSession').mockResolvedValue({
       status: 'session_usable', outcome: 'messages_authenticated'
@@ -636,6 +665,19 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend send', () => {
 
   it('fails closed before typing when the thread page is not a recognized thread page', async () => {
     configure(undefined, 'thread-layout-changed.html');
+    const backend = createBackend({ settleTimeoutMs: 200 });
+    await expectProviderError(
+      backend.sendThread(sendInput(), new AbortController().signal),
+      'UPSTREAM_ERROR',
+      'The Facebook Messenger thread could not be verified before sending.'
+    );
+  });
+
+  it('fails closed before typing when the thread page is a verified absence', async () => {
+    // A verified unavailable thread can never receive the message, but the pre-send guard still
+    // refuses on the general verification error: sending stays the only writer, and it types
+    // into nothing that is not a recognized conversation.
+    configure(undefined, 'thread-unavailable.html');
     const backend = createBackend({ settleTimeoutMs: 200 });
     await expectProviderError(
       backend.sendThread(sendInput(), new AbortController().signal),

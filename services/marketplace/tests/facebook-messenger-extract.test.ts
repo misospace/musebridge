@@ -103,6 +103,46 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
       distinctPositions: 6
     });
     expect(classifyMessengerThreadPage(extracted)).toBe('messages');
+    // A live conversation carries no unavailable notice, and the marker stays out of its report.
+    expect(extracted.hasUnavailableMarker).toBe(false);
+  });
+
+  it('recognizes explicit unavailable and nonexistent notices on synthetic thread pages', async () => {
+    const unavailableHtml = readFileSync(new URL('./fixtures/facebook-messenger/thread-unavailable.html', import.meta.url), 'utf8');
+    await page.setContent(unavailableHtml, { waitUntil: 'domcontentloaded' });
+    const unavailable = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(unavailable.hasUnavailableMarker).toBe(true);
+    expect(unavailable.messages).toEqual([]);
+    expect(unavailable.diagnostics?.hasMessageLog).toBe(false);
+    expect(classifyMessengerThreadPage(unavailable)).toBe('unavailable');
+
+    const nonexistentHtml = readFileSync(new URL('./fixtures/facebook-messenger/thread-nonexistent.html', import.meta.url), 'utf8');
+    await page.setContent(nonexistentHtml, { waitUntil: 'domcontentloaded' });
+    const nonexistent = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(nonexistent.hasUnavailableMarker).toBe(true);
+    expect(classifyMessengerThreadPage(nonexistent)).toBe('unavailable');
+  });
+
+  it('never selects the unavailable state over a rendered conversation or a contradicting message log', async () => {
+    // Seller text quoting the notice inside a live conversation must not turn it into a NOT_FOUND.
+    const conversationHtml = '<!doctype html><html><body><main><a href="/logout/">Log out</a>' +
+      '<div role="row" aria-setsize="1" aria-label="Synthetic Seller said: re-sending the notice">' +
+      'This content isn\'t available right now, here is the direct link<time datetime="2026-09-14T10:30:00Z"></time></div>' +
+      '</main></body></html>';
+    await page.setContent(conversationHtml, { waitUntil: 'domcontentloaded' });
+    const conversation = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(conversation.hasUnavailableMarker).toBe(true);
+    expect(classifyMessengerThreadPage(conversation)).toBe('messages');
+
+    // A page that renders a message log beside the notice contradicts itself: unrecognized, never absence.
+    const contradictingHtml = '<!doctype html><html><body><main><a href="/logout/">Log out</a>' +
+      '<div role="log" aria-label="Synthetic messages">This content isn\'t available right now</div>' +
+      '</main></body></html>';
+    await page.setContent(contradictingHtml, { waitUntil: 'domcontentloaded' });
+    const contradicting = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(contradicting.hasUnavailableMarker).toBe(true);
+    expect(contradicting.diagnostics?.hasMessageLog).toBe(true);
+    expect(classifyMessengerThreadPage(contradicting)).toBe('unknown');
   });
 
   it('collects every attributed candidate and lets the window selection bound the messages', async () => {

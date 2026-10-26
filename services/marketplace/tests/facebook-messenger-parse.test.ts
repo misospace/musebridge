@@ -34,6 +34,7 @@ function thread(overrides: Partial<ExtractedThreadPage> = {}): ExtractedThreadPa
   return {
     url: 'https://www.facebook.com/messages/t/1684432532/',
     signals: { ...authenticatedSignals },
+    hasUnavailableMarker: false,
     messages: [],
     ...overrides
   };
@@ -163,6 +164,49 @@ describe('Messenger page interpretation', () => {
     expect(classifyMessengerThreadPage(thread({ messages: [{ sender: 'you', text: 'Hello' }] }))).toBe('messages');
     expect(classifyMessengerThreadPage(thread())).toBe('unknown');
     expect(classifyMessengerThreadPage(thread({ signals: { ...authenticatedSignals, hasLoginForm: true } }))).toBe('login');
+  });
+
+  it('classifies a standalone unavailable notice, but never over a conversation, a log, or a challenge', () => {
+    expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true }))).toBe('unavailable');
+    // A rendered conversation wins: notice wording inside live content never selects absence.
+    expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true, messages: [{ sender: 'you', text: 'Hello' }] }))).toBe('messages');
+    // A page that still renders a message log contradicts the notice, so it stays unrecognized.
+    expect(classifyMessengerThreadPage(thread({
+      hasUnavailableMarker: true,
+      diagnostics: provenDiagnostics({ renderedRows: 0, scannedRows: 0, declaredSetSize: 0, attestedRows: 0 })
+    }))).toBe('unknown');
+    // Without the authenticated marker the notice is not a verified absence for this session.
+    expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true, signals: { ...authenticatedSignals, hasAuthenticatedMarker: false } }))).toBe('unknown');
+    // Auth challenges keep their precedence over the notice.
+    expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true, signals: { ...authenticatedSignals, hasLoginForm: true } }))).toBe('login');
+    expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true, signals: { ...authenticatedSignals, hasCaptchaFrame: true } }))).toBe('captcha');
+    expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true, signals: { ...authenticatedSignals, hasCheckpointForm: true } }))).toBe('checkpoint');
+  });
+
+  it('returns the unavailable outcome only for a verified absence at the requested thread', () => {
+    expect(interpretMessengerThreadPage({
+      page: thread({ hasUnavailableMarker: true }), baseUrl: 'https://www.facebook.com', threadId: '1684432532'
+    })).toEqual({ kind: 'unavailable' });
+    // A redirect stays the ambiguous typed error: content served at another address proves
+    // nothing about the requested thread, notice or not.
+    expect(interpretMessengerThreadPage({
+      page: thread({ url: 'https://www.facebook.com/messages/t/99999/', hasUnavailableMarker: true }),
+      baseUrl: 'https://www.facebook.com', threadId: '1684432532'
+    })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger thread page was not reached at the requested thread.' });
+    // A login page quoting the notice is still the login requirement.
+    expect(interpretMessengerThreadPage({
+      page: thread({ hasUnavailableMarker: true, signals: { ...authenticatedSignals, hasLoginForm: true } }),
+      baseUrl: 'https://www.facebook.com', threadId: '1684432532'
+    })).toMatchObject({ kind: 'error', code: 'LOGIN_REQUIRED' });
+    // A live conversation carrying notice wording in a message stays the proven window it was.
+    expect(interpretMessengerThreadPage({
+      page: thread({
+        hasUnavailableMarker: true,
+        messages: [datedMessage(0), datedMessage(1)],
+        diagnostics: provenDiagnostics({ renderedRows: 2, scannedRows: 2 })
+      }),
+      baseUrl: 'https://www.facebook.com', threadId: '1684432532'
+    })).toMatchObject({ kind: 'messages', coverage: { window: 'tail', scanned_rows: 2, truncated: false } });
   });
 
   it('maps message attribution and timestamps while omitting malformed rows', () => {

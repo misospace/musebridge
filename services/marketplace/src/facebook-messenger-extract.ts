@@ -51,6 +51,11 @@ export interface ExtractedMessage {
 export interface ExtractedThreadPage {
   url: string;
   signals: ExtractedMessengerSignals;
+  /** True when the page renders one of the provider's explicit deleted/unavailable/nonexistent
+   *  notices in place of a conversation. Like the listing page's unavailable notice, it is only
+   *  ever consulted when the page renders no message content: a rendered conversation always
+   *  wins over notice text elsewhere on the page. */
+  hasUnavailableMarker: boolean;
   /** Attributed message rows found in the page, in DOM order. This is the candidate set; the
    *  newest end of the window is selected from it by explicit timestamps, never by DOM order. */
   messages: ExtractedMessage[];
@@ -231,6 +236,11 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
     mentionsCheckpoint: /security check|confirm your identity|unusual activity/i.test(pageText),
     mentionsCaptcha: /captcha|i'?m not a robot|verify you are a human/i.test(pageText)
   };
+  // The provider's own statement that this conversation is gone: an explicit unavailable,
+  // deleted, or nonexistent notice. The phrase list stays deliberately narrow, and the decision
+  // side consults it only when no message content rendered (see classifyMessengerThreadPage), so
+  // seller text quoting one of these phrases inside a live conversation never selects the state.
+  const hasUnavailableMarker = /this (?:content|conversation|thread) (?:isn'?t|is not|is no longer|is currently not) available|(?:this )?content (?:is |was )?(?:currently |no longer )?unavailable|content (?:not found|was not found)|you (?:can'?t|cannot) access this (?:content|conversation|thread)|(?:this |the )?page (?:not found|wasn'?t found|doesn'?t exist|does not exist)/i.test(pageText);
   const messages: ExtractedMessage[] = [];
   const messageLog = document.querySelector('[role="log"]');
   // The accessibility set accounting is the only observable statement of how many items the
@@ -471,7 +481,7 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
     if (attestsBySize || attestsByPosition) attestedRows += 1;
   }
   diagnostics.attestedRows = attestedRows;
-  return { url, signals, messages, diagnostics };
+  return { url, signals, hasUnavailableMarker, messages, diagnostics };
 }
 
 // The message composer is recognized strictly by its accessibility contract: a contenteditable

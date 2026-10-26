@@ -299,6 +299,11 @@ export class FacebookMessengerBackend implements ConversationBackend {
       this.recordObservedAuthFailure(outcome.code);
       throw new MarketplaceProviderError(outcome.code, outcome.message);
     }
+    // A verified deleted/unavailable/nonexistent thread is a provider-confirmed absence, not a
+    // read failure: report null so `messenger_thread_read` answers NOT_FOUND (#150). The session
+    // is untouched — the page carried no auth challenge — and ambiguous layouts, redirects, and
+    // challenges still arrive as typed errors above.
+    if (outcome.kind === 'unavailable') return null;
     // The coverage is part of the read contract: the window's newest end is established by the
     // explicit timestamps on the message rows (never by DOM order), and a truncated window says
     // so rather than presenting the newest messages as the whole thread. An orientation that
