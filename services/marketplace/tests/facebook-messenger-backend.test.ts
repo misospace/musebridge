@@ -24,7 +24,7 @@ const fixtures = new Map([
   'inbox-graphql-error-dom.html',
   'thread-normal.html', 'thread-layout-changed.html', 'thread-articles-unattributed.html', 'thread-empty.html', 'thread-token-bounds.html',
   'thread-composer.html', 'thread-no-composer.html', 'thread-two-composers.html', 'thread-undated.html',
-  'thread-unavailable.html', 'thread-nonexistent.html'
+  'thread-unavailable.html', 'thread-nonexistent.html', 'thread-article-notice.html'
 ].map((name) => [name, readFileSync(new URL(name, fixtureDir), 'utf8')]));
 
 let server: Server;
@@ -536,6 +536,20 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
       expect(backend['browser'].getInfo().status).not.toBe('session_needs_reauth');
     }
   );
+
+  it('does not verify absence from a notice wrapped in message-like structure (#166)', async () => {
+    // The article is message-like structure the row counters cannot see, so the notice cannot
+    // disprove it: the layout is ambiguous and the read fails closed instead of NOT_FOUND.
+    configure('inbox-normal.html', 'thread-article-notice.html');
+    const backend = createBackend({ settleTimeoutMs: 200 });
+    await expectProviderError(
+      backend.readThread(readInput(), new AbortController().signal),
+      'UPSTREAM_ERROR',
+      'The Facebook Messenger thread page layout was not recognized.'
+    );
+    // An ambiguous layout is not a verified absence, so it carries no session assessment either.
+    expect(backend['browser'].getInfo().status).not.toBe('session_needs_reauth');
+  });
 
   it('reports a verified absence as a null draft so messenger_prepare answers NOT_FOUND', async () => {
     // The prepare path goes through the real thread read, not a stubbed one: the same verified

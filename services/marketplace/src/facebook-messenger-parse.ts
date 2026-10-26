@@ -119,15 +119,17 @@ export function classifyMessengerThreadPage(page: ExtractedThreadPage): Messenge
     // unavailable notice stands alone as verified absence only when the extraction report proves
     // the page rendered no message-like structure at all: no message log, no collected row
     // (even an unattributed one the probe would not read), no row rendered outside the collected
-    // scope, and no missing report that could hide any of them. A page whose report is absent or
-    // contradicts the notice is an ambiguous layout and stays unknown.
+    // scope, no article or message-labelled block the row counters cannot see, and no missing
+    // report that could hide any of them. A page whose report is absent or contradicts the
+    // notice is an ambiguous layout and stays unknown.
     const diagnostics = page.diagnostics;
     if (
       page.hasUnavailableMarker &&
       diagnostics !== undefined &&
       !diagnostics.hasMessageLog &&
       diagnostics.renderedRows === 0 &&
-      diagnostics.roleRowsOutsideScope === 0
+      diagnostics.roleRowsOutsideScope === 0 &&
+      diagnostics.messageLikeBlocks === 0
     ) return 'unavailable';
   }
   return 'unknown';
