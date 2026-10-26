@@ -134,6 +134,7 @@ describe('Messenger inbox GraphQL pagination coverage', () => {
       malformed: false,
       empty: false,
       incomplete: false,
+      truncated: false,
       threadIds: [...firstPageIds, ...secondPageIds]
     });
   });
@@ -155,11 +156,56 @@ describe('Messenger inbox GraphQL pagination coverage', () => {
     });
   });
 
+  it('marks a complete chain beyond the thread cap as truncated and keeps the bounded prefix (#151)', () => {
+    const firstPageIds = ids(1, 12);
+    const secondPageIds = ids(13, 12);
+    const thirdPageIds = ids(25, 4);
+    const collector = new MessengerInboxGraphQLCollector();
+
+    observe(collector, response(edges(firstPageIds), { has_next_page: true, end_cursor: 'cursor-one' }), null);
+    observe(collector, response(edges(secondPageIds), { has_next_page: true, end_cursor: 'cursor-two' }), 'cursor-one');
+    observe(collector, response(edges(thirdPageIds)), 'cursor-two');
+
+    const snapshot = collector.snapshot();
+    expect(snapshot.incomplete).toBe(false);
+    expect(snapshot.truncated).toBe(true);
+    expect(snapshot.threadIds).toEqual([...firstPageIds, ...secondPageIds.slice(0, 8)]);
+  });
+
+  it('does not mark the exact thread-cap boundary truncated on a complete chain (#151)', () => {
+    const firstPageIds = ids(1, 12);
+    const secondPageIds = ids(13, 8);
+    const collector = new MessengerInboxGraphQLCollector();
+
+    observe(collector, response(edges(firstPageIds), { has_next_page: true, end_cursor: 'cursor-one' }), null);
+    observe(collector, response(edges(secondPageIds)), 'cursor-one');
+
+    const snapshot = collector.snapshot();
+    expect(snapshot.incomplete).toBe(false);
+    expect(snapshot.truncated).toBe(false);
+    expect(snapshot.threadIds).toEqual([...firstPageIds, ...secondPageIds]);
+    expect(snapshot.threadIds).toHaveLength(20);
+  });
+
+  it('counts deduplicated ids toward the cap so retry overlap never fabricates truncation (#151)', () => {
+    const firstPageIds = ids(1, 12);
+    const overlappingIds = [...ids(7, 6), ...ids(13, 8)];
+    const collector = new MessengerInboxGraphQLCollector();
+
+    observe(collector, response(edges(firstPageIds), { has_next_page: true, end_cursor: 'cursor-one' }), null);
+    observe(collector, response(edges(overlappingIds)), 'cursor-one');
+
+    const snapshot = collector.snapshot();
+    expect(snapshot.incomplete).toBe(false);
+    expect(snapshot.truncated).toBe(false);
+    expect(snapshot.threadIds).toHaveLength(20);
+  });
+
   it('rejects a terminal page when the initial page is missing', () => {
     const collector = new MessengerInboxGraphQLCollector();
     observe(collector, response(edges(['12345678'])), 'cursor-one');
     expect(collector.snapshot()).toEqual({
-      recognized: true, malformed: false, empty: false, incomplete: true, threadIds: []
+      recognized: true, malformed: false, empty: false, incomplete: true, truncated: false, threadIds: []
     });
   });
 
@@ -168,7 +214,7 @@ describe('Messenger inbox GraphQL pagination coverage', () => {
     observe(collector, response(edges(['12345678']), { has_next_page: true, end_cursor: 'cursor-one' }), null);
     observe(collector, response(edges(['12345680'])), 'cursor-two');
     expect(collector.snapshot()).toEqual({
-      recognized: true, malformed: false, empty: false, incomplete: true, threadIds: ['12345678']
+      recognized: true, malformed: false, empty: false, incomplete: true, truncated: false, threadIds: ['12345678']
     });
   });
 
@@ -186,7 +232,7 @@ describe('Messenger inbox GraphQL pagination coverage', () => {
     const collector = new MessengerInboxGraphQLCollector();
     observe(collector, { errors: [{ message: 'unavailable' }] });
     expect(collector.snapshot()).toEqual({
-      recognized: true, malformed: false, empty: false, incomplete: true, threadIds: []
+      recognized: true, malformed: false, empty: false, incomplete: true, truncated: false, threadIds: []
     });
   });
 
@@ -197,7 +243,7 @@ describe('Messenger inbox GraphQL pagination coverage', () => {
     });
     collector.observe({ errors: [{ message: 'unavailable' }] }, request);
     expect(collector.snapshot()).toEqual({
-      recognized: true, malformed: false, empty: false, incomplete: true, threadIds: []
+      recognized: true, malformed: false, empty: false, incomplete: true, truncated: false, threadIds: []
     });
   });
 

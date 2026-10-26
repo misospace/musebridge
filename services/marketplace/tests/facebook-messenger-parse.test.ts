@@ -94,7 +94,8 @@ describe('Messenger page interpretation', () => {
     ] });
     expect(interpretMessengerInboxPage({ page, baseUrl: 'https://www.facebook.com', limit: 1, inboxPath: '/marketplace/inbox/' })).toEqual({
       kind: 'threads',
-      threads: [{ thread_id: '1684432532', preview: 'Synthetic preview', item_id: '123456789' }]
+      threads: [{ thread_id: '1684432532', preview: 'Synthetic preview', item_id: '123456789' }],
+      truncated: true
     });
     expect(interpretMessengerInboxPage({ page: inbox({ hasEmptyStateMarker: true }), baseUrl: 'https://www.facebook.com', limit: 1, inboxPath: '/marketplace/inbox/' }))
       .toEqual({ kind: 'empty' });
@@ -106,15 +107,15 @@ describe('Messenger page interpretation', () => {
     const page = inbox({ threads: [{ threadId: 'dom-id', preview: 'DOM preview' }] });
     expect(interpretMessengerInboxPage({
       page, baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
-      graphql: { recognized: true, malformed: false, empty: false, incomplete: false, threadIds: ['graphql-id'] }
-    })).toEqual({ kind: 'threads', threads: [{ thread_id: 'graphql-id' }] });
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: false, truncated: false, threadIds: ['graphql-id'] }
+    })).toEqual({ kind: 'threads', threads: [{ thread_id: 'graphql-id' }], truncated: false });
     expect(interpretMessengerInboxPage({
       page, baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
-      graphql: { recognized: true, malformed: true, empty: false, incomplete: false, threadIds: [] }
+      graphql: { recognized: true, malformed: true, empty: false, incomplete: false, truncated: false, threadIds: [] }
     })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
     expect(interpretMessengerInboxPage({
       page, baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
-      graphql: { recognized: true, malformed: false, empty: false, incomplete: true, threadIds: ['partial-graphql-id'] }
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: true, truncated: false, threadIds: ['partial-graphql-id'] }
     })).toMatchObject({
       kind: 'error',
       code: 'UPSTREAM_ERROR',
@@ -122,26 +123,60 @@ describe('Messenger page interpretation', () => {
     });
     expect(interpretMessengerInboxPage({
       page, baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
-      graphql: { recognized: true, malformed: true, empty: false, incomplete: false, threadIds: ['graphql-id'] }
+      graphql: { recognized: true, malformed: true, empty: false, incomplete: false, truncated: false, threadIds: ['graphql-id'] }
     })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
     expect(interpretMessengerInboxPage({
       page: inbox(), baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
-      graphql: { recognized: true, malformed: false, empty: true, incomplete: false, threadIds: [] }
+      graphql: { recognized: true, malformed: false, empty: true, incomplete: false, truncated: false, threadIds: [] }
     })).toEqual({ kind: 'empty' });
     expect(interpretMessengerInboxPage({
       page: inbox(), baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
-      graphql: { recognized: true, malformed: false, empty: false, incomplete: false, threadIds: [] }
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: false, truncated: false, threadIds: [] }
     })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
     expect(interpretMessengerInboxPage({
       page, baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
-      graphql: { recognized: false, malformed: false, empty: false, incomplete: false, threadIds: [] }
-    })).toEqual({ kind: 'threads', threads: [{ thread_id: 'dom-id', preview: 'DOM preview' }] });
+      graphql: { recognized: false, malformed: false, empty: false, incomplete: false, truncated: false, threadIds: [] }
+    })).toEqual({ kind: 'threads', threads: [{ thread_id: 'dom-id', preview: 'DOM preview' }], truncated: false });
+  });
+
+  it('reports bounded listings as truncated and exhausted listings as complete (#151)', () => {
+    const twentyIds = Array.from({ length: 20 }, (_value, index) => `9${String(index).padStart(7, '0')}`);
+    // The collector proved a terminal chain but its cap left verified ids behind.
+    expect(interpretMessengerInboxPage({
+      page: inbox(), baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 20,
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: false, truncated: true, threadIds: twentyIds }
+    })).toMatchObject({ kind: 'threads', threads: twentyIds.map((thread_id) => ({ thread_id })), truncated: true });
+    // Even with no collector-side cut, verified ids beyond the caller's limit make a bounded window.
+    expect(interpretMessengerInboxPage({
+      page: inbox(), baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 2,
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: false, truncated: false, threadIds: twentyIds }
+    })).toMatchObject({ kind: 'threads', truncated: true });
+    // A verified chain that fit inside the limit is an exhausted listing.
+    expect(interpretMessengerInboxPage({
+      page: inbox(), baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 20,
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: false, truncated: false, threadIds: ['90000000', '90000001'] }
+    })).toMatchObject({ kind: 'threads', truncated: false });
+    // The DOM fallback says truncated when rows remain beyond the caller's limit...
+    expect(interpretMessengerInboxPage({
+      page: inbox({ threads: [{ threadId: '90000000' }, { threadId: '90000001' }] }),
+      baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1
+    })).toMatchObject({ kind: 'threads', truncated: true });
+    // ...and when the extractor's own collection cap was reached, because rows beyond it are unseen.
+    expect(interpretMessengerInboxPage({
+      page: inbox({ threads: Array.from({ length: MESSENGER_EXTRACT_LIMITS.maxThreads }, (_value, index) => ({ threadId: `9${String(index).padStart(7, '0')}` })) }),
+      baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: MESSENGER_EXTRACT_LIMITS.maxThreads
+    })).toMatchObject({ kind: 'threads', truncated: true });
+    // Below both bounds the DOM window is everything the recognized inbox rendered.
+    expect(interpretMessengerInboxPage({
+      page: inbox({ threads: [{ threadId: '90000000' }] }),
+      baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 20
+    })).toMatchObject({ kind: 'threads', truncated: false });
   });
 
   it('fails closed on a paginated connection with has_next_page and an empty current slice', () => {
     expect(interpretMessengerInboxPage({
       page: inbox(), baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
-      graphql: { recognized: true, malformed: false, empty: false, incomplete: true, threadIds: [] }
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: true, truncated: false, threadIds: [] }
     })).toMatchObject({
       kind: 'error',
       code: 'UPSTREAM_ERROR',
@@ -151,7 +186,7 @@ describe('Messenger page interpretation', () => {
     expect(interpretMessengerInboxPage({
       page: inbox({ threads: [{ threadId: 'dom-id' }] }),
       baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
-      graphql: { recognized: true, malformed: false, empty: false, incomplete: true, threadIds: [] }
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: true, truncated: false, threadIds: [] }
     })).toMatchObject({
       kind: 'error',
       code: 'UPSTREAM_ERROR',
