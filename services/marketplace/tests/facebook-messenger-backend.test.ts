@@ -37,6 +37,9 @@ let graphqlContentType = 'application/json; charset=utf-8';
 let graphqlPayloads: unknown[] | undefined;
 let graphqlResponseIndex = 0;
 const stalledResponses = new Set<ServerResponse<IncomingMessage>>();
+// Monotonic count of dispatched stalled reads: it only ever grows while a test runs, so it
+// stays valid evidence after teardown has already closed the stalled connections themselves.
+let stalledRequestsDispatched = 0;
 let inboxRedirectTarget: string | undefined;
 let threadRedirectTarget: string | undefined;
 const requests: string[] = [];
@@ -59,6 +62,7 @@ beforeAll(async () => {
       // response. The body's read must race against the per-read 2s timeout.
       response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'transfer-encoding': 'chunked' });
       response.write(':');
+      stalledRequestsDispatched += 1;
       stalledResponses.add(response);
       response.on('close', () => { stalledResponses.delete(response); });
       return;
@@ -116,6 +120,7 @@ afterEach(async () => {
     stalled.end();
     stalledResponses.delete(stalled);
   }
+  stalledRequestsDispatched = 0;
   requests.length = 0;
   inboxFixture = 'inbox-normal.html';
   threadFixture = 'thread-normal.html';
@@ -396,9 +401,10 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
     // Allow generous headroom for browser startup, navigation, and fixture load but well under
     // the old worst case of ~20s for ten serialized body reads.
     expect(elapsed).toBeLessThan(15_000);
-    // The dispatched reads should still be in flight (or just settled) when the operation
-    // returns; the listener cleanup must not hang waiting for the never-ending bodies.
-    expect(stalledResponses.size).toBeGreaterThan(0);
+    // Reads were dispatched (monotonic count, unaffected by teardown closing the stalled
+    // connections) and the flush returned the typed fail-closed error within the bounded
+    // deadline above instead of hanging on the never-ending bodies.
+    expect(stalledRequestsDispatched).toBeGreaterThan(0);
   }, 30_000);
 
   it('returns empty only for a recognized empty inbox', async () => {
