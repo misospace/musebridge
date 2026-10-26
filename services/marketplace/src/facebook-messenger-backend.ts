@@ -236,6 +236,9 @@ export class FacebookMessengerBackend implements ConversationBackend {
       baseUrl: this.probe.baseUrl,
       inboxPath: this.inboxPath,
       limit: input.limit,
+      // The completeness check must know the cap this backend actually extracted under, not the
+      // contract maximum (#151).
+      maxExtractedThreads: this.maxThreads,
       graphql
     });
     if (outcome.kind === 'error') {

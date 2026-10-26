@@ -171,6 +171,11 @@ describe('Messenger page interpretation', () => {
       page: inbox({ threads: [{ threadId: '90000000' }] }),
       baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 20
     })).toMatchObject({ kind: 'threads', truncated: false });
+    // The cap that bounds completeness is the configured extraction cap, not the contract maximum.
+    expect(interpretMessengerInboxPage({
+      page: inbox({ threads: [{ threadId: '90000000' }, { threadId: '90000001' }, { threadId: '90000002' }] }),
+      baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 20, maxExtractedThreads: 3
+    })).toMatchObject({ kind: 'threads', truncated: true });
   });
 
   it('fails closed on a paginated connection with has_next_page and an empty current slice', () => {

@@ -48,6 +48,10 @@ export function interpretMessengerInboxPage(input: {
   inboxPath: string;
   limit: number;
   graphql?: MessengerInboxGraphQLObservation;
+  // The extraction collection cap this page was read under. The backend's configured cap may be
+  // smaller than the contract maximum, and the DOM-fallback completeness check must compare
+  // against the cap that actually bounded the extraction, not the constant.
+  maxExtractedThreads?: number;
 }): MessengerInboxOutcome {
   const kind = classifyMessengerInboxPage(input.page);
   if (kind === 'captcha') return { kind: 'error', code: 'CAPTCHA_REQUIRED', message: 'Facebook requires a captcha challenge.' };
@@ -116,8 +120,9 @@ export function interpretMessengerInboxPage(input: {
   // The DOM fallback is a bounded recent listing, never a proven-complete one: rows dropped by
   // the caller's limit or left beyond the extractor's own collection cap mean more threads may
   // exist, so the result stays honestly `truncated` (#151).
+  const collectionCap = input.maxExtractedThreads ?? MESSENGER_EXTRACT_LIMITS.maxThreads;
   const truncated = input.page.threads.length > input.limit
-    || input.page.threads.length >= MESSENGER_EXTRACT_LIMITS.maxThreads;
+    || input.page.threads.length >= collectionCap;
   return { kind: 'threads', threads, truncated };
 }
 
