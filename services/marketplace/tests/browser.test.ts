@@ -1,17 +1,18 @@
 import { EventEmitter } from 'node:events';
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { chromium } from 'playwright';
 import type { BrowserSessionManager, BrowserSessionOptions } from '../src/browser.js';
-import { BrowserSessionManager as BrowserManager, BrowserUnavailableError } from '../src/browser.js';
+import { BrowserSessionManager as BrowserManager, BrowserUnavailableError, canonicalProfileDirIdentity } from '../src/browser.js';
 import type { MarketplaceBackend } from '../src/backend.js';
 import { createMarketplaceService, type MarketplaceService } from '../src/service.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createFakePlaywrightHarness } from './helpers/fake-browser-playwright.js';
+import { symlinkOrSkip } from './helpers/symlink-or-skip.js';
 
 const browserAvailable = existsSync(chromium.executablePath());
 if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
@@ -215,6 +216,72 @@ describe('browser launch args', () => {
 
     await manager.close();
     expect(calls).toContainEqual({ method: 'Target.setDiscoverTargets', params: { discover: false } });
+  });
+});
+describe('canonical profile directory identity', () => {
+  it('treats a symlink alias of an existing directory as the same identity', (ctx) => {
+    const root = mkdtempSync(join(tmpdir(), 'browser-profile-identity-'));
+    try {
+      const real = join(root, 'real');
+      mkdirSync(real, { recursive: true });
+      const alias = join(root, 'alias');
+      symlinkOrSkip(ctx, real, alias);
+      expect(canonicalProfileDirIdentity(alias)).toBe(canonicalProfileDirIdentity(real));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('treats a dangling symlink as its target even though neither exists yet', (ctx) => {
+    const root = mkdtempSync(join(tmpdir(), 'browser-profile-identity-'));
+    try {
+      const target = join(root, 'target');
+      const alias = join(root, 'alias');
+      symlinkOrSkip(ctx, target, alias);
+      expect(canonicalProfileDirIdentity(alias)).toBe(canonicalProfileDirIdentity(target));
+      // A differently spelled dangling alias to the same target collapses onto it too.
+      const secondAlias = join(root, 'second-alias');
+      symlinkOrSkip(ctx, target, secondAlias);
+      expect(canonicalProfileDirIdentity(secondAlias)).toBe(canonicalProfileDirIdentity(target));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves a missing directory to the real path of its nearest existing ancestor', (ctx) => {
+    const root = mkdtempSync(join(tmpdir(), 'browser-profile-identity-'));
+    try {
+      const realParent = join(root, 'real-parent');
+      mkdirSync(realParent, { recursive: true });
+      const aliasedParent = join(root, 'aliased-parent');
+      symlinkOrSkip(ctx, realParent, aliasedParent);
+      const sharedChild = 'profile';
+      expect(canonicalProfileDirIdentity(join(aliasedParent, sharedChild)))
+        .toBe(canonicalProfileDirIdentity(join(realParent, sharedChild)));
+      // Siblings under the same aliased parent stay distinct identities.
+      expect(canonicalProfileDirIdentity(join(aliasedParent, 'a')))
+        .not.toBe(canonicalProfileDirIdentity(join(aliasedParent, 'b')));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps distinct directories distinct and normalizes spelling differences', () => {
+    const root = mkdtempSync(join(tmpdir(), 'browser-profile-identity-'));
+    try {
+      const one = join(root, 'one');
+      mkdirSync(one, { recursive: true });
+      mkdirSync(join(root, 'two'), { recursive: true });
+      expect(canonicalProfileDirIdentity(one)).not.toBe(canonicalProfileDirIdentity(join(root, 'two')));
+      expect(canonicalProfileDirIdentity(one)).toBe(canonicalProfileDirIdentity(`${one}/.`));
+      // The not-yet-existing leaf keeps the configured spelling, but the existing prefix is
+      // canonicalized — so the identity is the real path of the ancestor plus the leaf, not the
+      // raw configured spelling (tmpdir() can itself sit behind a symlink, e.g. macOS /var).
+      expect(canonicalProfileDirIdentity(join(root, 'does-not-exist')))
+        .toBe(join(realpathSync(root), 'does-not-exist'));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

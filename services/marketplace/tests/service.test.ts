@@ -1,6 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { createServer as createHttpServer, request as httpRequest } from 'node:http';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -21,6 +21,7 @@ import { runBackendOperation } from '../src/tools.js';
 import { threadsListInputSchema, threadReadInputSchema } from '../src/domain.js';
 import { FakeReauthRuntime } from './helpers/fake-reauth-runtime.js';
 import { UnverifiedGrantAuthorizer } from './helpers/unverified-grant-authorizer.js';
+import { symlinkOrSkip } from './helpers/symlink-or-skip.js';
 import { InMemoryGrantConsumptionStore } from '../src/grant-state.js';
 import { canonicalActionInput, type ActionRequest, type ApprovalGrant, type SignedGrantEnvelope } from '../src/authorization.js';
 
@@ -526,6 +527,75 @@ describe('fixture MCP service', () => {
         messengerEnabled: true,
         browserProfileDir: shared,
         messengerProfileDir: `${shared}/.`
+      })).toThrow('The messenger scope must not share the marketplace browser profile directory');
+    } finally {
+      rmSync(profileRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a messenger profile directory aliased to the marketplace profile through a symlink', (ctx) => {
+    const profileRoot = mkdtempSync(join(tmpdir(), 'marketplace-messenger-profile-'));
+    try {
+      const shared = join(profileRoot, 'shared');
+      mkdirSync(shared, { recursive: true });
+      const firstAlias = join(profileRoot, 'first-alias');
+      const secondAlias = join(profileRoot, 'second-alias');
+      symlinkOrSkip(ctx, shared, firstAlias);
+      symlinkOrSkip(ctx, shared, secondAlias);
+      // One scope on the real directory and one on an alias is the same on-disk profile.
+      expect(() => createMarketplaceService({
+        backendKind: 'facebook',
+        messengerEnabled: true,
+        browserProfileDir: shared,
+        messengerProfileDir: firstAlias
+      })).toThrow('The messenger scope must not share the marketplace browser profile directory');
+      // Two differently spelled aliases are also the same profile.
+      expect(() => createMarketplaceService({
+        backendKind: 'facebook',
+        messengerEnabled: true,
+        browserProfileDir: firstAlias,
+        messengerProfileDir: secondAlias
+      })).toThrow('The messenger scope must not share the marketplace browser profile directory');
+    } finally {
+      rmSync(profileRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a messenger profile directory that is a dangling symlink to the marketplace profile target', (ctx) => {
+    const profileRoot = mkdtempSync(join(tmpdir(), 'marketplace-messenger-profile-'));
+    try {
+      // The natural setup before first launch: the profile target does not exist yet and the
+      // configured path is a symlink to it. The alias still names the same on-disk directory,
+      // so startup must fail rather than letting both scopes create and share it.
+      const target = join(profileRoot, 'target');
+      const danglingAlias = join(profileRoot, 'dangling-alias');
+      symlinkOrSkip(ctx, target, danglingAlias);
+      expect(() => createMarketplaceService({
+        backendKind: 'facebook',
+        messengerEnabled: true,
+        browserProfileDir: target,
+        messengerProfileDir: danglingAlias
+      })).toThrow('The messenger scope must not share the marketplace browser profile directory');
+    } finally {
+      rmSync(profileRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects two not-yet-created profile directories that the same aliased parent would collapse into one', (ctx) => {
+    const profileRoot = mkdtempSync(join(tmpdir(), 'marketplace-messenger-profile-'));
+    try {
+      const realParent = join(profileRoot, 'real-parent');
+      mkdirSync(realParent, { recursive: true });
+      const aliasedParent = join(profileRoot, 'aliased-parent');
+      symlinkOrSkip(ctx, realParent, aliasedParent);
+      // Neither profile directory exists yet — they are created lazily at first launch — but
+      // both spellings collapse onto one on-disk path, so startup must fail rather than letting
+      // both scopes race to create and share it.
+      expect(() => createMarketplaceService({
+        backendKind: 'facebook',
+        messengerEnabled: true,
+        browserProfileDir: join(realParent, 'profile'),
+        messengerProfileDir: join(aliasedParent, 'profile')
       })).toThrow('The messenger scope must not share the marketplace browser profile directory');
     } finally {
       rmSync(profileRoot, { recursive: true, force: true });
