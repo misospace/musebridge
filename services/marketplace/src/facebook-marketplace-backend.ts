@@ -216,7 +216,14 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
    * until a probe or re-auth records a fresh one (#147).
    */
   private recordObservedAuthFailure(code: ProviderErrorCode): void {
-    if (isFacebookAuthClassCode(code)) this.browser.assessSession('session_needs_reauth');
+    if (!isFacebookAuthClassCode(code)) return;
+    this.browser.assessSession('session_needs_reauth');
+    // A captcha or checkpoint a page observed is a challenge only a human can clear, so it
+    // hard-opens the shared gate for every scope exactly like the probe path does (issue #144):
+    // the scope that first observes the challenge owns that open, so no other scope's request
+    // may submit credentials while it stands. A plain login requirement stays the recoverable
+    // credential path's business and never hard-opens the gate.
+    if (code !== 'LOGIN_REQUIRED') this.loginGate.recordChallenge(LOGIN_SCOPE);
   }
 
   private async ensureUsableSession(signal: AbortSignal): Promise<void> {
