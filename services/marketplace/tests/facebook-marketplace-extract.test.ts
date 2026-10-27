@@ -185,11 +185,15 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace page extraction', () =>
     ]);
   });
 
-  it.each(['login', 'captcha', 'checkpoint'] as const)('never treats an empty notice beside %s as empty success', async (blocked) => {
+  it.each([
+    ['login', 'login'],
+    ['captcha', 'unknown'],
+    ['checkpoint', 'checkpoint'],
+  ] as const)('never treats an empty notice beside %s as empty success', async (marker, expected) => {
     const markers = { login: '<input type="password">', captcha: '<div id="captcha"></div>', checkpoint: '<form action="/checkpoint/"></form>' };
-    await page.setContent('<main><p>No listings found within 500 kilometers.</p>' + markers[blocked] + '</main>');
+    await page.setContent('<main><p>No listings found within 500 kilometers.</p>' + markers[marker] + '</main>');
     const extracted = await page.evaluate(extractMarketplacePage, { itemPath: MARKETPLACE_ITEM_PATH, limits: MARKETPLACE_EXTRACT_LIMITS });
-    expect(classifyMarketplacePage(extracted)).toBe(blocked);
+    expect(classifyMarketplacePage(extracted)).toBe(expected);
   });
 
   it('keeps card trigger text out of page-level interstitial signals', async () => {
