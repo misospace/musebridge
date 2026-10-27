@@ -292,6 +292,36 @@ describe('canonical profile directory identity', () => {
     }
   });
 
+  it('fails closed when a dangling alias chain outlives the symlink splice budget', (ctx) => {
+    const root = mkdtempSync(join(tmpdir(), 'browser-profile-identity-'));
+    try {
+      // Chain of exactly 40 links: the last one resolves to the dangling target and identity is
+      // still established as the target's canonical path.
+      const budget = 40;
+      const target = join(root, 'target');
+      let previous = target;
+      for (let i = budget; i >= 1; i -= 1) {
+        const link = join(root, `link-${i}`);
+        symlinkOrSkip(ctx, previous, link);
+        previous = link;
+      }
+      expect(canonicalProfileDirIdentity(previous)).toBe(canonicalProfileDirIdentity(target));
+
+      // One more link pushes the chain past the splice budget. Long chains must fail closed —
+      // never fabricate a noncanonical missing-path identity, which would let two differently
+      // spelled long alias chains bypass scope isolation. The kernel's own ELOOP preempts a
+      // nested chain on Linux; the splice-budget error guards the cases where it would not.
+      symlinkOrSkip(ctx, previous, join(root, 'link-0'));
+      expect(() => canonicalProfileDirIdentity(join(root, 'link-0'))).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed on a null-byte path', () => {
+    expect(() => canonicalProfileDirIdentity(join('root', 'bad\0name'))).toThrow();
+  });
+
   it('keeps distinct directories distinct and normalizes spelling differences', () => {
     const root = mkdtempSync(join(tmpdir(), 'browser-profile-identity-'));
     try {

@@ -675,8 +675,9 @@ const MAX_SYMLINK_SPLICES = 40;
  * the alias is still recognized. The not-yet-existing remainder keeps its configured spelling,
  * so case-insensitive filesystems could still collapse differently cased spellings of a missing
  * leaf; resolving that portably needs knowledge of the filesystem's case behavior, which Node
- * does not expose. Failures other than a missing component (EACCES, ELOOP, EIO) propagate: when
- * identity cannot be established, startup fails rather than proceeding unverified.
+ * does not expose. A dangling alias chain longer than the splice budget leaves identity unknown,
+ * so it fails closed too. Failures other than a missing component (EACCES, ELOOP, EIO) propagate:
+ * when identity cannot be established, startup fails rather than proceeding unverified.
  */
 export function canonicalProfileDirIdentity(dir: string): string {
   const resolved = resolve(dir);
@@ -687,7 +688,16 @@ export function canonicalProfileDirIdentity(dir: string): string {
     try {
       return join(realpathSync(prefix), ...[...missing].reverse());
     } catch (error) {
-      if (isEnoent(error) && symlinkSplices < MAX_SYMLINK_SPLICES && lstatSync(prefix, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      const prefixIsDanglingSymlink = isEnoent(error)
+        && lstatSync(prefix, { throwIfNoEntry: false })?.isSymbolicLink();
+      if (prefixIsDanglingSymlink && symlinkSplices >= MAX_SYMLINK_SPLICES) {
+        // The remaining alias chain outlives the splice budget: its identity is unknown, so fail
+        // closed rather than treat the unresolved link as an ordinary missing component.
+        throw new Error(
+          `unable to canonicalize profile directory '${resolved}': symlink resolution budget exhausted`
+        );
+      }
+      if (prefixIsDanglingSymlink) {
         prefix = resolve(dirname(prefix), readlinkSync(prefix));
         symlinkSplices += 1;
         continue;
