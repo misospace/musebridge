@@ -695,7 +695,9 @@ export function canonicalProfileDirIdentity(dir: string): string {
       if (!isEnoent(error)) throw error;
       const parent = dirname(prefix);
       if (parent === prefix) return resolved;
-      missing.unshift(basename(prefix));
+      // Collect while walking upward; the single reverse at reconstruction restores
+      // configured path order (deepest component first in `missing`, shallowest last).
+      missing.push(basename(prefix));
       prefix = parent;
     }
   }

@@ -266,6 +266,32 @@ describe('canonical profile directory identity', () => {
     }
   });
 
+  it('preserves the order of multiple missing components without colliding with their reversed path', (ctx) => {
+    const root = mkdtempSync(join(tmpdir(), 'browser-profile-identity-'));
+    try {
+      const realParent = join(root, 'real-parent');
+      mkdirSync(realParent, { recursive: true });
+      // Two missing components below an existing parent: the identity must reconstruct the
+      // configured order, not the walk order reversed twice.
+      expect(canonicalProfileDirIdentity(join(realParent, 'x', 'y')))
+        .toBe(join(realpathSync(realParent), 'x', 'y'));
+      // A distinct existing directory spelled in reverse order must never collide with it.
+      const reversed = join(realParent, 'y', 'x');
+      mkdirSync(reversed, { recursive: true });
+      expect(canonicalProfileDirIdentity(join(realParent, 'x', 'y')))
+        .not.toBe(canonicalProfileDirIdentity(reversed));
+      // Same property under an aliased parent, where the dangling-symlink splice is in play.
+      const aliasedParent = join(root, 'aliased-parent');
+      symlinkOrSkip(ctx, realParent, aliasedParent);
+      expect(canonicalProfileDirIdentity(join(aliasedParent, 'x', 'y')))
+        .toBe(join(realpathSync(realParent), 'x', 'y'));
+      expect(canonicalProfileDirIdentity(join(aliasedParent, 'x', 'y')))
+        .not.toBe(canonicalProfileDirIdentity(reversed));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('keeps distinct directories distinct and normalizes spelling differences', () => {
     const root = mkdtempSync(join(tmpdir(), 'browser-profile-identity-'));
     try {
