@@ -2,6 +2,10 @@ import { existsSync, lstatSync, mkdirSync, readlinkSync, realpathSync } from 'no
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import type { BrowserContext, CDPSession, Page } from 'playwright';
+import {
+  terminateOwnedBrowserProcesses,
+  type OwnedBrowserTerminationResult
+} from './browser-process-terminator.js';
 
 type TargetCreatedDiagnosticEvent = { targetInfo: { targetId: string; type: string } };
 type TargetDestroyedDiagnosticEvent = { targetId: string };
@@ -41,6 +45,16 @@ export interface BrowserSessionOptions {
   settleTimeoutMs?: number;
   launchArgs?: string[];
   logger?: Pick<Console, 'error'>;
+  /**
+   * Last-resort seam: terminates the browser processes this session's own profile directory
+   * can prove it owns, after both graceful close paths time out or fail. The default scans
+   * `/proc` for command lines carrying `--user-data-dir=<profile>`; it never signals a process
+   * that does not declare this profile. The manager awaits this under its settle deadline and
+   * abandons a late-settling implementation without waiting for it: a custom implementation
+   * must therefore reach its own final signal-or-report decision before that deadline, since
+   * signals it issues afterwards can race a subsequent launch on the same profile.
+   */
+  terminateOwnedProcesses?: (profileDir: string) => Promise<OwnedBrowserTerminationResult>;
 }
 
 export class BrowserUnavailableError extends Error {
@@ -75,6 +89,7 @@ export class BrowserSessionManager {
   private readonly settleTimeoutMs: number;
   private readonly launchArgs: string[];
   private readonly logger: Pick<Console, 'error'>;
+  private readonly terminateOwnedProcesses: (profileDir: string) => Promise<OwnedBrowserTerminationResult>;
   private context: BrowserContext | undefined;
   private interactiveBrowserContext: BrowserContext | undefined;
   private interactiveRendererDiagnostics: InteractiveRendererDiagnostics | undefined;
@@ -108,6 +123,7 @@ export class BrowserSessionManager {
     this.settleTimeoutMs = options.settleTimeoutMs ?? 5_000;
     this.launchArgs = [...(options.launchArgs ?? [])];
     this.logger = options.logger ?? console;
+    this.terminateOwnedProcesses = options.terminateOwnedProcesses ?? terminateOwnedBrowserProcesses;
     this.takeoverController = new AbortController();
     if (!Number.isSafeInteger(this.launchTimeoutMs) || this.launchTimeoutMs <= 0) {
       throw new RangeError('launchTimeoutMs must be a positive integer');
@@ -534,9 +550,18 @@ export class BrowserSessionManager {
       browser = context.browser();
     } catch {
       this.logCloseFailure('Could not access the persistent browser for forced shutdown');
+      await this.terminateOwnedBrowserProcesses();
       return;
     }
-    if (!browser) return;
+    if (!browser) {
+      // The context close already failed to confirm a clean teardown, and the accessor reports
+      // no browser to close, so the profile's own processes may still be alive and holding the
+      // singleton lock. The bounded last resort is the only remaining cleanup; it is a no-op
+      // scan when nothing survived. Only a clean close (context, or browser fallback) above
+      // returns without it.
+      await this.terminateOwnedBrowserProcesses();
+      return;
+    }
 
     let browserCloseSettled = false;
     let browserCloseFailed = false;
@@ -548,6 +573,39 @@ export class BrowserSessionManager {
     await this.settleIgnoring(browserClose, forceCloseTimeoutMs);
     if (!browserCloseSettled || browserCloseFailed) {
       this.logCloseFailure('Persistent browser did not close within the configured timeout');
+      await this.terminateOwnedBrowserProcesses();
+    }
+  }
+
+  /**
+   * Bounded last resort: the graceful context and browser closes both failed to confirm a
+   * clean teardown, so an orphaned Chromium could keep holding the profile singleton lock and
+   * strand every later launch. Only processes that declare this profile in their own command
+   * line are signalled, the sequence is internally bounded, and no failure here escapes:
+   * cleanup and shutdown must continue regardless. The termination seam is also awaited under
+   * the configured settle deadline: the built-in terminator is internally bounded, but a
+   * custom injected implementation is untrusted, so a never-settling promise cannot hang
+   * close().
+   */
+  private async terminateOwnedBrowserProcesses(): Promise<void> {
+    try {
+      const termination = await this.settle(this.terminateOwnedProcesses(this.profileDir), this.settleTimeoutMs);
+      if (!termination.settled) {
+        this.logCloseFailure(`Owned browser process termination did not settle within ${this.settleTimeoutMs} ms; abandoning it without waiting`);
+        return;
+      }
+      const result = termination.value;
+      if (!result.platformSupported) {
+        this.logCloseFailure('Could not terminate owned browser processes: process inspection is unavailable on this platform');
+        return;
+      }
+      if (result.failedPids.length > 0) {
+        this.logCloseFailure(`Owned browser processes survived termination for ${result.failedPids.length} process(es); the profile lock may persist`);
+      } else if (result.terminatedPids.length > 0) {
+        this.logCloseFailure(`Terminated ${result.terminatedPids.length} orphaned browser process(es) after graceful close failed`);
+      }
+    } catch {
+      this.logCloseFailure('Owned browser process termination failed unexpectedly');
     }
   }
 
