@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { chromium } from 'playwright';
 import type { BrowserSessionManager, BrowserSessionOptions } from '../src/browser.js';
 import { BrowserSessionManager as BrowserManager, BrowserUnavailableError } from '../src/browser.js';
+import type { OwnedBrowserTerminationResult } from '../src/browser-process-terminator.js';
 import type { MarketplaceBackend } from '../src/backend.js';
 import { createMarketplaceService, type MarketplaceService } from '../src/service.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -260,6 +261,147 @@ describe('interactive lease ownership', () => {
   });
 });
 
+describe('last-resort orphan termination', () => {
+  interface StubOptions {
+    contextClose?: 'clean' | 'hang';
+    browserMode?: 'clean' | 'hang' | 'throws' | 'null';
+    terminate?: (profileDir: string) => Promise<OwnedBrowserTerminationResult>;
+  }
+
+  function createTerminationStub(options: StubOptions): { manager: BrowserSessionManager; profileDir: string; errors: string[] } {
+    const profileDir = makeProfileDir();
+    const errors: string[] = [];
+    const hang = () => new Promise<void>(() => undefined);
+    const page = { close: async () => undefined };
+    const browser = options.browserMode === 'hang'
+      ? { close: hang }
+      : { close: async () => undefined };
+    const context = options.browserMode === 'throws'
+      ? { close: options.contextClose === 'hang' ? hang : async () => undefined, once: () => undefined, browser: () => { throw new Error('browser detached'); }, newPage: async () => page }
+      : options.browserMode === 'null'
+        ? { close: options.contextClose === 'hang' ? hang : async () => undefined, once: () => undefined, browser: () => null, newPage: async () => page }
+        : { close: options.contextClose === 'hang' ? hang : async () => undefined, once: () => undefined, browser: () => browser, newPage: async () => page };
+    const manager = new class extends BrowserManager {
+      loadPlaywright(): Promise<typeof import('playwright')> {
+        return Promise.resolve({
+          chromium: { launchPersistentContext: async () => context }
+        } as unknown as typeof import('playwright'));
+      }
+    }({
+      profileDir,
+      settleTimeoutMs: 20,
+      launchTimeoutMs: 100,
+      logger: { error: (message) => { errors.push(String(message)); } },
+      ...(options.terminate ? { terminateOwnedProcesses: options.terminate } : {})
+    });
+    managers.push(manager);
+    return { manager, profileDir, errors };
+  }
+
+  async function startAndClose(stub: { manager: BrowserSessionManager }): Promise<void> {
+    await stub.manager.runExclusive(new AbortController().signal, async () => undefined);
+    await stub.manager.close();
+  }
+
+  it('terminates owned processes once when both graceful closes hang', async () => {
+    const calls: string[] = [];
+    const stub = createTerminationStub({
+      contextClose: 'hang',
+      browserMode: 'hang',
+      terminate: async (profileDir) => {
+        calls.push(profileDir);
+        return { platformSupported: true, terminatedPids: [4242], failedPids: [] };
+      }
+    });
+    const startedAt = Date.now();
+    await startAndClose(stub);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(calls).toEqual([stub.profileDir]);
+    expect(stub.errors).toContain('Terminated 1 orphaned browser process(es) after graceful close failed');
+  });
+
+  it('does not terminate when the graceful context close succeeds', async () => {
+    let calls = 0;
+    const stub = createTerminationStub({
+      terminate: async () => { calls += 1; return { platformSupported: true, terminatedPids: [], failedPids: [] }; }
+    });
+    await startAndClose(stub);
+    expect(calls).toBe(0);
+    expect(stub.errors).toEqual([]);
+  });
+
+  it('does not terminate when the browser fallback close succeeds', async () => {
+    let calls = 0;
+    const stub = createTerminationStub({
+      contextClose: 'hang',
+      browserMode: 'clean',
+      terminate: async () => { calls += 1; return { platformSupported: true, terminatedPids: [], failedPids: [] }; }
+    });
+    await startAndClose(stub);
+    expect(calls).toBe(0);
+    expect(stub.errors).toContain('Headless browser context did not close within the configured timeout');
+  });
+
+  it('terminates when the persistent browser accessor throws', async () => {
+    const calls: string[] = [];
+    const stub = createTerminationStub({
+      contextClose: 'hang',
+      browserMode: 'throws',
+      terminate: async (profileDir) => {
+        calls.push(profileDir);
+        return { platformSupported: true, terminatedPids: [7], failedPids: [] };
+      }
+    });
+    await startAndClose(stub);
+    expect(calls).toEqual([stub.profileDir]);
+    expect(stub.errors).toContain('Could not access the persistent browser for forced shutdown');
+    expect(stub.errors).toContain('Terminated 1 orphaned browser process(es) after graceful close failed');
+  });
+
+  it('does not terminate when the browser is already detached', async () => {
+    let calls = 0;
+    const stub = createTerminationStub({
+      contextClose: 'hang',
+      browserMode: 'null',
+      terminate: async () => { calls += 1; return { platformSupported: true, terminatedPids: [], failedPids: [] }; }
+    });
+    await startAndClose(stub);
+    expect(calls).toBe(0);
+  });
+
+  it('reports survived processes without failing close', async () => {
+    const stub = createTerminationStub({
+      contextClose: 'hang',
+      browserMode: 'hang',
+      terminate: async () => ({ platformSupported: true, terminatedPids: [5], failedPids: [9, 3] })
+    });
+    await startAndClose(stub);
+    expect(stub.errors).toContain('Owned browser processes survived termination for 2 process(es); the profile lock may persist');
+  });
+
+  it('reports a platform without process inspection', async () => {
+    const stub = createTerminationStub({
+      contextClose: 'hang',
+      browserMode: 'hang',
+      terminate: async () => ({ platformSupported: false, terminatedPids: [], failedPids: [] })
+    });
+    await startAndClose(stub);
+    expect(stub.errors).toContain('Could not terminate owned browser processes: process inspection is unavailable on this platform');
+  });
+
+  it('keeps close bounded when the terminator itself fails', async () => {
+    const stub = createTerminationStub({
+      contextClose: 'hang',
+      browserMode: 'hang',
+      terminate: async () => { throw new Error('terminator exploded'); }
+    });
+    const startedAt = Date.now();
+    await startAndClose(stub);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(stub.errors).toContain('Owned browser process termination failed unexpectedly');
+  });
+});
+
 describe.skipIf(!browserAvailable)('browser session manager', () => {
   it('bounds close when an interactive context refuses to close', async () => {
     const manager = createManager({ settleTimeoutMs: 200, launchTimeoutMs: 5_000 });
@@ -281,6 +423,36 @@ describe.skipIf(!browserAvailable)('browser session manager', () => {
       await page.goto('about:blank');
     })).resolves.toBeUndefined();
   });
+
+  it('terminates an orphaned Chromium holding the profile and reopens it on the next manager', async () => {
+    const profileDir = makeProfileDir();
+    const errors: string[] = [];
+    const manager = makeManager(profileDir, {
+      settleTimeoutMs: 300,
+      logger: { error: (message) => { errors.push(String(message)); } }
+    });
+    await manager.runExclusive(new AbortController().signal, async (page) => {
+      await page.goto(`${synthetic.origin}/`);
+    });
+    await manager.runExclusive(new AbortController().signal, async (page) => {
+      const context = page.context();
+      context.close = () => new Promise<void>(() => undefined);
+      const browser = context.browser();
+      expect(browser).not.toBeNull();
+      browser!.close = () => new Promise<void>(() => undefined);
+    });
+
+    const startedAt = Date.now();
+    await manager.close();
+    expect(Date.now() - startedAt).toBeLessThan(10_000);
+    expect(errors.some((message) => /Terminated \d+ orphaned browser process\(es\)/.test(message))).toBe(true);
+
+    const reopened = makeManager(profileDir);
+    await expect(reopened.runExclusive(new AbortController().signal, async (page) => {
+      await page.goto(`${synthetic.origin}/`);
+      return page.title();
+    })).resolves.toBe('synthetic');
+  }, 30_000);
 
   it('starts lazily and does not navigate before first use', async () => {
     const manager = createManager();
