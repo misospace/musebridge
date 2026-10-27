@@ -550,7 +550,15 @@ export class BrowserSessionManager {
       await this.terminateOwnedBrowserProcesses();
       return;
     }
-    if (!browser) return;
+    if (!browser) {
+      // The context close already failed to confirm a clean teardown, and the accessor reports
+      // no browser to close, so the profile's own processes may still be alive and holding the
+      // singleton lock. The bounded last resort is the only remaining cleanup; it is a no-op
+      // scan when nothing survived. Only a clean close (context, or browser fallback) above
+      // returns without it.
+      await this.terminateOwnedBrowserProcesses();
+      return;
+    }
 
     let browserCloseSettled = false;
     let browserCloseFailed = false;

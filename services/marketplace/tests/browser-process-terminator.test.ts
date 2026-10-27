@@ -184,6 +184,15 @@ describe('classifyOwnedBrowserCommand', () => {
     expect(classifyOwnedBrowserCommand('/usr/bin/browser\0--type=utility\0--user-data-dir=/mine/other\0', '/mine/profile')).toBe('unowned');
   });
 
+  it('reads a flag value only up to an embedded NUL byte, as real argv cannot carry one', () => {
+    // The kernel splits argv on NUL, so a cmdline byte stream with an embedded NUL inside the
+    // flag value describes a process whose actual user-data-dir is only the part before the
+    // NUL; the remainder is a separate argument and can never extend the claimed path.
+    const truncated = '/usr/bin/browser\0--user-data-dir=/mine/profile\0/evil\0';
+    expect(classifyOwnedBrowserCommand(truncated, '/mine/profile')).toBe('main');
+    expect(classifyOwnedBrowserCommand(truncated, '/mine/profile/evil')).toBe('unowned');
+  });
+
   it('resolves a symlinked directory form to the same ownership identity', () => {
     const realDir = makeProfileDir();
     const linkParent = makeProfileDir();

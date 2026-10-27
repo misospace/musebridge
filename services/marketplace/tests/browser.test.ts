@@ -358,15 +358,19 @@ describe('last-resort orphan termination', () => {
     expect(stub.errors).toContain('Terminated 1 orphaned browser process(es) after graceful close failed');
   });
 
-  it('does not terminate when the browser is already detached', async () => {
-    let calls = 0;
+  it('terminates when the graceful close failed and the browser accessor reports none', async () => {
+    const calls: string[] = [];
     const stub = createTerminationStub({
       contextClose: 'hang',
       browserMode: 'null',
-      terminate: async () => { calls += 1; return { platformSupported: true, terminatedPids: [], failedPids: [] }; }
+      terminate: async (profileDir) => {
+        calls.push(profileDir);
+        return { platformSupported: true, terminatedPids: [11], failedPids: [] };
+      }
     });
     await startAndClose(stub);
-    expect(calls).toBe(0);
+    expect(calls).toEqual([stub.profileDir]);
+    expect(stub.errors).toContain('Terminated 1 orphaned browser process(es) after graceful close failed');
   });
 
   it('reports survived processes without failing close', async () => {
