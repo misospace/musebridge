@@ -12,6 +12,10 @@ export interface MessengerInboxGraphQLObservation {
   malformed: boolean;
   empty: boolean;
   incomplete: boolean;
+  // Listing coverage (#151): true only when the observed cursor chain carried more verified
+  // thread ids than the bounded snapshot returned. It never claims more than what was observed;
+  // unverifiable chains stay `incomplete`, which fails closed before any listing is returned.
+  truncated: boolean;
   threadIds: string[];
 }
 
@@ -315,17 +319,21 @@ export class MessengerInboxGraphQLCollector {
 
   snapshot(): MessengerInboxGraphQLObservation {
     const chain = this.getPageChain();
-    const threadIds: string[] = [];
+    const uniqueThreadIds: string[] = [];
     const seen = new Set<string>();
     for (const page of chain.pages) {
       for (const threadId of page.threadIds) {
-        if (seen.has(threadId)) continue;
-        seen.add(threadId);
-        threadIds.push(threadId);
-        if (threadIds.length >= this.maxThreads) break;
+        if (!seen.has(threadId)) {
+          seen.add(threadId);
+          uniqueThreadIds.push(threadId);
+        }
       }
-      if (threadIds.length >= this.maxThreads) break;
     }
+    // The cap keeps the returned listing bounded, but the caller must still learn when the
+    // observed chain carried more threads than the cap returned: ids counted but not returned
+    // are what makes `truncated` a truthful bound rather than an assumed-complete listing.
+    const threadIds = uniqueThreadIds.slice(0, this.maxThreads);
+    const truncated = uniqueThreadIds.length > threadIds.length;
 
     const incomplete = this.recognized && (
       !chain.complete || this.unverifiedPage || this.responseLimitExceeded || this.malformed
@@ -335,6 +343,7 @@ export class MessengerInboxGraphQLCollector {
       malformed: this.malformed,
       empty: chain.complete && !this.malformed && threadIds.length === 0,
       incomplete,
+      truncated,
       threadIds
     };
   }

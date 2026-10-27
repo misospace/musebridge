@@ -260,12 +260,14 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
   it('lists threads from the isolated Messenger inbox and applies caller limits', async () => {
     configure();
     const backend = createBackend();
-    const threads = await backend.listThreads(listInput({ limit: 2 }), new AbortController().signal);
+    const listing = await backend.listThreads(listInput({ limit: 2 }), new AbortController().signal);
     expect(backend.name).toBe('facebook');
-    expect(threads).toEqual([
+    expect(listing.threads).toEqual([
       { thread_id: '1684432532', preview: 'Synthetic Seller: Is the desk available?' },
       { thread_id: '1684432533', preview: 'Sample Buyer: Thanks for the details.Listing details', item_id: '123456789' }
     ]);
+    // The fixture inbox renders three anchors, so a limit of two is a bounded recent window (#151).
+    expect(listing.truncated).toBe(true);
     expect(requests).toEqual(['/marketplace/inbox/', '/marketplace/inbox/']);
   });
 
@@ -277,9 +279,10 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
       { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654322' } } }
     ], page_info: { has_next_page: false, end_cursor: null } } } } };
     const backend = createBackend();
-    const threads = await backend.listThreads(listInput(), new AbortController().signal);
-    expect(threads).toEqual([{ thread_id: '87654321' }, { thread_id: '87654322' }]);
-    const serialized = JSON.stringify(threads);
+    const listing = await backend.listThreads(listInput(), new AbortController().signal);
+    expect(listing.threads).toEqual([{ thread_id: '87654321' }, { thread_id: '87654322' }]);
+    expect(listing.truncated).toBe(false);
+    const serialized = JSON.stringify(listing.threads);
     // The unrelated same-origin operation and every unapproved field stay out of the result.
     expect(serialized).not.toContain('99999999');
     expect(serialized).not.toContain('OPAQUE-SNIPPET-SENTINEL');
@@ -320,17 +323,20 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
     // Session verification performs its own inbox navigation before the listing navigation.
     graphqlPayloads = [firstPage, secondPage, firstPage, secondPage];
     const backend = createBackend({ settleTimeoutMs: 500 });
-    let threads: Awaited<ReturnType<typeof backend.listThreads>> = [];
+    let listing: Awaited<ReturnType<typeof backend.listThreads>> = { threads: [], truncated: false };
     let listingError: unknown;
     try {
-      threads = await backend.listThreads(listInput({ limit: 20 }), new AbortController().signal);
+      listing = await backend.listThreads(listInput({ limit: 20 }), new AbortController().signal);
     } catch (error) {
       listingError = error;
     }
 
     expect(graphqlResponseIndex).toBe(4);
     expect(listingError).toBeUndefined();
-    expect(threads.map(({ thread_id }) => thread_id)).toEqual([...firstPageIds, ...secondPageIds.slice(0, 8)]);
+    expect(listing.threads.map(({ thread_id }) => thread_id)).toEqual([...firstPageIds, ...secondPageIds.slice(0, 8)]);
+    // A fully observed chain carried 24 threads into a cap of 20: the bounded listing must say
+    // more threads exist rather than present the first 20 as everything (#151).
+    expect(listing.truncated).toBe(true);
   }, 15_000);
 
   it('captures a GraphQL response that lands after the first DOM read but within the settle budget', async () => {
@@ -339,15 +345,16 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
       { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '55550000' }, id: 'message_thread:55550000' } }
     ], page_info: { has_next_page: false, end_cursor: null } } } } };
     const backend = createBackend({ settleTimeoutMs: 1_500 });
-    const threads = await backend.listThreads(listInput(), new AbortController().signal);
-    expect(threads).toEqual([{ thread_id: '55550000' }]);
+    const listing = await backend.listThreads(listInput(), new AbortController().signal);
+    expect(listing.threads).toEqual([{ thread_id: '55550000' }]);
+    expect(listing.truncated).toBe(false);
   }, 15_000);
 
   it('uses a valid empty GraphQL connection and rejects absent or malformed connections', async () => {
     configure('inbox-buttons-graphql.html');
     const backend = createBackend({ settleTimeoutMs: 30 });
     graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [], page_info: { has_next_page: false, end_cursor: null } } } } };
-    await expect(backend.listThreads(listInput(), new AbortController().signal)).resolves.toEqual([]);
+    await expect(backend.listThreads(listInput(), new AbortController().signal)).resolves.toEqual({ threads: [], truncated: false });
 
     configure('inbox-buttons-graphql.html');
     graphqlPayload = { data: { viewer: {} } };
@@ -411,7 +418,7 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
   it('returns empty only for a recognized empty inbox', async () => {
     configure('inbox-empty.html');
     const backend = createBackend();
-    await expect(backend.listThreads(listInput(), new AbortController().signal)).resolves.toEqual([]);
+    await expect(backend.listThreads(listInput(), new AbortController().signal)).resolves.toEqual({ threads: [], truncated: false });
   });
 
   it('fails closed when the inbox layout changes', async () => {
@@ -477,7 +484,8 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
       browser: backend['browser'], probe: backend['probe'], login, logger: { error: () => undefined }
     });
 
-    await expect(credentialBackend.listThreads(listInput({ limit: 1 }), new AbortController().signal)).resolves.toHaveLength(1);
+    await expect(credentialBackend.listThreads(listInput({ limit: 1 }), new AbortController().signal))
+      .resolves.toMatchObject({ threads: [{ thread_id: '1684432532' }], truncated: true });
     expect(probeCount).toBe(2);
     expect(attempt).toHaveBeenCalledTimes(1);
   });

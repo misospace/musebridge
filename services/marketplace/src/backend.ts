@@ -34,9 +34,20 @@ export interface MarketplaceBackend {
   fetch(input: ReturnType<typeof fetchInputSchema.parse>, signal: AbortSignal): Promise<Listing | null> | Listing | null;
 }
 
+// Listing coverage (#151). A thread listing is a bounded recent window, so it carries an
+// explicit `truncated` indicator: true when more threads are known or plausibly exist beyond
+// the returned window, false only when the provider set behind this listing was exhausted.
+export interface ConversationThreadListPage {
+  threads: ConversationThread[];
+  truncated: boolean;
+}
+
 export interface ConversationBackend {
   readonly name: string;
-  listThreads(input: ReturnType<typeof threadsListInputSchema.parse>, signal: AbortSignal): Promise<ConversationThread[]> | ConversationThread[];
+  // A backend may return the coverage-carrying page or, if it predates #151, a bare thread
+  // array. A bare array reports no coverage: the tool then omits `truncated` rather than
+  // fabricating a completeness claim the host backend cannot substantiate.
+  listThreads(input: ReturnType<typeof threadsListInputSchema.parse>, signal: AbortSignal): Promise<ConversationThreadListPage | ConversationThread[]> | ConversationThreadListPage | ConversationThread[];
   readThread(input: ReturnType<typeof threadReadInputSchema.parse>, signal: AbortSignal): Promise<ConversationThreadMessages | null> | ConversationThreadMessages | null;
   /** Conversation-scoped draft context for a proposed send, or null when no such thread exists. Never sends and never records a message. */
   prepareDraft(input: ReturnType<typeof threadSendInputSchema.parse>, signal: AbortSignal): Promise<ConversationDraft | null> | ConversationDraft | null;
@@ -138,8 +149,13 @@ export class FixtureBackend implements MarketplaceBackend, ConversationBackend {
     return this.listings.find((listing) => canonicalHttpUrl(listing.url) === canonicalTarget) ?? null;
   }
 
-  listThreads(input: ReturnType<typeof threadsListInputSchema.parse>, _signal: AbortSignal): ConversationThread[] {
-    return FIXTURE_CONVERSATIONS.slice(0, input.limit).map(({ thread }) => thread);
+  listThreads(input: ReturnType<typeof threadsListInputSchema.parse>, _signal: AbortSignal): ConversationThreadListPage {
+    // The fixture holds every synthetic conversation, so truncation is exactly the rows the
+    // caller's limit left out (#151).
+    return {
+      threads: FIXTURE_CONVERSATIONS.slice(0, input.limit).map(({ thread }) => thread),
+      truncated: FIXTURE_CONVERSATIONS.length > input.limit
+    };
   }
 
   readThread(input: ReturnType<typeof threadReadInputSchema.parse>, _signal: AbortSignal): ConversationThreadMessages | null {

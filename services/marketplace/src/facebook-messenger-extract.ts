@@ -39,6 +39,14 @@ export interface ExtractedInboxPage {
   signals: ExtractedMessengerSignals;
   hasEmptyStateMarker: boolean;
   threads: ExtractedInboxThread[];
+  /** True when the page rendered more candidate anchors than the thread scan examined, so the
+   *  scan stopped at its bound with anchors left unread. An unread anchor could carry a thread
+   *  row, so the extracted threads are not proven to be everything the page offers: the listing
+   *  built from this page must never present itself as a complete one (#151). When the
+   *  collection cap stopped the scan first, this stays `false` and the cap itself carries the
+   *  `truncated` claim — the consumer must compare against the same cap the scan ran under,
+   *  as `interpretMessengerInboxPage`'s `maxExtractedThreads` input does. */
+  threadsScanSaturated: boolean;
 }
 
 export interface ExtractedMessage {
@@ -216,7 +224,11 @@ export function extractMessengerInboxPage(options: ExtractMessengerInboxOptions)
     if (itemIds.size === 1) thread.itemId = itemIds.values().next().value;
     threads.push(thread);
   }
-  return { url, signals, hasEmptyStateMarker, threads };
+  // The scan bound is evidence, not an implementation detail: when anchors were left unread, a
+  // thread row may exist beyond the bound, so the page records that its extracted threads are
+  // not proven to be the whole inbox.
+  const threadsScanSaturated = anchors.length > maxThreadsScan;
+  return { url, signals, hasEmptyStateMarker, threads, threadsScanSaturated };
 }
 
 export function extractMessengerThreadPage(options: ExtractMessengerThreadOptions): ExtractedThreadPage {
