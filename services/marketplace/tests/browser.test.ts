@@ -227,6 +227,10 @@ describe('canonical profile directory identity', () => {
       const alias = join(root, 'alias');
       symlinkOrSkip(ctx, real, alias);
       expect(canonicalProfileDirIdentity(alias)).toBe(canonicalProfileDirIdentity(real));
+      // A chain of aliases is the same directory, not a different one.
+      const chained = join(root, 'chained');
+      symlinkOrSkip(ctx, alias, chained);
+      expect(canonicalProfileDirIdentity(chained)).toBe(canonicalProfileDirIdentity(real));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -275,6 +279,9 @@ describe('canonical profile directory identity', () => {
       // configured order, not the walk order reversed twice.
       expect(canonicalProfileDirIdentity(join(realParent, 'x', 'y')))
         .toBe(join(realpathSync(realParent), 'x', 'y'));
+      // A deeper suffix keeps the same order all the way down.
+      expect(canonicalProfileDirIdentity(join(realParent, 'x', 'y', 'z')))
+        .toBe(join(realpathSync(realParent), 'x', 'y', 'z'));
       // A distinct existing directory spelled in reverse order must never collide with it.
       const reversed = join(realParent, 'y', 'x');
       mkdirSync(reversed, { recursive: true });
@@ -287,6 +294,38 @@ describe('canonical profile directory identity', () => {
         .toBe(join(realpathSync(realParent), 'x', 'y'));
       expect(canonicalProfileDirIdentity(join(aliasedParent, 'x', 'y')))
         .not.toBe(canonicalProfileDirIdentity(reversed));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the configured order when the missing suffix spans a spliced dangling symlink', (ctx) => {
+    const root = mkdtempSync(join(tmpdir(), 'browser-profile-identity-'));
+    try {
+      // `link` is a dangling symlink to a missing target, so the walk splices it and then keeps
+      // collecting missing components on both sides of the splice. The component collected before
+      // the splice is the deeper one, so the reconstruction must keep it deepest — a walk that
+      // reversed the collected components once more would rebuild this as `y/t` under the root
+      // instead of `root/t/y`.
+      const linkParent = join(root, 'x');
+      mkdirSync(linkParent, { recursive: true });
+      const link = join(linkParent, 'link');
+      symlinkOrSkip(ctx, join(root, 't'), link);
+      expect(canonicalProfileDirIdentity(join(linkParent, 'link', 'y')))
+        .toBe(join(realpathSync(root), 't', 'y'));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed on a self-referential symlink', (ctx) => {
+    const root = mkdtempSync(join(tmpdir(), 'browser-profile-identity-'));
+    try {
+      // A loop has no canonical identity at all; the filesystem error must propagate so startup
+      // fails instead of comparing two unverifiable profiles.
+      const loop = join(root, 'loop');
+      symlinkOrSkip(ctx, loop, loop);
+      expect(() => canonicalProfileDirIdentity(loop)).toThrow();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

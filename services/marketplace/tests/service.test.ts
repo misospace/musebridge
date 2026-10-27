@@ -565,6 +565,26 @@ describe('fixture MCP service', () => {
     }
   });
 
+  it('rejects pre-built scope managers whose profile directories are aliased to one profile', (ctx) => {
+    const profileRoot = mkdtempSync(join(tmpdir(), 'marketplace-messenger-profile-'));
+    try {
+      const shared = join(profileRoot, 'shared');
+      mkdirSync(shared, { recursive: true });
+      const alias = join(profileRoot, 'alias');
+      symlinkOrSkip(ctx, shared, alias);
+      // A host that injects its own scope managers must get the same canonical-identity check as
+      // the default-constructed ones, so an aliased pair cannot slip past startup.
+      expect(() => createMarketplaceService({
+        backendKind: 'facebook',
+        messengerEnabled: true,
+        browser: new BrowserSessionManager({ profileDir: shared }),
+        messengerBrowser: new BrowserSessionManager({ profileDir: alias })
+      })).toThrow('The messenger scope must not share the marketplace browser profile directory');
+    } finally {
+      rmSync(profileRoot, { recursive: true, force: true });
+    }
+  });
+
   it('rejects a messenger profile directory that is a dangling symlink to the marketplace profile target', (ctx) => {
     const profileRoot = mkdtempSync(join(tmpdir(), 'marketplace-messenger-profile-'));
     try {
