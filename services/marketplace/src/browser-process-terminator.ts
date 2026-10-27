@@ -5,7 +5,7 @@ export interface OwnedBrowserTerminationResult {
   platformSupported: boolean;
   /** Processes this call signalled and confirmed exited within a grace window. */
   terminatedPids: number[];
-  /** Processes that survived the SIGKILL grace window or could never be signalled (EPERM). */
+  /** Owned processes that were still alive when the sequence ended, or could never be signalled (EPERM). */
   failedPids: number[];
 }
 
@@ -26,9 +26,10 @@ const DEFAULT_POLL_INTERVAL_MS = 25;
  * `--user-data-dir=<this profile>` are ever signalled, so unrelated processes are never
  * touched. Only an absolute flag value can prove ownership: an empty or relative value is
  * resolved against the scanning process's own working directory, never the target's, so it
- * never matches. Ownership is re-proved immediately before every signal wave. The whole
- * sequence is bounded: SIGTERM, a grace window, then SIGKILL, then a final grace window;
- * anything still alive, or that could not be signalled at all, is reported, never waited on.
+ * never matches. Ownership is re-proved immediately before every single signal, so a pid that
+ * exited and was recycled in the meantime is never signalled. The whole sequence is bounded:
+ * SIGTERM, a grace window, then SIGKILL, then a final grace window; anything still alive, or
+ * that could not be signalled at all, is reported, never waited on.
  */
 export async function terminateOwnedBrowserProcesses(
   profileDir: string,
@@ -49,32 +50,39 @@ export async function terminateOwnedBrowserProcesses(
 
   const signalled = new Set<number>();
   const denied = new Set<number>();
-  const termWave = signalProcesses(initial.mains, 'SIGTERM');
+  // Mains and helpers are swept in the same wave: a helper that ignores SIGTERM must not be
+  // able to outlive a cleanly dying main and stay invisible to the result.
+  const termWave = signalOwnedProcesses(procRoot, profileDir, [...initial.mains, ...initial.helpers], 'SIGTERM');
   for (const pid of termWave.signalled) signalled.add(pid);
   for (const pid of termWave.denied) denied.add(pid);
 
-  let survivors: number[] = [];
   const stillAlive = await waitForExit(procRoot, [...termWave.signalled], termGraceMs, pollIntervalMs);
   if (stillAlive.length > 0) {
-    // Re-prove ownership for survivors right before the kill wave: a pid listed at scan time
-    // may since have exited and been recycled by an unrelated process. The fresh scan adds
-    // helper processes the first wave left behind; a newly seen main also goes straight to
-    // SIGKILL because the SIGTERM grace window has already elapsed for this teardown.
+    // The fresh scan adds helper processes the first wave left behind and any process that
+    // appeared since; a newly seen main also goes straight to SIGKILL because the SIGTERM
+    // grace window has already elapsed for this teardown.
     const rescan = scanOwnedBrowserProcesses(procRoot, profileDir);
-    const killWave = [...new Set([
-      ...stillAlive.filter((pid) => provesProfileOwnership(procRoot, pid, profileDir)),
-      ...rescan.mains,
-      ...rescan.helpers
-    ])];
-    const killResult = signalProcesses(killWave, 'SIGKILL');
+    const killWave = [...new Set([...stillAlive, ...rescan.mains, ...rescan.helpers])];
+    const killResult = signalOwnedProcesses(procRoot, profileDir, killWave, 'SIGKILL');
     for (const pid of killResult.signalled) signalled.add(pid);
     for (const pid of killResult.denied) denied.add(pid);
-    survivors = await waitForExit(procRoot, [...killResult.signalled], killGraceMs, pollIntervalMs);
+    await waitForExit(procRoot, [...killResult.signalled], killGraceMs, pollIntervalMs);
   }
 
-  const survivorSet = new Set(survivors);
-  const failedPids = [...new Set([...survivors, ...denied])].sort((left, right) => left - right);
-  const terminatedPids = [...signalled].filter((pid) => !survivorSet.has(pid)).sort((left, right) => left - right);
+  // Honest final accounting: every owned process that is still alive after the sequence is
+  // reported as a failure, and a process that exited on its own is never reported as one.
+  // A clean-looking result therefore never hides a process that ignored every signal.
+  const finalScan = scanOwnedBrowserProcesses(procRoot, profileDir);
+  const failed = new Set<number>();
+  for (const pid of [...finalScan.mains, ...finalScan.helpers]) {
+    if (isProcessAlive(procRoot, pid)) failed.add(pid);
+  }
+  for (const pid of [...signalled, ...denied]) {
+    if (isProcessAlive(procRoot, pid)) failed.add(pid);
+  }
+  const failedPids = [...failed].sort((left, right) => left - right);
+  const failedSet = new Set(failedPids);
+  const terminatedPids = [...signalled].filter((pid) => !failedSet.has(pid)).sort((left, right) => left - right);
   return { platformSupported: true, terminatedPids, failedPids };
 }
 
@@ -112,19 +120,22 @@ export function classifyOwnedBrowserCommand(
   commandLine: string,
   profileDir: string
 ): 'main' | 'helper' | 'unowned' {
-  let ownsProfile = false;
+  let profileValue: string | undefined;
   let isHelper = false;
   for (const argument of commandLine.split('\0')) {
     if (argument.startsWith('--user-data-dir=')) {
-      const value = argument.slice('--user-data-dir='.length);
-      // An empty or relative value could only be resolved against this process's own working
-      // directory, which says nothing about the target's, so it never proves ownership.
-      if (value.startsWith('/') && pathsReferToSameDirectory(value, profileDir)) ownsProfile = true;
+      // Chromium keeps the last occurrence of a repeated switch, so ownership must be judged
+      // by that value alone: a process whose final value names another profile is not ours.
+      profileValue = argument.slice('--user-data-dir='.length);
     } else if (argument.startsWith('--type=')) {
       isHelper = true;
     }
   }
-  if (!ownsProfile) return 'unowned';
+  if (profileValue === undefined) return 'unowned';
+  // An empty or relative value could only be resolved against this process's own working
+  // directory, which says nothing about the target's, so it never proves ownership.
+  if (!profileValue.startsWith('/')) return 'unowned';
+  if (!pathsReferToSameDirectory(profileValue, profileDir)) return 'unowned';
   return isHelper ? 'helper' : 'main';
 }
 
@@ -136,13 +147,21 @@ function provesProfileOwnership(procRoot: string, pid: number, profileDir: strin
   }
 }
 
-function signalProcesses(
+/**
+ * Signals only the processes that still prove ownership of this profile at the moment of the
+ * signal. A pid taken from an earlier scan may have exited and been recycled by an unrelated
+ * process in the meantime, so ownership is re-read immediately before every single signal.
+ */
+function signalOwnedProcesses(
+  procRoot: string,
+  profileDir: string,
   pids: number[],
   signal: NodeJS.Signals
 ): { signalled: number[]; denied: number[] } {
   const signalled: number[] = [];
   const denied: number[] = [];
   for (const pid of pids) {
+    if (!provesProfileOwnership(procRoot, pid, profileDir)) continue;
     try {
       process.kill(pid, signal);
       signalled.push(pid);

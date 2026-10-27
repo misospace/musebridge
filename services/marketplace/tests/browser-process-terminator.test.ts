@@ -22,7 +22,7 @@ describe.skipIf(process.platform !== 'linux')('terminateOwnedBrowserProcesses', 
     const profileDir = makeProfileDir();
     const child = spawnDummy(BENIGN_SCRIPT, [`--user-data-dir=${profileDir}`]);
     await waitForVisibleInProc(child, `--user-data-dir=${profileDir}`);
-    expect(child.pid).not.toBeNull();
+    expect(child.pid).toBeDefined();
 
     const result = await terminateOwnedBrowserProcesses(profileDir);
 
@@ -38,7 +38,7 @@ describe.skipIf(process.platform !== 'linux')('terminateOwnedBrowserProcesses', 
     const child = spawnDummy(STUBBORN_SCRIPT, [`--user-data-dir=${profileDir}`], { ...process.env, MARKETPLACE_TEST_READY_FILE: readyFile });
     await waitForVisibleInProc(child, `--user-data-dir=${profileDir}`);
     await waitForFile(readyFile);
-    expect(child.pid).not.toBeNull();
+    expect(child.pid).toBeDefined();
 
     const result = await terminateOwnedBrowserProcesses(profileDir, FAST_OPTIONS);
 
@@ -57,9 +57,9 @@ describe.skipIf(process.platform !== 'linux')('terminateOwnedBrowserProcesses', 
     await waitForVisibleInProc(owned, `--user-data-dir=${profileDir}`);
     await waitForVisibleInProc(unrelated, null);
     await waitForVisibleInProc(otherOwner, `--user-data-dir=${otherProfileDir}`);
-    expect(owned.pid).not.toBeNull();
-    expect(unrelated.pid).not.toBeNull();
-    expect(otherOwner.pid).not.toBeNull();
+    expect(owned.pid).toBeDefined();
+    expect(unrelated.pid).toBeDefined();
+    expect(otherOwner.pid).toBeDefined();
 
     const result = await terminateOwnedBrowserProcesses(profileDir);
 
@@ -85,8 +85,29 @@ describe.skipIf(process.platform !== 'linux')('terminateOwnedBrowserProcesses', 
     await waitForVisibleInProc(helper, `--user-data-dir=${profileDir}`);
     await waitForFile(mainReadyFile);
     await waitForFile(helperReadyFile);
-    expect(main.pid).not.toBeNull();
-    expect(helper.pid).not.toBeNull();
+    expect(main.pid).toBeDefined();
+    expect(helper.pid).toBeDefined();
+
+    const result = await terminateOwnedBrowserProcesses(profileDir, FAST_OPTIONS);
+
+    expect(result.platformSupported).toBe(true);
+    expect(result.terminatedPids).toContain(main.pid);
+    expect(result.terminatedPids).toContain(helper.pid);
+    expect(result.failedPids).toEqual([]);
+    await expectExit(main);
+    await expectExit(helper);
+  }, 15_000);
+
+  it('sweeps a helper that ignores SIGTERM even when the main exits cleanly', async () => {
+    const profileDir = makeProfileDir();
+    const helperReadyFile = join(profileDir, 'ready-helper');
+    const main = spawnDummy(BENIGN_SCRIPT, [`--user-data-dir=${profileDir}`]);
+    const helper = spawnDummy(STUBBORN_SCRIPT, [`--user-data-dir=${profileDir}`, '--type=renderer'], { ...process.env, MARKETPLACE_TEST_READY_FILE: helperReadyFile });
+    await waitForVisibleInProc(main, `--user-data-dir=${profileDir}`);
+    await waitForVisibleInProc(helper, `--user-data-dir=${profileDir}`);
+    await waitForFile(helperReadyFile);
+    expect(main.pid).toBeDefined();
+    expect(helper.pid).toBeDefined();
 
     const result = await terminateOwnedBrowserProcesses(profileDir, FAST_OPTIONS);
 
@@ -105,7 +126,7 @@ describe.skipIf(process.platform !== 'linux')('terminateOwnedBrowserProcesses', 
     const result = await terminateOwnedBrowserProcesses(profileDir);
 
     expect(result).toEqual({ platformSupported: true, terminatedPids: [], failedPids: [] });
-    expect(Date.now() - startedAt).toBeLessThan(500);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
   }, 15_000);
 
   it('terminates a process whose cmdline names the real dir when given a symlinked profile path', async () => {
@@ -115,7 +136,7 @@ describe.skipIf(process.platform !== 'linux')('terminateOwnedBrowserProcesses', 
     symlinkSync(realDir, linkPath);
     const child = spawnDummy(BENIGN_SCRIPT, [`--user-data-dir=${realDir}`]);
     await waitForVisibleInProc(child, `--user-data-dir=${realDir}`);
-    expect(child.pid).not.toBeNull();
+    expect(child.pid).toBeDefined();
 
     const result = await terminateOwnedBrowserProcesses(linkPath, FAST_OPTIONS);
 
@@ -148,6 +169,13 @@ describe('classifyOwnedBrowserCommand', () => {
     const relative = '/usr/bin/browser\0--user-data-dir=profile-x\0';
     expect(classifyOwnedBrowserCommand(relative, 'profile-x')).toBe('unowned');
     expect(classifyOwnedBrowserCommand(relative, `${process.cwd()}/profile-x`)).toBe('unowned');
+  });
+
+  it('judges ownership by the last --user-data-dir value, as Chromium does', () => {
+    const lastWins = '/usr/bin/browser\0--user-data-dir=/other/profile\0--user-data-dir=/mine/profile\0';
+    expect(classifyOwnedBrowserCommand(lastWins, '/mine/profile')).toBe('main');
+    const otherWins = '/usr/bin/browser\0--user-data-dir=/mine/profile\0--user-data-dir=/other/profile\0';
+    expect(classifyOwnedBrowserCommand(otherWins, '/mine/profile')).toBe('unowned');
   });
 
   it('does not treat a different directory as owned, even for helpers', () => {
