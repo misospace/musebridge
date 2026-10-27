@@ -626,6 +626,7 @@ describe('Facebook backend login gate', () => {
   // Dormant captcha evidence (#168): the classifier downgrades a matched-but-invisible widget to
   // `unknown`, so the page carries no auth-class code. The breaker counts only challenges backed
   // by visible evidence, exactly like a probe reporting `ambiguous` records no challenge.
+  // The `unknown` settle loop re-samples until the settle deadline, so allow past the default timeout.
   it('does not record a challenge when a Marketplace result page captcha evidence is dormant', async () => {
     const state = setup(new FacebookLoginCircuitBreaker({ baseCooldownMs: 60_000, maxCooldownMs: 120_000, maxFailures: 3 }));
     mockProbe(state.marketplaceProbe, [usable]);
@@ -639,7 +640,7 @@ describe('Facebook backend login gate', () => {
     });
     expect(state.gate.snapshot()).toEqual({ status: 'closed' });
     await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
-  });
+  }, 15_000);
 
   it('does not record a challenge when a Messenger inbox page captcha evidence is dormant', async () => {
     const state = setup(new FacebookLoginCircuitBreaker({ baseCooldownMs: 60_000, maxCooldownMs: 120_000, maxFailures: 3 }));
@@ -653,7 +654,7 @@ describe('Facebook backend login gate', () => {
       .rejects.toMatchObject({ name: 'ProviderError', code: 'UPSTREAM_ERROR' });
     expect(state.gate.snapshot()).toEqual({ status: 'closed' });
     await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
-  });
+  }, 15_000);
 
   it('does not hard-open the shared gate when a page observes only a plain login requirement', async () => {
     const state = setup(new FacebookLoginCircuitBreaker({ baseCooldownMs: 60_000, maxCooldownMs: 120_000, maxFailures: 3 }));
