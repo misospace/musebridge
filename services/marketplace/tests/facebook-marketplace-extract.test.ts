@@ -26,7 +26,10 @@ const fixtureCases = [
     { file: 'checkpoint.html', kind: 'checkpoint', outcome: 'SESSION_INVALID' },
     { file: 'captcha.html', kind: 'captcha', outcome: 'CAPTCHA_REQUIRED' },
     { file: 'captcha-phrase-visible.html', kind: 'captcha', outcome: 'CAPTCHA_REQUIRED' },
+    { file: 'captcha-phrase-split.html', kind: 'captcha', outcome: 'CAPTCHA_REQUIRED' },
     { file: 'captcha-dormant.html', kind: 'unknown', outcome: 'UPSTREAM_ERROR' },
+    { file: 'captcha-phrase-split-dormant.html', kind: 'unknown', outcome: 'UPSTREAM_ERROR' },
+    { file: 'captcha-phrase-joined.html', kind: 'unknown', outcome: 'UPSTREAM_ERROR' },
     { file: 'captcha-feed-text.html', kind: 'unknown', outcome: 'UPSTREAM_ERROR' },
     { file: 'rate-limited.html', kind: 'rate_limited', outcome: 'RATE_LIMITED' }
 ] as const;
@@ -65,9 +68,12 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace page extraction', () =>
       hasLoginForm: testCase.file === 'login.html',
       hasCheckpoint: testCase.file === 'checkpoint.html',
       // #168: dormant markup and feed text still match the raw captcha signal, but only visible
-      // structural markup or a visible challenge phrase marks the evidence visible.
+      // structural markup or a visible challenge phrase marks the evidence visible. A phrase
+      // split across inline elements is visible when every part it covers is rendered.
       hasCaptcha: testCase.file.startsWith('captcha'),
-      captchaVisible: testCase.file === 'captcha.html' || testCase.file === 'captcha-phrase-visible.html',
+      captchaVisible: testCase.file === 'captcha.html'
+        || testCase.file === 'captcha-phrase-visible.html'
+        || testCase.file === 'captcha-phrase-split.html',
       hasRateLimitNotice: testCase.file === 'rate-limited.html',
       hasNoResultsNotice: testCase.file === 'no-results.html'
     });
@@ -300,6 +306,26 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace page extraction', () =>
       url: 'https://www.facebook.com/marketplace/item/100000000000001/',
       fallbackCurrency: 'USD'
     })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+  });
+
+  it('classifies an item page whose challenge phrase is split across inline elements as a challenge (#168)', async () => {
+    const html = readFileSync(new URL('./fixtures/facebook-marketplace/item-captcha-phrase-split.html', import.meta.url), 'utf8');
+    await page.setContent(html, { waitUntil: 'domcontentloaded' });
+    const extracted = await page.evaluate(extractMarketplaceItem, {
+      itemPath: MARKETPLACE_ITEM_PATH,
+      limits: MARKETPLACE_ITEM_EXTRACT_LIMITS
+    });
+    // The phrase is matched over the rendered text, so a challenge split across inline elements is
+    // visible evidence: the page is a challenge, not a downgraded unknown.
+    expect(extracted.signals.hasCaptcha).toBe(true);
+    expect(extracted.signals.captchaVisible).toBe(true);
+    expect(classifyMarketplaceItem(extracted)).toBe('captcha');
+    expect(interpretMarketplaceItem({
+      page: extracted,
+      id: '100000000000001',
+      url: 'https://www.facebook.com/marketplace/item/100000000000001/',
+      fallbackCurrency: 'USD'
+    })).toMatchObject({ kind: 'error', code: 'CAPTCHA_REQUIRED' });
   });
 
   it('returns null fields without throwing when there is no item markup', async () => {

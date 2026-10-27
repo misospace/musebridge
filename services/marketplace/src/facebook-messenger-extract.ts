@@ -194,10 +194,59 @@ export function extractMessengerInboxPage(options: ExtractMessengerInboxOptions)
     for (const element of document.querySelectorAll('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]')) {
       if (isVisiblyRendered(element)) return true;
     }
-    const challengePhrase = /captcha|i'?m not a robot|verify you are a human/i;
+    const challengePhrase = /captcha|i'?m\s+not\s+a\s+robot|verify\s+you\s+are\s+a\s+human/gi;
+    // A challenge phrase can be split across inline elements ("I'm not" + "a robot"), so the
+    // phrase is matched over the page's rendered text instead of one text node at a time. The
+    // stream is the document's text in document order with no separator inserted — exactly how the
+    // probe assembles an element's text — so a phrase matches only where it is rendered inside
+    // one element's text, never where unrelated text merely sits close together. Each part keeps
+    // the element that renders it, and a match is visible evidence only when every part it covers
+    // is rendered.
+    const parts: { start: number; end: number; element: Element }[] = [];
+    let stream = '';
     const walker = document.createTreeWalker(document.body ?? document.documentElement, 4);
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      if (node.textContent && challengePhrase.test(node.textContent) && node.parentElement && isVisiblyRendered(node.parentElement)) return true;
+      const parent = node.parentElement;
+      if (!parent) continue;
+      if (parent.matches('script, style, template, noscript, [hidden]')) {
+        // Content that is not rendered never renders a challenge, and it breaks the stream so the
+        // text around it cannot be read as one phrase.
+        stream += '\u0000';
+        continue;
+      }
+      const value = node.textContent ?? '';
+      if (!value) continue;
+      if (stream.length >= 20000) break;
+      parts.push({ start: stream.length, end: stream.length + value.length, element: parent });
+      stream += value;
+    }
+    let match = challengePhrase.exec(stream);
+    let cursor = 0;
+    while (match !== null) {
+      const start = match.index;
+      const end = start + match[0].length;
+      while (cursor < parts.length) {
+        const part = parts[cursor];
+        if (!part || part.end <= start) {
+          cursor += 1;
+          continue;
+        }
+        break;
+      }
+      let covered = 0;
+      let rendered = true;
+      for (let index = cursor; index < parts.length; index += 1) {
+        const part = parts[index];
+        if (!part || part.start >= end) break;
+        covered += 1;
+        if (!isVisiblyRendered(part.element)) {
+          rendered = false;
+          break;
+        }
+      }
+      if (covered > 0 && rendered) return true;
+      if (match[0].length === 0) challengePhrase.lastIndex += 1;
+      match = challengePhrase.exec(stream);
     }
     return false;
   };
@@ -295,10 +344,59 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
     for (const element of document.querySelectorAll('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]')) {
       if (isVisiblyRendered(element)) return true;
     }
-    const challengePhrase = /captcha|i'?m not a robot|verify you are a human/i;
+    const challengePhrase = /captcha|i'?m\s+not\s+a\s+robot|verify\s+you\s+are\s+a\s+human/gi;
+    // A challenge phrase can be split across inline elements ("I'm not" + "a robot"), so the
+    // phrase is matched over the page's rendered text instead of one text node at a time. The
+    // stream is the document's text in document order with no separator inserted — exactly how the
+    // probe assembles an element's text — so a phrase matches only where it is rendered inside
+    // one element's text, never where unrelated text merely sits close together. Each part keeps
+    // the element that renders it, and a match is visible evidence only when every part it covers
+    // is rendered.
+    const parts: { start: number; end: number; element: Element }[] = [];
+    let stream = '';
     const walker = document.createTreeWalker(document.body ?? document.documentElement, 4);
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      if (node.textContent && challengePhrase.test(node.textContent) && node.parentElement && isVisiblyRendered(node.parentElement)) return true;
+      const parent = node.parentElement;
+      if (!parent) continue;
+      if (parent.matches('script, style, template, noscript, [hidden]')) {
+        // Content that is not rendered never renders a challenge, and it breaks the stream so the
+        // text around it cannot be read as one phrase.
+        stream += '\u0000';
+        continue;
+      }
+      const value = node.textContent ?? '';
+      if (!value) continue;
+      if (stream.length >= 20000) break;
+      parts.push({ start: stream.length, end: stream.length + value.length, element: parent });
+      stream += value;
+    }
+    let match = challengePhrase.exec(stream);
+    let cursor = 0;
+    while (match !== null) {
+      const start = match.index;
+      const end = start + match[0].length;
+      while (cursor < parts.length) {
+        const part = parts[cursor];
+        if (!part || part.end <= start) {
+          cursor += 1;
+          continue;
+        }
+        break;
+      }
+      let covered = 0;
+      let rendered = true;
+      for (let index = cursor; index < parts.length; index += 1) {
+        const part = parts[index];
+        if (!part || part.start >= end) break;
+        covered += 1;
+        if (!isVisiblyRendered(part.element)) {
+          rendered = false;
+          break;
+        }
+      }
+      if (covered > 0 && rendered) return true;
+      if (match[0].length === 0) challengePhrase.lastIndex += 1;
+      match = challengePhrase.exec(stream);
     }
     return false;
   };

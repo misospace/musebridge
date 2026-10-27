@@ -96,6 +96,41 @@ it('gates inbox captcha on visible evidence and downgrades a dormant widget (#16
   expect(classifyMessengerInboxPage(visible)).toBe('captcha');
 });
 
+  it('recognizes a challenge phrase split across inline elements on inbox and thread pages (#168)', async () => {
+    const inboxHtml = readFileSync(new URL('./fixtures/facebook-messenger/inbox-captcha-phrase-split.html', import.meta.url), 'utf8');
+    await page.setContent(inboxHtml, { waitUntil: 'domcontentloaded' });
+    const inbox = await page.evaluate(extractMessengerInboxPage, {
+      threadPath: MESSENGER_THREAD_PATH,
+      limits: MESSENGER_EXTRACT_LIMITS
+    });
+    // The phrase is matched over the rendered text, so a challenge split across inline elements is
+    // visible evidence: the page is a challenge, not a downgraded unknown.
+    expect(inbox.signals.mentionsCaptcha).toBe(true);
+    expect(inbox.signals.captchaVisible).toBe(true);
+    expect(classifyMessengerInboxPage(inbox)).toBe('captcha');
+
+    const threadHtml = readFileSync(new URL('./fixtures/facebook-messenger/thread-captcha-phrase-split.html', import.meta.url), 'utf8');
+    await page.setContent(threadHtml, { waitUntil: 'domcontentloaded' });
+    const thread = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(thread.signals.mentionsCaptcha).toBe(true);
+    expect(thread.signals.captchaVisible).toBe(true);
+    expect(classifyMessengerThreadPage(thread)).toBe('captcha');
+  });
+
+  it('keeps a split challenge phrase dormant while it is not rendered (#168)', async () => {
+    const dormantHtml = readFileSync(new URL('./fixtures/facebook-messenger/inbox-captcha-phrase-split-dormant.html', import.meta.url), 'utf8');
+    await page.setContent(dormantHtml, { waitUntil: 'domcontentloaded' });
+    const dormant = await page.evaluate(extractMessengerInboxPage, {
+      threadPath: MESSENGER_THREAD_PATH,
+      limits: MESSENGER_EXTRACT_LIMITS
+    });
+    // The words still match the raw signal, but a transparent challenge is not a visible one, so
+    // the page stays the probe's `ambiguous` instead of asserting a challenge.
+    expect(dormant.signals.mentionsCaptcha).toBe(true);
+    expect(dormant.signals.captchaVisible).toBe(false);
+    expect(classifyMessengerInboxPage(dormant)).toBe('unknown');
+  });
+
   it('records scan saturation when candidate anchors remain beyond the thread scan bound', async () => {
     const saturatedHtml = '<!doctype html><html><body><main><a href="/logout/">Log out</a>' +
       '<a href="/messages/t/1684432532/">Visible thread</a>' +
