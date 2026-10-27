@@ -16,7 +16,7 @@ import { FacebookMessengerBackend } from './facebook-messenger-backend.js';
 import { FacebookLoginCircuitBreaker } from './facebook-login-circuit-breaker.js';
 import type { FacebookMarket } from './facebook-marketplace-url.js';
 import { backendNameSchema, SERVICE_VERSION } from './domain.js';
-import { BrowserSessionManager } from './browser.js';
+import { BrowserSessionManager, canonicalProfileDirIdentity } from './browser.js';
 import { FACEBOOK_MESSENGER_INBOX_PATH, FACEBOOK_ORIGIN, FacebookSessionProbe, toProviderSessionAssessment } from './facebook.js';
 import { DenyAllAuthorizer, HmacGrantAuthorizer, type ActionAuthorizer, type ActionRequest } from './authorization.js';
 import { FileGrantConsumptionStore, type GrantConsumptionStore } from './grant-state.js';
@@ -215,10 +215,11 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
       logger
     }))
     : undefined;
-  if (messengerBrowser !== undefined && messengerBrowser.profileDir === browser.profileDir) {
+  if (messengerBrowser !== undefined && canonicalProfileDirIdentity(messengerBrowser.profileDir) === canonicalProfileDirIdentity(browser.profileDir)) {
     // Session isolation is the point of the second scope: two scopes sharing one profile would
     // share cookies and one session assessment, so the conflict fails startup rather than the
-    // first conversation call.
+    // first conversation call. Canonical on-disk identity (real path, including symlinks and
+    // not-yet-created directories) is what must differ, not the configured spelling.
     throw new Error('The messenger scope must not share the marketplace browser profile directory; set MESSENGER_PROFILE_DIR (or messengerProfileDir) to a distinct path.');
   }
   const messengerProbe = messengerBrowser === undefined
