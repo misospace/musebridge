@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Synthetic dormant captcha</title>
+</head>
+<body>
+  <main>
+    <p>Something went wrong on our side. Please refresh the page.</p>
+    <div style="opacity:0">
+      <iframe src="https://example.invalid/captcha/embed"></iframe>
+      <div id="captcha-root"></div>
+    </div>
+    <!-- Rendered at opacity 1 but zero-sized: Playwright's visible check sees an empty
+         bounding box, so this placeholder is dormant evidence, not a challenge. -->
+    <div data-testid="captcha-placeholder" style="width:0;height:0"></div>
+  </main>
+</body>
+</html>

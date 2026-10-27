@@ -34,6 +34,9 @@ export function marketplaceSearchDiagnostic(input: {
     hasLoginForm: final.signals.hasLoginForm,
     hasCheckpoint: final.signals.hasCheckpoint,
     hasCaptcha: final.signals.hasCaptcha,
+    // The gate actually applied (#168): unobserved visibility keeps the conservative captcha
+    // verdict, so the log states what the classifier used rather than dropping the distinction.
+    captchaVisible: final.signals.captchaVisible ?? true,
     hasRateLimitNotice: final.signals.hasRateLimitNotice,
     hasNoResultsNotice: final.signals.hasNoResultsNotice,
     cards: final.cards.length,

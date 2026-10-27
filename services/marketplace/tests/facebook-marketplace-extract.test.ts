@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 import { MARKETPLACE_ITEM_PATH } from '../src/facebook-marketplace-url.js';
 import { extractMarketplaceItem, extractMarketplacePage, MARKETPLACE_EXTRACT_LIMITS, MARKETPLACE_ITEM_EXTRACT_LIMITS } from '../src/facebook-marketplace-extract.js';
-import { classifyMarketplacePage, interpretMarketplacePage, parseMarketplacePage, parseMarketplacePrice } from '../src/facebook-marketplace-parse.js';
+import { classifyMarketplaceItem, classifyMarketplacePage, interpretMarketplaceItem, interpretMarketplacePage, parseMarketplacePage, parseMarketplacePrice } from '../src/facebook-marketplace-parse.js';
 
 const browserAvailable = existsSync(chromium.executablePath());
 if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
@@ -22,10 +22,16 @@ const fixtureCases = [
   { file: 'results-all-malformed.html', kind: 'results', outcome: 'UPSTREAM_ERROR' },
   { file: 'no-results.html', kind: 'no_results', outcome: 'empty' },
   { file: 'layout-changed.html', kind: 'unknown', outcome: 'UPSTREAM_ERROR' },
-  { file: 'login.html', kind: 'login', outcome: 'LOGIN_REQUIRED' },
-  { file: 'checkpoint.html', kind: 'checkpoint', outcome: 'SESSION_INVALID' },
-  { file: 'captcha.html', kind: 'captcha', outcome: 'CAPTCHA_REQUIRED' },
-  { file: 'rate-limited.html', kind: 'rate_limited', outcome: 'RATE_LIMITED' }
+    { file: 'login.html', kind: 'login', outcome: 'LOGIN_REQUIRED' },
+    { file: 'checkpoint.html', kind: 'checkpoint', outcome: 'SESSION_INVALID' },
+    { file: 'captcha.html', kind: 'captcha', outcome: 'CAPTCHA_REQUIRED' },
+    { file: 'captcha-phrase-visible.html', kind: 'captcha', outcome: 'CAPTCHA_REQUIRED' },
+    { file: 'captcha-phrase-split.html', kind: 'captcha', outcome: 'CAPTCHA_REQUIRED' },
+    { file: 'captcha-dormant.html', kind: 'unknown', outcome: 'UPSTREAM_ERROR' },
+    { file: 'captcha-phrase-split-dormant.html', kind: 'unknown', outcome: 'UPSTREAM_ERROR' },
+    { file: 'captcha-phrase-joined.html', kind: 'unknown', outcome: 'UPSTREAM_ERROR' },
+    { file: 'captcha-feed-text.html', kind: 'unknown', outcome: 'UPSTREAM_ERROR' },
+    { file: 'rate-limited.html', kind: 'rate_limited', outcome: 'RATE_LIMITED' }
 ] as const;
 
 let browser: Browser;
@@ -61,7 +67,13 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace page extraction', () =>
     expect(extracted.signals).toEqual({
       hasLoginForm: testCase.file === 'login.html',
       hasCheckpoint: testCase.file === 'checkpoint.html',
-      hasCaptcha: testCase.file === 'captcha.html',
+      // #168: dormant markup and feed text still match the raw captcha signal, but only visible
+      // structural markup or a visible challenge phrase marks the evidence visible. A phrase
+      // split across inline elements is visible when every part it covers is rendered.
+      hasCaptcha: testCase.file.startsWith('captcha'),
+      captchaVisible: testCase.file === 'captcha.html'
+        || testCase.file === 'captcha-phrase-visible.html'
+        || testCase.file === 'captcha-phrase-split.html',
       hasRateLimitNotice: testCase.file === 'rate-limited.html',
       hasNoResultsNotice: testCase.file === 'no-results.html'
     });
@@ -140,7 +152,7 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace page extraction', () =>
     await page.setContent(`<main>Loading</main><script type="application/json">{"copy":"No listings found; security check; captcha; try again later"}</script><style>/* no listings */</style><div hidden>No results</div><div style="display:none">No listings</div><div style="visibility:hidden">No items found</div>`);
     const extracted = await page.evaluate(extractMarketplacePage, { itemPath: MARKETPLACE_ITEM_PATH, limits: MARKETPLACE_EXTRACT_LIMITS });
     expect(classifyMarketplacePage(extracted)).toBe('unknown');
-    expect(extracted.signals).toEqual({hasLoginForm: false, hasCheckpoint: false, hasCaptcha: false, hasRateLimitNotice: false, hasNoResultsNotice: false});
+    expect(extracted.signals).toEqual({hasLoginForm: false, hasCheckpoint: false, hasCaptcha: false, captchaVisible: false, hasRateLimitNotice: false, hasNoResultsNotice: false});
   });
 
   it('keeps visible auth copy when a child overrides a hidden ancestor', async () => {
@@ -179,11 +191,15 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace page extraction', () =>
     ]);
   });
 
-  it.each(['login', 'captcha', 'checkpoint'] as const)('never treats an empty notice beside %s as empty success', async (blocked) => {
+  it.each([
+    ['login', 'login'],
+    ['captcha', 'unknown'],
+    ['checkpoint', 'checkpoint'],
+  ] as const)('never treats an empty notice beside %s as empty success', async (marker, expected) => {
     const markers = { login: '<input type="password">', captcha: '<div id="captcha"></div>', checkpoint: '<form action="/checkpoint/"></form>' };
-    await page.setContent('<main><p>No listings found within 500 kilometers.</p>' + markers[blocked] + '</main>');
+    await page.setContent('<main><p>No listings found within 500 kilometers.</p>' + markers[marker] + '</main>');
     const extracted = await page.evaluate(extractMarketplacePage, { itemPath: MARKETPLACE_ITEM_PATH, limits: MARKETPLACE_EXTRACT_LIMITS });
-    expect(classifyMarketplacePage(extracted)).toBe(blocked);
+    expect(classifyMarketplacePage(extracted)).toBe(expected);
   });
 
   it('keeps card trigger text out of page-level interstitial signals', async () => {
@@ -256,7 +272,9 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace page extraction', () =>
     ['item-login.html', { signals: { hasLoginForm: true } }],
     ['item-unknown-layout.html', { title: 'Unrecognised listing structure', locationText: null }],
     ['item-flex.html', { title: 'Flexible layout side table', descriptionText: 'Handmade side table with a sealed walnut top.', locationText: 'Austin, TX' }],
-    ['item-missing-price.html', { title: 'Unpriced handmade stool' }]
+    ['item-missing-price.html', { title: 'Unpriced handmade stool' }],
+    // #168: dormant captcha markup matches the raw signal but is not a visible challenge.
+    ['item-captcha-dormant.html', { title: null, signals: { hasCaptcha: true, captchaVisible: false } }]
   ] as const)('extracts item fields from %s', async (file, expected) => {
     const html = readFileSync(new URL(`./fixtures/facebook-marketplace/${file}`, import.meta.url), 'utf8');
     await page.setContent(html, { waitUntil: 'domcontentloaded' });
@@ -272,6 +290,42 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace page extraction', () =>
     if (file === 'item-sold.html') expect(extracted.stateText).toContain('Sold');
     if (file === 'item-missing-price.html') expect(extracted.priceText).toBeNull();
     if (file === 'item-flex.html') expect(extracted.sellerName).toBe('Another Sample Seller');
+  });
+
+  it('classifies a dormant captcha item page as unknown, never a challenge (#168)', async () => {
+    const html = readFileSync(new URL('./fixtures/facebook-marketplace/item-captcha-dormant.html', import.meta.url), 'utf8');
+    await page.setContent(html, { waitUntil: 'domcontentloaded' });
+    const extracted = await page.evaluate(extractMarketplaceItem, {
+      itemPath: MARKETPLACE_ITEM_PATH,
+      limits: MARKETPLACE_ITEM_EXTRACT_LIMITS
+    });
+    expect(classifyMarketplaceItem(extracted)).toBe('unknown');
+    expect(interpretMarketplaceItem({
+      page: extracted,
+      id: '100000000000001',
+      url: 'https://www.facebook.com/marketplace/item/100000000000001/',
+      fallbackCurrency: 'USD'
+    })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+  });
+
+  it('classifies an item page whose challenge phrase is split across inline elements as a challenge (#168)', async () => {
+    const html = readFileSync(new URL('./fixtures/facebook-marketplace/item-captcha-phrase-split.html', import.meta.url), 'utf8');
+    await page.setContent(html, { waitUntil: 'domcontentloaded' });
+    const extracted = await page.evaluate(extractMarketplaceItem, {
+      itemPath: MARKETPLACE_ITEM_PATH,
+      limits: MARKETPLACE_ITEM_EXTRACT_LIMITS
+    });
+    // The phrase is matched over the rendered text, so a challenge split across inline elements is
+    // visible evidence: the page is a challenge, not a downgraded unknown.
+    expect(extracted.signals.hasCaptcha).toBe(true);
+    expect(extracted.signals.captchaVisible).toBe(true);
+    expect(classifyMarketplaceItem(extracted)).toBe('captcha');
+    expect(interpretMarketplaceItem({
+      page: extracted,
+      id: '100000000000001',
+      url: 'https://www.facebook.com/marketplace/item/100000000000001/',
+      fallbackCurrency: 'USD'
+    })).toMatchObject({ kind: 'error', code: 'CAPTCHA_REQUIRED' });
   });
 
   it('returns null fields without throwing when there is no item markup', async () => {

@@ -121,7 +121,10 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace backend', () => {
 
   it.each([
     ['checkpoint.html', 'SESSION_INVALID'],
-    ['captcha.html', 'CAPTCHA_REQUIRED']
+    ['captcha.html', 'CAPTCHA_REQUIRED'],
+    // A challenge phrase split across inline elements is still a visible challenge, so the page
+    // downgrades the cached assessment instead of reading as an unrecognized layout.
+    ['captcha-phrase-split.html', 'CAPTCHA_REQUIRED']
   ] as const)('downgrades the cached assessment when the search page shows %s', async (fixture, code) => {
     synthetic.configure('results-normal.html', fixture);
     const { backend, browser } = createBackend();
