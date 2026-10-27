@@ -21,6 +21,15 @@ export interface ExtractedMessengerSignals {
   hasLoginForm: boolean;
   hasCheckpointForm: boolean;
   hasCaptchaFrame: boolean;
+  /**
+   * Whether matched captcha evidence includes something actually rendered: a visible captcha
+   * structural element or visible text matching the challenge grammar (like the probe's
+   * `hasVisibleCaptchaEvidence` for the Messenger surface, this surface counts visible
+   * "captcha" wording too — #85). A dormant widget or hidden copy keeps the page out of
+   * `captcha` (issue #168), mirroring the probe's visibility gate (#148). Absent only on
+   * hand-built legacy snapshots, where the conservative captcha verdict is kept.
+   */
+  captchaVisible?: boolean;
   hasMainLandmark: boolean;
   hasAuthenticatedMarker: boolean;
   hasLoginPrompt: boolean;
@@ -166,12 +175,36 @@ export function extractMessengerInboxPage(options: ExtractMessengerInboxOptions)
   const body = document.body ?? document.documentElement;
   const pageText = (body.textContent ?? '').slice(0, 20_000);
   const url = location.href.slice(0, 2048);
+  // Captcha visibility gate (#168): restates hasVisibleCaptchaEvidence + observeSignal from
+  // src/facebook.ts for the Messenger surface — visible structural markup or visible challenge
+  // wording (this surface counts visible "captcha" text too, #85). An in-page function cannot
+  // close over module scope, so the rule is deliberately duplicated here.
+  const isVisiblyRendered = (element: Element): boolean => {
+    for (let current: Element | null = element; current; current = current.parentElement) {
+      const style = getComputedStyle(current);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
+    }
+    return true;
+  };
+  const captchaEvidenceVisible = (): boolean => {
+    for (const element of document.querySelectorAll('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]')) {
+      if (isVisiblyRendered(element)) return true;
+    }
+    const challengePhrase = /captcha|i'?m not a robot|verify you are a human/i;
+    const walker = document.createTreeWalker(document.body ?? document.documentElement, 4);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (node.textContent && challengePhrase.test(node.textContent) && node.parentElement && isVisiblyRendered(node.parentElement)) return true;
+    }
+    return false;
+  };
   // These checks mirror readFacebookPage in src/facebook.ts; an in-page function cannot close over it.
+  const captchaVisible = captchaEvidenceVisible();
   const signals: ExtractedMessengerSignals = {
     hasPasswordInput: document.querySelector('input[type="password"]') !== null,
     hasLoginForm: document.querySelector('form[action*="/login"], input[name="pass"]') !== null,
     hasCheckpointForm: document.querySelector('form[action*="checkpoint"], [data-testid*="checkpoint"]') !== null,
     hasCaptchaFrame: document.querySelector('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]') !== null,
+    captchaVisible,
     hasMainLandmark: document.querySelector('main, [role="main"]') !== null,
     hasAuthenticatedMarker: document.querySelector('a[href*="logout" i], [aria-label*="your account" i], [aria-label*="your profile" i]') !== null
       || Array.from(document.querySelectorAll('a')).some((anchor) => /^\s*log ?out\s*$/i.test(anchor.textContent ?? '')),
@@ -240,12 +273,34 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
   const body = document.body ?? document.documentElement;
   const pageText = (body.textContent ?? '').slice(0, 20_000);
   const url = location.href.slice(0, 2048);
+  // Captcha visibility gate (#168): same restatement as in extractMessengerInboxPage — the probe's
+  // Messenger-surface rule counts visible structural markup or visible challenge wording, and an
+  // in-page function cannot close over module scope.
+  const isVisiblyRendered = (element: Element): boolean => {
+    for (let current: Element | null = element; current; current = current.parentElement) {
+      const style = getComputedStyle(current);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
+    }
+    return true;
+  };
+  const captchaEvidenceVisible = (): boolean => {
+    for (const element of document.querySelectorAll('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]')) {
+      if (isVisiblyRendered(element)) return true;
+    }
+    const challengePhrase = /captcha|i'?m not a robot|verify you are a human/i;
+    const walker = document.createTreeWalker(document.body ?? document.documentElement, 4);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (node.textContent && challengePhrase.test(node.textContent) && node.parentElement && isVisiblyRendered(node.parentElement)) return true;
+    }
+    return false;
+  };
   // Keep the probe selectors in lockstep with readFacebookPage in src/facebook.ts.
   const signals: ExtractedMessengerSignals = {
     hasPasswordInput: document.querySelector('input[type="password"]') !== null,
     hasLoginForm: document.querySelector('form[action*="/login"], input[name="pass"]') !== null,
     hasCheckpointForm: document.querySelector('form[action*="checkpoint"], [data-testid*="checkpoint"]') !== null,
     hasCaptchaFrame: document.querySelector('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]') !== null,
+    captchaVisible: captchaEvidenceVisible(),
     hasMainLandmark: document.querySelector('main, [role="main"]') !== null,
     hasAuthenticatedMarker: document.querySelector('a[href*="logout" i], [aria-label*="your account" i], [aria-label*="your profile" i]') !== null
       || Array.from(document.querySelectorAll('a')).some((anchor) => /^\s*log ?out\s*$/i.test(anchor.textContent ?? '')),

@@ -23,6 +23,16 @@ export interface ExtractedMarketplaceSignals {
   hasLoginForm: boolean;
   hasCheckpoint: boolean;
   hasCaptcha: boolean;
+  /**
+   * Whether matched captcha evidence includes something actually rendered: a visible captcha
+   * structural element or a visible challenge phrase ("I'm not a robot", "verify you are a
+   * human"). On Marketplace the bare word "captcha" in page text is arbitrary feed content, so
+   * it never counts as visible evidence. A dormant widget or passing text keeps the page out of
+   * `captcha` (issue #168), mirroring the probe's visibility gate in `classifyFacebookSession`
+   * (#148). Absent only on hand-built legacy snapshots, where the conservative captcha verdict is
+   * kept.
+   */
+  captchaVisible?: boolean;
   hasRateLimitNotice: boolean;
   hasNoResultsNotice: boolean;
 }
@@ -228,13 +238,49 @@ export function extractMarketplacePage(options: ExtractMarketplaceOptions): Extr
   const unboundedBodyText = pageTextParts.join(' ').replace(/\s+/g, ' ');
   const bodyText = unboundedBodyText.slice(0, 20000);
   const unfilteredBodyText = unfilteredTextParts.join(' ').replace(/\s+/g, ' ');
-  // Auth/interstitial selectors intentionally mirror the session probe in src/facebook.ts; duplication is deliberate because an in-page function cannot reference module scope.
+  // Captcha visibility gate (#168): a dormant widget or passing feed text is not a challenge.
+  // Mirrors hasVisibleCaptchaEvidence + observeSignal in src/facebook.ts; an in-page function
+  // cannot close over module scope, so the rule is deliberately restated here. Structural captcha
+  // markup counts only when rendered, and on Marketplace only the challenge phrases (never the
+  // bare word "captcha") can be visible text evidence.
+  const isVisiblyRendered = (element: Element): boolean => {
+    for (let current: Element | null = element; current; current = current.parentElement) {
+      const style = getComputedStyle(current);
+      // opacity:0 stands in for Playwright's visible-but-transparent gap in src/facebook.ts:
+      // a fully transparent element is never a rendered challenge.
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
+    }
+    return true;
+  };
+  const captchaEvidenceVisible = (): boolean => {
+    for (const element of document.querySelectorAll('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]')) {
+      if (isVisiblyRendered(element)) return true;
+    }
+    const challengePhrase = /i'?m not a robot|verify you are a human/i;
+    const walker = document.createTreeWalker(document.body ?? document.documentElement, 4);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (!node.textContent || !challengePhrase.test(node.textContent) || !node.parentElement) continue;
+      // Card prose is seller copy and stays out of page-level interstitial signals in both
+      // directions, exactly as it does for the hasCaptcha text scan above.
+      let insideCard = false;
+      for (let ancestor: Element | null = node.parentElement; ancestor; ancestor = ancestor.parentElement) {
+        if (cardRootSet.has(ancestor)) {
+          insideCard = true;
+          break;
+        }
+      }
+      if (!insideCard && isVisiblyRendered(node.parentElement)) return true;
+    }
+    return false;
+  };
+  const captchaVisible = captchaEvidenceVisible();
   const signals: ExtractedMarketplaceSignals = {
     hasLoginForm: document.querySelector('input[type="password"], form[action*="/login"], input[name="pass"]') !== null,
     hasCheckpoint: document.querySelector('form[action*="checkpoint"], [data-testid*="checkpoint"]') !== null
       || /security check|confirm your identity|unusual activity/i.test(bodyText),
     hasCaptcha: document.querySelector('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]') !== null
       || /captcha|i'?m not a robot|verify you are a human/i.test(bodyText),
+    captchaVisible,
     // Rate-limit detection is deliberately conservative and text-based.
     hasRateLimitNotice: /you'?re temporarily blocked|temporarily blocked|we limit how often|too many requests|try again later|please try again later/i.test(bodyText),
     hasNoResultsNotice: /no results|no listings|no items found|nothing found|try a different search|no marketplace listings/i.test(bodyText)
@@ -382,12 +428,33 @@ export function extractMarketplaceItem(options: ExtractMarketplaceItemOptions): 
     : (stateElement?.textContent ?? '');
   const stateText = stateRawText.split('\n').map((line) => line.replace(/\s+/g, ' ').trim()).filter(Boolean).join('\n').slice(0, maxTextLength) || null;
   // Keep these selectors aligned with the search/session probe; this page function cannot use module scope.
+  // The captcha visibility gate (#168) is restated here exactly as in extractMarketplacePage:
+  // dormant markup or arbitrary page text mentioning captcha is never a visible challenge.
+  const isVisiblyRendered = (element: Element): boolean => {
+    for (let current: Element | null = element; current; current = current.parentElement) {
+      const style = getComputedStyle(current);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
+    }
+    return true;
+  };
+  const captchaEvidenceVisible = (): boolean => {
+    for (const element of document.querySelectorAll('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]')) {
+      if (isVisiblyRendered(element)) return true;
+    }
+    const challengePhrase = /i'?m not a robot|verify you are a human/i;
+    const walker = document.createTreeWalker(document.body ?? document.documentElement, 4);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (node.textContent && challengePhrase.test(node.textContent) && node.parentElement && isVisiblyRendered(node.parentElement)) return true;
+    }
+    return false;
+  };
   const signals: ExtractedMarketplaceSignals = {
     hasLoginForm: document.querySelector('input[type="password"], form[action*="/login"], input[name="pass"]') !== null,
     hasCheckpoint: document.querySelector('form[action*="checkpoint"], [data-testid*="checkpoint"]') !== null
       || /security check|confirm your identity|unusual activity/i.test(bodyText),
     hasCaptcha: document.querySelector('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]') !== null
       || /captcha|i'?m not a robot|verify you are a human/i.test(bodyText),
+    captchaVisible: captchaEvidenceVisible(),
     // Rate-limit detection is deliberately conservative and text-based.
     hasRateLimitNotice: /you'?re temporarily blocked|temporarily blocked|we limit how often|too many requests|try again later|please try again later/i.test(bodyText),
     hasNoResultsNotice: /no results|no listings|no items found|nothing found|try a different search|no marketplace listings/i.test(bodyText)

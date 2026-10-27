@@ -103,6 +103,20 @@ describe('Messenger page interpretation', () => {
     expect(classifyMessengerInboxPage(inbox({ signals: { ...authenticatedSignals, hasLoginPrompt: true } }))).toBe('login');
   });
 
+  it('downgrades matched-but-dormant inbox captcha evidence to unknown (#168)', () => {
+    const dormantSignals = { ...authenticatedSignals, hasCaptchaFrame: true, captchaVisible: false };
+    expect(classifyMessengerInboxPage(inbox({ signals: dormantSignals, threads: [{ threadId: 'abc' }] }))).toBe('unknown');
+    expect(classifyMessengerInboxPage(inbox({ signals: { ...dormantSignals, mentionsCaptcha: true } }))).toBe('unknown');
+    // Even a GraphQL-verified chain never turns a dormant-captcha page into a success (#168).
+    expect(interpretMessengerInboxPage({
+      page: inbox({ signals: dormantSignals }), baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 20,
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: false, truncated: false, threadIds: ['graphql-id'] }
+    })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+    // Visible evidence, and unobserved visibility (conservative legacy), stay `captcha`.
+    expect(classifyMessengerInboxPage(inbox({ signals: { ...dormantSignals, captchaVisible: true } }))).toBe('captcha');
+    expect(classifyMessengerInboxPage(inbox({ signals: { ...authenticatedSignals, hasCaptchaFrame: true } }))).toBe('captcha');
+  });
+
   it('maps threads safely, includes optional fields, and applies the requested limit', () => {
     const page = inbox({ threads: [
       { threadId: '1684432532', preview: 'Synthetic preview', itemId: '123456789' },
@@ -287,6 +301,19 @@ describe('Messenger page interpretation', () => {
     expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true, signals: { ...authenticatedSignals, hasLoginForm: true } }))).toBe('login');
     expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true, signals: { ...authenticatedSignals, hasCaptchaFrame: true } }))).toBe('captcha');
     expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true, signals: { ...authenticatedSignals, hasCheckpointForm: true } }))).toBe('checkpoint');
+  });
+
+  it('downgrades matched-but-dormant thread captcha evidence to unknown (#168)', () => {
+    const dormantSignals = { ...authenticatedSignals, hasCaptchaFrame: true, captchaVisible: false };
+    // A dormant widget beside rendered messages is neither a challenge nor a trusted conversation.
+    expect(classifyMessengerThreadPage(thread({ signals: dormantSignals, messages: [{ sender: 'you', text: 'Synthetic' }] }))).toBe('unknown');
+    expect(interpretMessengerThreadPage({
+      page: thread({ signals: dormantSignals, messages: [{ sender: 'you', text: 'Synthetic' }] }),
+      baseUrl: 'https://www.facebook.com', threadId: '1684432532'
+    })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+    // Visible evidence, and unobserved visibility (conservative legacy), stay `captcha`.
+    expect(classifyMessengerThreadPage(thread({ signals: { ...dormantSignals, captchaVisible: true } }))).toBe('captcha');
+    expect(classifyMessengerThreadPage(thread({ signals: { ...authenticatedSignals, hasCaptchaFrame: true } }))).toBe('captcha');
   });
 
   it('returns the unavailable outcome only for a verified absence at the requested thread', () => {

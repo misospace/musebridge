@@ -623,6 +623,38 @@ describe('Facebook backend login gate', () => {
     await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
   });
 
+  // Dormant captcha evidence (#168): the classifier downgrades a matched-but-invisible widget to
+  // `unknown`, so the page carries no auth-class code. The breaker counts only challenges backed
+  // by visible evidence, exactly like a probe reporting `ambiguous` records no challenge.
+  it('does not record a challenge when a Marketplace result page captcha evidence is dormant', async () => {
+    const state = setup(new FacebookLoginCircuitBreaker({ baseCooldownMs: 60_000, maxCooldownMs: 120_000, maxFailures: 3 }));
+    mockProbe(state.marketplaceProbe, [usable]);
+    driveObservedPage(state.browser, {
+      url: 'http://127.0.0.1:1234/marketplace/nyc/search/?query=bike',
+      signals: { hasCaptcha: true, captchaVisible: false, hasCheckpoint: false, hasLoginForm: false, hasRateLimitNotice: false, hasNoResultsNotice: false },
+      cards: []
+    });
+    await expect(state.marketplace.search(search, signal())).rejects.toMatchObject({
+      name: 'ProviderError', code: 'UPSTREAM_ERROR'
+    });
+    expect(state.gate.snapshot()).toEqual({ status: 'closed' });
+    await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
+  });
+
+  it('does not record a challenge when a Messenger inbox page captcha evidence is dormant', async () => {
+    const state = setup(new FacebookLoginCircuitBreaker({ baseCooldownMs: 60_000, maxCooldownMs: 120_000, maxFailures: 3 }));
+    mockProbe(state.messengerProbe, [usable]);
+    driveObservedPage(state.messengerBrowser, {
+      url: 'http://127.0.0.1:1234/marketplace/inbox/',
+      signals: { ...observedPageSignals('captcha'), captchaVisible: false },
+      hasEmptyStateMarker: false, threads: []
+    });
+    await expect(state.messenger.listThreads(threads, signal()))
+      .rejects.toMatchObject({ name: 'ProviderError', code: 'UPSTREAM_ERROR' });
+    expect(state.gate.snapshot()).toEqual({ status: 'closed' });
+    await Promise.all([state.browser.close(), state.messengerBrowser.close()]);
+  });
+
   it('does not hard-open the shared gate when a page observes only a plain login requirement', async () => {
     const state = setup(new FacebookLoginCircuitBreaker({ baseCooldownMs: 60_000, maxCooldownMs: 120_000, maxFailures: 3 }));
     mockProbe(state.marketplaceProbe, [usable]);
