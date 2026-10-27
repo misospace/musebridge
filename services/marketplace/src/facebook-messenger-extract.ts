@@ -266,7 +266,10 @@ export function extractMessengerInboxPage(options: ExtractMessengerInboxOptions)
       return /^\s*log ?in( to facebook)?\s*$/i.test(label);
     }),
     mentionsCheckpoint: /security check|confirm your identity|unusual activity/i.test(pageText),
-    mentionsCaptcha: /captcha|i'?m not a robot|verify you are a human/i.test(pageText)
+    // The challenge phrases allow flexible inner whitespace so a phrase rendered across a line
+    // break ("Verify\n you are a human") is the raw signal that lets the #168 visibility gate
+    // decide it, exactly as the probe's getByText normalization sees it.
+    mentionsCaptcha: /captcha|i'?m\s+not\s+a\s+robot|verify\s+you\s+are\s+a\s+human/i.test(pageText)
   };
   const hasEmptyStateMarker = /no conversations|no messages yet|nothing here yet/i.test(pageText);
   const threadIds = new Set<string>();
@@ -415,7 +418,10 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
       return /^\s*log ?in( to facebook)?\s*$/i.test(label);
     }),
     mentionsCheckpoint: /security check|confirm your identity|unusual activity/i.test(pageText),
-    mentionsCaptcha: /captcha|i'?m not a robot|verify you are a human/i.test(pageText)
+    // The challenge phrases allow flexible inner whitespace so a phrase rendered across a line
+    // break ("Verify\n you are a human") is the raw signal that lets the #168 visibility gate
+    // decide it, exactly as the probe's getByText normalization sees it.
+    mentionsCaptcha: /captcha|i'?m\s+not\s+a\s+robot|verify\s+you\s+are\s+a\s+human/i.test(pageText)
   };
   // The provider's own statement that this conversation is gone: an explicit unavailable,
   // deleted, or nonexistent notice. The phrase list stays deliberately narrow, and the decision

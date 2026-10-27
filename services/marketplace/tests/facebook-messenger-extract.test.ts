@@ -117,6 +117,28 @@ it('gates inbox captcha on visible evidence and downgrades a dormant widget (#16
     expect(classifyMessengerThreadPage(thread)).toBe('captcha');
   });
 
+  it('keeps the raw captcha signal aligned with the visibility gate when a phrase breaks across lines (#168)', async () => {
+    const inboxHtml = readFileSync(new URL('./fixtures/facebook-messenger/inbox-captcha-phrase-newline.html', import.meta.url), 'utf8');
+    await page.setContent(inboxHtml, { waitUntil: 'domcontentloaded' });
+    const inbox = await page.evaluate(extractMessengerInboxPage, {
+      threadPath: MESSENGER_THREAD_PATH,
+      limits: MESSENGER_EXTRACT_LIMITS
+    });
+    // The rendered-text gate reads the line-broken phrase as a visible challenge, so the raw
+    // signal must match it too; otherwise the classifier never enters the captcha branch and a
+    // genuinely rendered challenge stays unknown instead of hard-opening the breaker.
+    expect(inbox.signals.mentionsCaptcha).toBe(true);
+    expect(inbox.signals.captchaVisible).toBe(true);
+    expect(classifyMessengerInboxPage(inbox)).toBe('captcha');
+
+    const threadHtml = readFileSync(new URL('./fixtures/facebook-messenger/thread-captcha-phrase-newline.html', import.meta.url), 'utf8');
+    await page.setContent(threadHtml, { waitUntil: 'domcontentloaded' });
+    const thread = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(thread.signals.mentionsCaptcha).toBe(true);
+    expect(thread.signals.captchaVisible).toBe(true);
+    expect(classifyMessengerThreadPage(thread)).toBe('captcha');
+  });
+
   it('keeps a split challenge phrase dormant while it is not rendered (#168)', async () => {
     const dormantHtml = readFileSync(new URL('./fixtures/facebook-messenger/inbox-captcha-phrase-split-dormant.html', import.meta.url), 'utf8');
     await page.setContent(dormantHtml, { waitUntil: 'domcontentloaded' });
