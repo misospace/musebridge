@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readlinkSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import type { BrowserContext, CDPSession, Page } from 'playwright';
 
 type TargetCreatedDiagnosticEvent = { targetInfo: { targetId: string; type: string } };
@@ -660,6 +660,61 @@ function resolveProfileDir(configured: string | undefined): string {
     throw new TypeError('BROWSER_PROFILE_DIR must be a trimmed non-empty path');
   }
   return resolve(configured ?? join(homedir(), '.marketplace', 'browser-profile'));
+}
+
+const MAX_SYMLINK_SPLICES = 40;
+
+/**
+ * Canonical on-disk identity of a profile directory. Two differently spelled paths must compare
+ * equal when they name the same directory, including through symlinks, so scope isolation cannot
+ * be defeated by an alias. A directory may not exist yet — profiles are created lazily at first
+ * launch — so identity falls back to the nearest existing ancestor: the real path of that
+ * ancestor plus the not-yet-existing remainder. This keeps a race where both scopes later create
+ * their directories inside the same aliased parent from slipping past the startup check, and a
+ * dangling leaf symlink (the natural `ln -s` before first launch) is spliced to its target so
+ * the alias is still recognized. The not-yet-existing remainder keeps its configured spelling,
+ * so case-insensitive filesystems could still collapse differently cased spellings of a missing
+ * leaf; resolving that portably needs knowledge of the filesystem's case behavior, which Node
+ * does not expose. A dangling alias chain longer than the splice budget leaves identity unknown,
+ * so it fails closed too. Failures other than a missing component (EACCES, ELOOP, EIO) propagate:
+ * when identity cannot be established, startup fails rather than proceeding unverified.
+ */
+export function canonicalProfileDirIdentity(dir: string): string {
+  const resolved = resolve(dir);
+  let prefix = resolved;
+  const missing: string[] = [];
+  let symlinkSplices = 0;
+  while (true) {
+    try {
+      return join(realpathSync(prefix), ...[...missing].reverse());
+    } catch (error) {
+      const prefixIsDanglingSymlink = isEnoent(error)
+        && lstatSync(prefix, { throwIfNoEntry: false })?.isSymbolicLink();
+      if (prefixIsDanglingSymlink && symlinkSplices >= MAX_SYMLINK_SPLICES) {
+        // The remaining alias chain outlives the splice budget: its identity is unknown, so fail
+        // closed rather than treat the unresolved link as an ordinary missing component.
+        throw new Error(
+          `unable to canonicalize profile directory '${resolved}': symlink resolution budget exhausted`
+        );
+      }
+      if (prefixIsDanglingSymlink) {
+        prefix = resolve(dirname(prefix), readlinkSync(prefix));
+        symlinkSplices += 1;
+        continue;
+      }
+      if (!isEnoent(error)) throw error;
+      const parent = dirname(prefix);
+      if (parent === prefix) return resolved;
+      // Collect while walking upward; the single reverse at reconstruction restores
+      // configured path order (deepest component first in `missing`, shallowest last).
+      missing.push(basename(prefix));
+      prefix = parent;
+    }
+  }
+}
+
+function isEnoent(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException)?.code === 'ENOENT';
 }
 
 /**
