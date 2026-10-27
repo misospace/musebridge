@@ -566,6 +566,18 @@ describe('last-resort orphan termination', () => {
     expect(Date.now() - startedAt).toBeLessThan(2_000);
     expect(stub.errors).toContain('Owned browser process termination failed unexpectedly');
   });
+
+  it('keeps close bounded when the injected terminator never settles', async () => {
+    const stub = createTerminationStub({
+      contextClose: 'hang',
+      browserMode: 'hang',
+      terminate: () => new Promise<OwnedBrowserTerminationResult>(() => undefined)
+    });
+    const startedAt = Date.now();
+    await startAndClose(stub);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(stub.errors).toContain('Owned browser process termination did not settle within 20 ms; abandoning it without waiting');
+  });
 });
 
 describe.skipIf(!browserAvailable)('browser session manager', () => {

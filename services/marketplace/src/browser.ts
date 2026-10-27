@@ -49,7 +49,10 @@ export interface BrowserSessionOptions {
    * Last-resort seam: terminates the browser processes this session's own profile directory
    * can prove it owns, after both graceful close paths time out or fail. The default scans
    * `/proc` for command lines carrying `--user-data-dir=<profile>`; it never signals a process
-   * that does not declare this profile.
+   * that does not declare this profile. The manager awaits this under its settle deadline and
+   * abandons a late-settling implementation without waiting for it: a custom implementation
+   * must therefore reach its own final signal-or-report decision before that deadline, since
+   * signals it issues afterwards can race a subsequent launch on the same profile.
    */
   terminateOwnedProcesses?: (profileDir: string) => Promise<OwnedBrowserTerminationResult>;
 }
@@ -579,11 +582,19 @@ export class BrowserSessionManager {
    * clean teardown, so an orphaned Chromium could keep holding the profile singleton lock and
    * strand every later launch. Only processes that declare this profile in their own command
    * line are signalled, the sequence is internally bounded, and no failure here escapes:
-   * cleanup and shutdown must continue regardless.
+   * cleanup and shutdown must continue regardless. The termination seam is also awaited under
+   * the configured settle deadline: the built-in terminator is internally bounded, but a
+   * custom injected implementation is untrusted, so a never-settling promise cannot hang
+   * close().
    */
   private async terminateOwnedBrowserProcesses(): Promise<void> {
     try {
-      const result = await this.terminateOwnedProcesses(this.profileDir);
+      const termination = await this.settle(this.terminateOwnedProcesses(this.profileDir), this.settleTimeoutMs);
+      if (!termination.settled) {
+        this.logCloseFailure(`Owned browser process termination did not settle within ${this.settleTimeoutMs} ms; abandoning it without waiting`);
+        return;
+      }
+      const result = termination.value;
       if (!result.platformSupported) {
         this.logCloseFailure('Could not terminate owned browser processes: process inspection is unavailable on this platform');
         return;
