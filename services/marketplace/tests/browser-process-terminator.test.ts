@@ -136,13 +136,18 @@ describe('classifyOwnedBrowserCommand', () => {
     expect(classifyOwnedBrowserCommand('/usr/bin/browser\0--type=renderer\0', '/mine/profile')).toBe('unowned');
   });
 
-  it('treats trailing-slash and relative forms that resolve to the same directory as owned', () => {
+  it('treats trailing-slash and dot-segment absolute forms as owned', () => {
     const commandLine = '/usr/bin/browser\0--user-data-dir=/mine/profile\0';
     expect(classifyOwnedBrowserCommand(commandLine, '/mine/profile/')).toBe('main');
     expect(classifyOwnedBrowserCommand(commandLine, '/mine/../mine/profile')).toBe('main');
+  });
+
+  it('never lets an empty or relative flag value prove ownership', () => {
+    expect(classifyOwnedBrowserCommand('/usr/bin/browser\0--user-data-dir=\0', '/mine/profile')).toBe('unowned');
+    expect(classifyOwnedBrowserCommand('/usr/bin/browser\0--user-data-dir=\0', process.cwd())).toBe('unowned');
     const relative = '/usr/bin/browser\0--user-data-dir=profile-x\0';
-    expect(classifyOwnedBrowserCommand(relative, 'profile-x')).toBe('main');
-    expect(classifyOwnedBrowserCommand(relative, 'profile-x/')).toBe('main');
+    expect(classifyOwnedBrowserCommand(relative, 'profile-x')).toBe('unowned');
+    expect(classifyOwnedBrowserCommand(relative, `${process.cwd()}/profile-x`)).toBe('unowned');
   });
 
   it('does not treat a different directory as owned, even for helpers', () => {

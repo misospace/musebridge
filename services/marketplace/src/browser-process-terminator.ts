@@ -3,7 +3,9 @@ import { join, resolve } from 'node:path';
 
 export interface OwnedBrowserTerminationResult {
   platformSupported: boolean;
+  /** Processes this call signalled and confirmed exited within a grace window. */
   terminatedPids: number[];
+  /** Processes that survived the SIGKILL grace window or could never be signalled (EPERM). */
   failedPids: number[];
 }
 
@@ -22,8 +24,11 @@ const DEFAULT_POLL_INTERVAL_MS = 25;
  * Last-resort cleanup for a persistent-context browser that survived both graceful teardown
  * paths. Ownership proof is the process itself: only processes whose own command line passes
  * `--user-data-dir=<this profile>` are ever signalled, so unrelated processes are never
- * touched. The whole sequence is bounded: SIGTERM, a grace window, then SIGKILL, then a final
- * grace window; anything still alive is reported, never waited on forever.
+ * touched. Only an absolute flag value can prove ownership: an empty or relative value is
+ * resolved against the scanning process's own working directory, never the target's, so it
+ * never matches. Ownership is re-proved immediately before every signal wave. The whole
+ * sequence is bounded: SIGTERM, a grace window, then SIGKILL, then a final grace window;
+ * anything still alive, or that could not be signalled at all, is reported, never waited on.
  */
 export async function terminateOwnedBrowserProcesses(
   profileDir: string,
@@ -42,22 +47,34 @@ export async function terminateOwnedBrowserProcesses(
     return { platformSupported: true, terminatedPids: [], failedPids: [] };
   }
 
-  const signalled = new Set<number>(signalProcesses(initial.mains, 'SIGTERM'));
-  let stillAlive = await waitForExit(procRoot, [...signalled], termGraceMs, pollIntervalMs);
+  const signalled = new Set<number>();
+  const denied = new Set<number>();
+  const termWave = signalProcesses(initial.mains, 'SIGTERM');
+  for (const pid of termWave.signalled) signalled.add(pid);
+  for (const pid of termWave.denied) denied.add(pid);
+
+  let survivors: number[] = [];
+  const stillAlive = await waitForExit(procRoot, [...termWave.signalled], termGraceMs, pollIntervalMs);
   if (stillAlive.length > 0) {
-    // The second scan catches helper processes the first wave left behind; helpers only ever
-    // exist under a main process that already declared this profile, so they stay inside the
-    // ownership proof.
+    // Re-prove ownership for survivors right before the kill wave: a pid listed at scan time
+    // may since have exited and been recycled by an unrelated process. The fresh scan adds
+    // helper processes the first wave left behind; a newly seen main also goes straight to
+    // SIGKILL because the SIGTERM grace window has already elapsed for this teardown.
     const rescan = scanOwnedBrowserProcesses(procRoot, profileDir);
-    const killWave = [...new Set([...stillAlive, ...rescan.mains, ...rescan.helpers])];
-    for (const pid of killWave) signalled.add(pid);
-    signalProcesses(killWave, 'SIGKILL');
-    stillAlive = await waitForExit(procRoot, [...signalled], killGraceMs, pollIntervalMs);
+    const killWave = [...new Set([
+      ...stillAlive.filter((pid) => provesProfileOwnership(procRoot, pid, profileDir)),
+      ...rescan.mains,
+      ...rescan.helpers
+    ])];
+    const killResult = signalProcesses(killWave, 'SIGKILL');
+    for (const pid of killResult.signalled) signalled.add(pid);
+    for (const pid of killResult.denied) denied.add(pid);
+    survivors = await waitForExit(procRoot, [...killResult.signalled], killGraceMs, pollIntervalMs);
   }
 
-  const failedPids = [...new Set(stillAlive)];
-  const failedSet = new Set(failedPids);
-  const terminatedPids = [...signalled].filter((pid) => !failedSet.has(pid)).sort((left, right) => left - right);
+  const survivorSet = new Set(survivors);
+  const failedPids = [...new Set([...survivors, ...denied])].sort((left, right) => left - right);
+  const terminatedPids = [...signalled].filter((pid) => !survivorSet.has(pid)).sort((left, right) => left - right);
   return { platformSupported: true, terminatedPids, failedPids };
 }
 
@@ -99,7 +116,10 @@ export function classifyOwnedBrowserCommand(
   let isHelper = false;
   for (const argument of commandLine.split('\0')) {
     if (argument.startsWith('--user-data-dir=')) {
-      if (pathsReferToSameDirectory(argument.slice('--user-data-dir='.length), profileDir)) ownsProfile = true;
+      const value = argument.slice('--user-data-dir='.length);
+      // An empty or relative value could only be resolved against this process's own working
+      // directory, which says nothing about the target's, so it never proves ownership.
+      if (value.startsWith('/') && pathsReferToSameDirectory(value, profileDir)) ownsProfile = true;
     } else if (argument.startsWith('--type=')) {
       isHelper = true;
     }
@@ -108,18 +128,31 @@ export function classifyOwnedBrowserCommand(
   return isHelper ? 'helper' : 'main';
 }
 
-function signalProcesses(pids: number[], signal: NodeJS.Signals): number[] {
+function provesProfileOwnership(procRoot: string, pid: number, profileDir: string): boolean {
+  try {
+    return classifyOwnedBrowserCommand(readFileSync(join(procRoot, String(pid), 'cmdline'), 'utf8'), profileDir) !== 'unowned';
+  } catch {
+    return false;
+  }
+}
+
+function signalProcesses(
+  pids: number[],
+  signal: NodeJS.Signals
+): { signalled: number[]; denied: number[] } {
   const signalled: number[] = [];
+  const denied: number[] = [];
   for (const pid of pids) {
     try {
       process.kill(pid, signal);
       signalled.push(pid);
     } catch (error) {
-      if (!isNotFound(error)) signalled.push(pid);
       // ESRCH: the process already exited on its own, which is the outcome we wanted.
+      // Anything else (EPERM included) means the signal never landed: report, do not assume.
+      if (!isNotFound(error)) denied.push(pid);
     }
   }
-  return signalled;
+  return { signalled, denied };
 }
 
 async function waitForExit(
