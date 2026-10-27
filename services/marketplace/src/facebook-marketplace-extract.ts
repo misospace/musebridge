@@ -244,6 +244,10 @@ export function extractMarketplacePage(options: ExtractMarketplaceOptions): Extr
   // markup counts only when rendered, and on Marketplace only the challenge phrases (never the
   // bare word "captcha") can be visible text evidence.
   const isVisiblyRendered = (element: Element): boolean => {
+    // Playwright's visible check requires a non-empty bounding box, so a zero-sized captcha
+    // placeholder is never a rendered challenge, exactly as locator visible:true sees it.
+    const rect = element.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) return false;
     for (let current: Element | null = element; current; current = current.parentElement) {
       const style = getComputedStyle(current);
       // opacity:0 stands in for Playwright's visible-but-transparent gap in src/facebook.ts:
@@ -431,6 +435,10 @@ export function extractMarketplaceItem(options: ExtractMarketplaceItemOptions): 
   // The captcha visibility gate (#168) is restated here exactly as in extractMarketplacePage:
   // dormant markup or arbitrary page text mentioning captcha is never a visible challenge.
   const isVisiblyRendered = (element: Element): boolean => {
+    // Playwright's visible check requires a non-empty bounding box, so a zero-sized captcha
+    // placeholder is never a rendered challenge, exactly as locator visible:true sees it.
+    const rect = element.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) return false;
     for (let current: Element | null = element; current; current = current.parentElement) {
       const style = getComputedStyle(current);
       if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;

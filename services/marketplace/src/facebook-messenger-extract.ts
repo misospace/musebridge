@@ -180,6 +180,10 @@ export function extractMessengerInboxPage(options: ExtractMessengerInboxOptions)
   // wording (this surface counts visible "captcha" text too, #85). An in-page function cannot
   // close over module scope, so the rule is deliberately duplicated here.
   const isVisiblyRendered = (element: Element): boolean => {
+    // Playwright's visible check requires a non-empty bounding box, so a zero-sized captcha
+    // placeholder is never a rendered challenge, exactly as locator visible:true sees it.
+    const rect = element.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) return false;
     for (let current: Element | null = element; current; current = current.parentElement) {
       const style = getComputedStyle(current);
       if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
@@ -277,6 +281,10 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
   // Messenger-surface rule counts visible structural markup or visible challenge wording, and an
   // in-page function cannot close over module scope.
   const isVisiblyRendered = (element: Element): boolean => {
+    // Playwright's visible check requires a non-empty bounding box, so a zero-sized captcha
+    // placeholder is never a rendered challenge, exactly as locator visible:true sees it.
+    const rect = element.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) return false;
     for (let current: Element | null = element; current; current = current.parentElement) {
       const style = getComputedStyle(current);
       if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
