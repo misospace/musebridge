@@ -17,7 +17,7 @@ import { buildMessengerThreadUrl } from './facebook-messenger-url.js';
 import type { MessengerInboxGraphQLObservation } from './facebook-messenger-inbox-graphql.js';
 
 export type MessengerInboxPageKind = 'captcha' | 'checkpoint' | 'login' | 'threads' | 'empty' | 'unknown';
-export type MessengerThreadPageKind = 'captcha' | 'checkpoint' | 'login' | 'messages' | 'unknown';
+export type MessengerThreadPageKind = 'captcha' | 'checkpoint' | 'login' | 'messages' | 'unavailable' | 'unknown';
 
 function isExpectedPathname(url: string, baseUrl: string, expectedPathname: (pathname: string) => boolean): boolean {
   try {
@@ -112,12 +112,32 @@ export function classifyMessengerThreadPage(page: ExtractedThreadPage): Messenge
   if (page.signals.hasCaptchaFrame || page.signals.mentionsCaptcha) return 'captcha';
   if (page.signals.hasCheckpointForm || page.signals.mentionsCheckpoint) return 'checkpoint';
   if (page.signals.hasPasswordInput || page.signals.hasLoginForm || page.signals.hasLoginPrompt) return 'login';
-  if (page.signals.hasMainLandmark && page.signals.hasAuthenticatedMarker && page.messages.length > 0) return 'messages';
+  if (page.signals.hasMainLandmark && page.signals.hasAuthenticatedMarker) {
+    if (page.messages.length > 0) return 'messages';
+    // A rendered conversation wins over the notice text above, so notice wording inside a live
+    // thread never selects this state. An authenticated page that renders an explicit
+    // unavailable notice stands alone as verified absence only when the extraction report proves
+    // the page rendered no message-like structure at all: no message log, no collected row
+    // (even an unattributed one the probe would not read), no row rendered outside the collected
+    // scope, no article or message-labelled block the row counters cannot see, and no missing
+    // report that could hide any of them. A page whose report is absent or contradicts the
+    // notice is an ambiguous layout and stays unknown.
+    const diagnostics = page.diagnostics;
+    if (
+      page.hasUnavailableMarker &&
+      diagnostics !== undefined &&
+      !diagnostics.hasMessageLog &&
+      diagnostics.renderedRows === 0 &&
+      diagnostics.roleRowsOutsideScope === 0 &&
+      diagnostics.messageLikeBlocks === 0
+    ) return 'unavailable';
+  }
   return 'unknown';
 }
 
 export type MessengerThreadOutcome =
   | { kind: 'messages'; messages: ConversationMessage[]; coverage: ConversationReadCoverage }
+  | { kind: 'unavailable' }
   | { kind: 'error'; code: ProviderErrorCode; message: string };
 
 // The window contract: the newest end of the window is established only by explicit timestamps
@@ -170,6 +190,11 @@ export function interpretMessengerThreadPage(input: {
   if (input.page.diagnostics?.hasExplicitEmptyState && input.page.messages.length === 0) {
     return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger empty thread layout could not be verified.' };
   }
+  // A verified absence: the provider rendered an explicit deleted/unavailable/nonexistent notice
+  // at the requested thread's own address, with no message content and no message log
+  // contradicting it. The caller reports this as not-found (#150); auth challenges won above, a
+  // redirect never reaches here, and every other unrecognized layout stays a typed error below.
+  if (kind === 'unavailable') return { kind: 'unavailable' };
   if (kind === 'unknown') return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger thread page layout was not recognized.' };
 
   // The newest end of the window is selected from the candidates by their explicit timestamps.
