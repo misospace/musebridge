@@ -417,13 +417,18 @@ export function registerMarketplaceTools(
         } else if (name === 'messenger_threads_list') {
           const conversations = options.conversations;
           if (!conversations) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');
-          const threads = await runBackendOperation(
+          const listing = await runBackendOperation(
             (signal) => conversations.listThreads(parsed.data as z.infer<typeof threadsListInputSchema>, signal),
             backendTimeoutMs,
             extra.signal,
             shutdownSignal
           );
-          output = { ok: true, backend: backendName, threads };
+          // A page-carrying backend reports its coverage; a host-injected backend that predates
+          // #151 returns a bare array, and its listing omits `truncated` rather than inheriting a
+          // completeness claim the backend never made.
+          output = Array.isArray(listing)
+            ? { ok: true, backend: backendName, threads: listing }
+            : { ok: true, backend: backendName, threads: listing.threads, truncated: listing.truncated };
         } else if (name === 'messenger_thread_read') {
           const conversations = options.conversations;
           if (!conversations) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');

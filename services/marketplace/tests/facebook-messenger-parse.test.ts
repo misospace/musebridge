@@ -26,6 +26,7 @@ function inbox(overrides: Partial<ExtractedInboxPage> = {}): ExtractedInboxPage 
     signals: { ...authenticatedSignals },
     hasEmptyStateMarker: false,
     threads: [],
+    threadsScanSaturated: false,
     ...overrides
   };
 }
@@ -34,6 +35,7 @@ function thread(overrides: Partial<ExtractedThreadPage> = {}): ExtractedThreadPa
   return {
     url: 'https://www.facebook.com/messages/t/1684432532/',
     signals: { ...authenticatedSignals },
+    hasUnavailableMarker: false,
     messages: [],
     ...overrides
   };
@@ -51,6 +53,7 @@ function provenDiagnostics(overrides: Partial<NonNullable<ExtractedThreadPage['d
     hasMessageLog: true,
     hasArticleMessages: false,
     hasExplicitEmptyState: false,
+    messageLikeBlocks: 0,
     renderedRows,
     scannedRows: overrides.scannedRows ?? renderedRows,
     unattributedRows: 0,
@@ -77,6 +80,19 @@ function datedMessage(index: number, overrides: Record<string, unknown> = {}) {
   };
 }
 
+// The extraction report of a page that rendered no message-like structure at all: no log, no
+// collected row, and no row outside the scope. Verified absence requires this proof.
+function absentPageDiagnostics() {
+  return provenDiagnostics({
+    hasMessageLog: false,
+    rowScope: 'none',
+    renderedRows: 0,
+    scannedRows: 0,
+    declaredSetSize: 0,
+    attestedRows: 0
+  });
+}
+
 describe('Messenger page interpretation', () => {
   it('classifies inbox states with challenge precedence and distinguishes empty from unknown', () => {
     expect(classifyMessengerInboxPage(inbox({ threads: [{ threadId: 'abc' }] }))).toBe('threads');
@@ -94,7 +110,8 @@ describe('Messenger page interpretation', () => {
     ] });
     expect(interpretMessengerInboxPage({ page, baseUrl: 'https://www.facebook.com', limit: 1, inboxPath: '/marketplace/inbox/' })).toEqual({
       kind: 'threads',
-      threads: [{ thread_id: '1684432532', preview: 'Synthetic preview', item_id: '123456789' }]
+      threads: [{ thread_id: '1684432532', preview: 'Synthetic preview', item_id: '123456789' }],
+      truncated: true
     });
     expect(interpretMessengerInboxPage({ page: inbox({ hasEmptyStateMarker: true }), baseUrl: 'https://www.facebook.com', limit: 1, inboxPath: '/marketplace/inbox/' }))
       .toEqual({ kind: 'empty' });
@@ -106,15 +123,15 @@ describe('Messenger page interpretation', () => {
     const page = inbox({ threads: [{ threadId: 'dom-id', preview: 'DOM preview' }] });
     expect(interpretMessengerInboxPage({
       page, baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
-      graphql: { recognized: true, malformed: false, empty: false, incomplete: false, threadIds: ['graphql-id'] }
-    })).toEqual({ kind: 'threads', threads: [{ thread_id: 'graphql-id' }] });
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: false, truncated: false, threadIds: ['graphql-id'] }
+    })).toEqual({ kind: 'threads', threads: [{ thread_id: 'graphql-id' }], truncated: false });
     expect(interpretMessengerInboxPage({
       page, baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
-      graphql: { recognized: true, malformed: true, empty: false, incomplete: false, threadIds: [] }
+      graphql: { recognized: true, malformed: true, empty: false, incomplete: false, truncated: false, threadIds: [] }
     })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
     expect(interpretMessengerInboxPage({
       page, baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
-      graphql: { recognized: true, malformed: false, empty: false, incomplete: true, threadIds: ['partial-graphql-id'] }
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: true, truncated: false, threadIds: ['partial-graphql-id'] }
     })).toMatchObject({
       kind: 'error',
       code: 'UPSTREAM_ERROR',
@@ -122,26 +139,71 @@ describe('Messenger page interpretation', () => {
     });
     expect(interpretMessengerInboxPage({
       page, baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
-      graphql: { recognized: true, malformed: true, empty: false, incomplete: false, threadIds: ['graphql-id'] }
+      graphql: { recognized: true, malformed: true, empty: false, incomplete: false, truncated: false, threadIds: ['graphql-id'] }
     })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
     expect(interpretMessengerInboxPage({
       page: inbox(), baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
-      graphql: { recognized: true, malformed: false, empty: true, incomplete: false, threadIds: [] }
+      graphql: { recognized: true, malformed: false, empty: true, incomplete: false, truncated: false, threadIds: [] }
     })).toEqual({ kind: 'empty' });
     expect(interpretMessengerInboxPage({
       page: inbox(), baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
-      graphql: { recognized: true, malformed: false, empty: false, incomplete: false, threadIds: [] }
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: false, truncated: false, threadIds: [] }
     })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
     expect(interpretMessengerInboxPage({
       page, baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
-      graphql: { recognized: false, malformed: false, empty: false, incomplete: false, threadIds: [] }
-    })).toEqual({ kind: 'threads', threads: [{ thread_id: 'dom-id', preview: 'DOM preview' }] });
+      graphql: { recognized: false, malformed: false, empty: false, incomplete: false, truncated: false, threadIds: [] }
+    })).toEqual({ kind: 'threads', threads: [{ thread_id: 'dom-id', preview: 'DOM preview' }], truncated: false });
+  });
+
+  it('reports bounded listings as truncated and exhausted listings as complete (#151)', () => {
+    const twentyIds = Array.from({ length: 20 }, (_value, index) => `9${String(index).padStart(7, '0')}`);
+    // The collector proved a terminal chain but its cap left verified ids behind.
+    expect(interpretMessengerInboxPage({
+      page: inbox(), baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 20,
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: false, truncated: true, threadIds: twentyIds }
+    })).toMatchObject({ kind: 'threads', threads: twentyIds.map((thread_id) => ({ thread_id })), truncated: true });
+    // Even with no collector-side cut, verified ids beyond the caller's limit make a bounded window.
+    expect(interpretMessengerInboxPage({
+      page: inbox(), baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 2,
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: false, truncated: false, threadIds: twentyIds }
+    })).toMatchObject({ kind: 'threads', truncated: true });
+    // A verified chain that fit inside the limit is an exhausted listing.
+    expect(interpretMessengerInboxPage({
+      page: inbox(), baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 20,
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: false, truncated: false, threadIds: ['90000000', '90000001'] }
+    })).toMatchObject({ kind: 'threads', truncated: false });
+    // The DOM fallback says truncated when rows remain beyond the caller's limit...
+    expect(interpretMessengerInboxPage({
+      page: inbox({ threads: [{ threadId: '90000000' }, { threadId: '90000001' }] }),
+      baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1
+    })).toMatchObject({ kind: 'threads', truncated: true });
+    // ...and when the extractor's own collection cap was reached, because rows beyond it are unseen.
+    expect(interpretMessengerInboxPage({
+      page: inbox({ threads: Array.from({ length: MESSENGER_EXTRACT_LIMITS.maxThreads }, (_value, index) => ({ threadId: `9${String(index).padStart(7, '0')}` })) }),
+      baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: MESSENGER_EXTRACT_LIMITS.maxThreads
+    })).toMatchObject({ kind: 'threads', truncated: true });
+    // Below both bounds the DOM window is everything the recognized inbox rendered.
+    expect(interpretMessengerInboxPage({
+      page: inbox({ threads: [{ threadId: '90000000' }] }),
+      baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 20
+    })).toMatchObject({ kind: 'threads', truncated: false });
+    // The cap that bounds completeness is the configured extraction cap, not the contract maximum.
+    expect(interpretMessengerInboxPage({
+      page: inbox({ threads: [{ threadId: '90000000' }, { threadId: '90000001' }, { threadId: '90000002' }] }),
+      baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 20, maxExtractedThreads: 3
+    })).toMatchObject({ kind: 'threads', truncated: true });
+    // A page that left candidate anchors unread after the scan bound could carry a valid thread
+    // row beyond it, so the DOM fallback cannot present the rows it saw as an exhausted listing.
+    expect(interpretMessengerInboxPage({
+      page: inbox({ threads: [{ threadId: '90000000' }], threadsScanSaturated: true }),
+      baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 20
+    })).toMatchObject({ kind: 'threads', truncated: true });
   });
 
   it('fails closed on a paginated connection with has_next_page and an empty current slice', () => {
     expect(interpretMessengerInboxPage({
       page: inbox(), baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
-      graphql: { recognized: true, malformed: false, empty: false, incomplete: true, threadIds: [] }
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: true, truncated: false, threadIds: [] }
     })).toMatchObject({
       kind: 'error',
       code: 'UPSTREAM_ERROR',
@@ -151,7 +213,7 @@ describe('Messenger page interpretation', () => {
     expect(interpretMessengerInboxPage({
       page: inbox({ threads: [{ threadId: 'dom-id' }] }),
       baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
-      graphql: { recognized: true, malformed: false, empty: false, incomplete: true, threadIds: [] }
+      graphql: { recognized: true, malformed: false, empty: false, incomplete: true, truncated: false, threadIds: [] }
     })).toMatchObject({
       kind: 'error',
       code: 'UPSTREAM_ERROR',
@@ -163,6 +225,131 @@ describe('Messenger page interpretation', () => {
     expect(classifyMessengerThreadPage(thread({ messages: [{ sender: 'you', text: 'Hello' }] }))).toBe('messages');
     expect(classifyMessengerThreadPage(thread())).toBe('unknown');
     expect(classifyMessengerThreadPage(thread({ signals: { ...authenticatedSignals, hasLoginForm: true } }))).toBe('login');
+  });
+
+  it('classifies a standalone unavailable notice, but never over a conversation, a log, or a challenge', () => {
+    expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true, diagnostics: absentPageDiagnostics() }))).toBe('unavailable');
+    // A rendered conversation wins: notice wording inside live content never selects absence.
+    expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true, messages: [{ sender: 'you', text: 'Hello' }] }))).toBe('messages');
+    // A page that still renders a message log contradicts the notice, so it stays unrecognized.
+    expect(classifyMessengerThreadPage(thread({
+      hasUnavailableMarker: true,
+      diagnostics: provenDiagnostics({ renderedRows: 0, scannedRows: 0, declaredSetSize: 0, attestedRows: 0 })
+    }))).toBe('unknown');
+    // A no-log row whose sender label is unrecognized is message-like structure the notice
+    // cannot disprove: an ambiguous layout stays unknown, never a verified absence.
+    expect(classifyMessengerThreadPage(thread({
+      hasUnavailableMarker: true,
+      diagnostics: provenDiagnostics({
+        hasMessageLog: false,
+        rowScope: 'page_container',
+        renderedRows: 1,
+        scannedRows: 1,
+        declaredSetSize: 1,
+        attestedRows: 1,
+        unattributedRows: 1
+      })
+    }))).toBe('unknown');
+    // An ambiguous scope hides rendered rows the report never examined, so a notice cannot
+    // verify absence over them either.
+    expect(classifyMessengerThreadPage(thread({
+      hasUnavailableMarker: true,
+      diagnostics: provenDiagnostics({
+        hasMessageLog: false,
+        rowScope: 'ambiguous',
+        renderedRows: 0,
+        scannedRows: 0,
+        declaredSetSize: 0,
+        attestedRows: 0,
+        roleRowsOutsideScope: 2
+      })
+    }))).toBe('unknown');
+    // A no-log `role="article"` quoting the notice is message-like structure the row counters
+    // cannot see (#166): the notice cannot disprove it, so the layout stays ambiguous.
+    expect(classifyMessengerThreadPage(thread({
+      hasUnavailableMarker: true,
+      diagnostics: provenDiagnostics({
+        hasMessageLog: false,
+        rowScope: 'none',
+        renderedRows: 0,
+        scannedRows: 0,
+        declaredSetSize: 0,
+        attestedRows: 0,
+        messageLikeBlocks: 1
+      })
+    }))).toBe('unknown');
+    // Without an extraction report nothing proves the page rendered no row structure, so the
+    // notice alone is not a verified absence.
+    expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true }))).toBe('unknown');
+    // Without the authenticated marker the notice is not a verified absence for this session.
+    expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true, signals: { ...authenticatedSignals, hasAuthenticatedMarker: false } }))).toBe('unknown');
+    // Auth challenges keep their precedence over the notice.
+    expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true, signals: { ...authenticatedSignals, hasLoginForm: true } }))).toBe('login');
+    expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true, signals: { ...authenticatedSignals, hasCaptchaFrame: true } }))).toBe('captcha');
+    expect(classifyMessengerThreadPage(thread({ hasUnavailableMarker: true, signals: { ...authenticatedSignals, hasCheckpointForm: true } }))).toBe('checkpoint');
+  });
+
+  it('returns the unavailable outcome only for a verified absence at the requested thread', () => {
+    expect(interpretMessengerThreadPage({
+      page: thread({ hasUnavailableMarker: true, diagnostics: absentPageDiagnostics() }), baseUrl: 'https://www.facebook.com', threadId: '1684432532'
+    })).toEqual({ kind: 'unavailable' });
+    // The review's exact case: an authenticated requested-thread page whose only row is a
+    // no-log, unattributed `role="row"` quoting the notice. The notice cannot disprove the row
+    // the page rendered, so the layout is ambiguous and stays a typed upstream error.
+    expect(interpretMessengerThreadPage({
+      page: thread({
+        hasUnavailableMarker: true,
+        diagnostics: provenDiagnostics({
+          hasMessageLog: false,
+          rowScope: 'page_container',
+          renderedRows: 1,
+          scannedRows: 1,
+          declaredSetSize: 1,
+          attestedRows: 1,
+          unattributedRows: 1
+        })
+      }),
+      baseUrl: 'https://www.facebook.com', threadId: '1684432532'
+    })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger thread page layout was not recognized.' });
+    // #166's exact case: an authenticated requested-thread page whose only content is message-like
+    // structure the row counters cannot see — a no-log `article` quoting the notice. The notice
+    // cannot disprove the article the page rendered, so the layout is ambiguous and stays a typed
+    // upstream error, never a verified absence.
+    expect(interpretMessengerThreadPage({
+      page: thread({
+        hasUnavailableMarker: true,
+        diagnostics: provenDiagnostics({
+          hasMessageLog: false,
+          rowScope: 'none',
+          renderedRows: 0,
+          scannedRows: 0,
+          declaredSetSize: 0,
+          attestedRows: 0,
+          messageLikeBlocks: 1
+        })
+      }),
+      baseUrl: 'https://www.facebook.com', threadId: '1684432532'
+    })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger thread page layout was not recognized.' });
+    // A redirect stays the ambiguous typed error: content served at another address proves
+    // nothing about the requested thread, notice or not.
+    expect(interpretMessengerThreadPage({
+      page: thread({ url: 'https://www.facebook.com/messages/t/99999/', hasUnavailableMarker: true }),
+      baseUrl: 'https://www.facebook.com', threadId: '1684432532'
+    })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger thread page was not reached at the requested thread.' });
+    // A login page quoting the notice is still the login requirement.
+    expect(interpretMessengerThreadPage({
+      page: thread({ hasUnavailableMarker: true, signals: { ...authenticatedSignals, hasLoginForm: true } }),
+      baseUrl: 'https://www.facebook.com', threadId: '1684432532'
+    })).toMatchObject({ kind: 'error', code: 'LOGIN_REQUIRED' });
+    // A live conversation carrying notice wording in a message stays the proven window it was.
+    expect(interpretMessengerThreadPage({
+      page: thread({
+        hasUnavailableMarker: true,
+        messages: [datedMessage(0), datedMessage(1)],
+        diagnostics: provenDiagnostics({ renderedRows: 2, scannedRows: 2 })
+      }),
+      baseUrl: 'https://www.facebook.com', threadId: '1684432532'
+    })).toMatchObject({ kind: 'messages', coverage: { window: 'tail', scanned_rows: 2, truncated: false } });
   });
 
   it('maps message attribution and timestamps while omitting malformed rows', () => {
@@ -425,8 +612,8 @@ describe('Messenger page interpretation', () => {
   });
 
   it.each([
-    [{ hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false, rowScope: 'message_log' as const, roleRowsOutsideScope: 0, renderedRows: 1, scannedRows: 1, unattributedRows: 1, undatedMessages: 0, candidateTextBudgetExceeded: false, declaredSetSize: 1, setSizeConflict: false, attestedRows: 1, positionedRows: 0, distinctPositions: 0 }, 'The Facebook Messenger article message layout is unsupported; sender attribution was not verified.'],
-    [{ hasMessageLog: true, hasArticleMessages: false, hasExplicitEmptyState: true, rowScope: 'message_log' as const, roleRowsOutsideScope: 0, renderedRows: 0, scannedRows: 0, unattributedRows: 0, undatedMessages: 0, candidateTextBudgetExceeded: false, declaredSetSize: 0, setSizeConflict: false, attestedRows: 0, positionedRows: 0, distinctPositions: 0 }, 'The Facebook Messenger empty thread layout could not be verified.']
+    [{ hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false, messageLikeBlocks: 0, rowScope: 'message_log' as const, roleRowsOutsideScope: 0, renderedRows: 1, scannedRows: 1, unattributedRows: 1, undatedMessages: 0, candidateTextBudgetExceeded: false, declaredSetSize: 1, setSizeConflict: false, attestedRows: 1, positionedRows: 0, distinctPositions: 0 }, 'The Facebook Messenger article message layout is unsupported; sender attribution was not verified.'],
+    [{ hasMessageLog: true, hasArticleMessages: false, hasExplicitEmptyState: true, messageLikeBlocks: 0, rowScope: 'message_log' as const, roleRowsOutsideScope: 0, renderedRows: 0, scannedRows: 0, unattributedRows: 0, undatedMessages: 0, candidateTextBudgetExceeded: false, declaredSetSize: 0, setSizeConflict: false, attestedRows: 0, positionedRows: 0, distinctPositions: 0 }, 'The Facebook Messenger empty thread layout could not be verified.']
   ])('reports a static unsupported-layout diagnostic without returning content', (diagnostics, message) => {
     const outcome = interpretMessengerThreadPage({
       page: thread({ diagnostics }), baseUrl: 'https://www.facebook.com', threadId: '1684432532'

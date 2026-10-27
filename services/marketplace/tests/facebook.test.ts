@@ -22,7 +22,7 @@ if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
   throw new Error('Chromium is required for browser tests at ' + chromium.executablePath());
 }
 
-type SyntheticMode = 'authenticated' | 'logged-out-shell' | 'login' | 'login-page' | 'checkpoint' | 'captcha' | 'ambiguous' | 'slow';
+type SyntheticMode = 'authenticated' | 'logged-out-shell' | 'login' | 'login-page' | 'checkpoint' | 'captcha' | 'captcha-listing-text' | 'captcha-dormant' | 'ambiguous' | 'slow';
 
 type SyntheticServer = {
   server: Server;
@@ -114,6 +114,57 @@ describe('Messenger CAPTCHA visibility classification', () => {
     expect(Object.values(diagnostics).every((value) => typeof value === 'boolean' || safeEnums.has(String(value)))).toBe(true);
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain('URL_SENTINEL');
     expect(synthetic.requests).toEqual([]);
+  });
+});
+
+describe('Marketplace CAPTCHA evidence classification', () => {
+  it('does not assert a captcha from hidden-only markup on Marketplace', () => {
+    const snapshot = baseSnapshot({ hasCaptchaFrame: true,
+      captchaSignals: { ...noCaptchaSignals, idMatched: true } });
+    expect(classifyFacebookSession(snapshot, synthetic.origin, 'marketplace'))
+      .toEqual({ status: 'session_unknown', outcome: 'ambiguous' });
+  });
+
+  it('does not assert a captcha from a bare visible captcha word in listing or feed text', () => {
+    const snapshot = baseSnapshot({ mentionsCaptcha: true, captchaSignals: {
+      ...noCaptchaSignals, textMatched: true, textVisible: true,
+      captchaWordMatched: true, captchaWordVisible: true
+    } });
+    expect(classifyFacebookSession(snapshot, synthetic.origin, 'marketplace'))
+      .toEqual({ status: 'session_unknown', outcome: 'ambiguous' });
+  });
+
+  it('does not let visible listing text outrank hidden challenge markup', () => {
+    const snapshot = baseSnapshot({ hasCaptchaFrame: true, mentionsCaptcha: true, captchaSignals: {
+      ...noCaptchaSignals, idMatched: true, textMatched: true, textVisible: true,
+      captchaWordMatched: true, captchaWordVisible: true
+    } });
+    expect(classifyFacebookSession(snapshot, synthetic.origin, 'marketplace'))
+      .toEqual({ status: 'session_unknown', outcome: 'ambiguous' });
+  });
+
+  it.each(['iframe', 'id', 'testId'] as const)('keeps a visible %s challenge on Marketplace blocked', (signal) => {
+    const snapshot = baseSnapshot({ hasCaptchaFrame: true, captchaSignals: {
+      ...noCaptchaSignals, [`${signal}Matched`]: true, [`${signal}Visible`]: true
+    } });
+    expect(classifyFacebookSession(snapshot, synthetic.origin, 'marketplace'))
+      .toEqual({ status: 'session_needs_reauth', outcome: 'captcha', code: 'CAPTCHA_REQUIRED' });
+  });
+
+  it.each(['notRobot', 'verifyHuman'] as const)('keeps a visible %s challenge phrase on Marketplace blocked', (signal) => {
+    const snapshot = baseSnapshot({ mentionsCaptcha: true, captchaSignals: {
+      ...noCaptchaSignals, textMatched: true, textVisible: true,
+      [`${signal}Matched`]: true, [`${signal}Visible`]: true
+    } });
+    expect(classifyFacebookSession(snapshot, synthetic.origin, 'marketplace'))
+      .toEqual({ status: 'session_needs_reauth', outcome: 'captcha', code: 'CAPTCHA_REQUIRED' });
+  });
+
+  it('keeps the conservative verdict for legacy Marketplace snapshots without visibility observations', () => {
+    expect(classifyFacebookSession(baseSnapshot({ hasCaptchaFrame: true }), synthetic.origin, 'marketplace'))
+      .toEqual({ status: 'session_needs_reauth', outcome: 'captcha', code: 'CAPTCHA_REQUIRED' });
+    expect(classifyFacebookSession(baseSnapshot({ mentionsCaptcha: true }), synthetic.origin, 'marketplace'))
+      .toEqual({ status: 'session_needs_reauth', outcome: 'captcha', code: 'CAPTCHA_REQUIRED' });
   });
 });
 
@@ -340,6 +391,20 @@ describe.skipIf(!browserAvailable)('Facebook session probe', () => {
     expect(result).toEqual({ status: 'session_needs_reauth', outcome: 'captcha', code: 'CAPTCHA_REQUIRED' });
   });
 
+  it('does not report a captcha for feed text that merely mentions one', async () => {
+    synthetic.setMode('captcha-listing-text');
+    const result = await createProbe(createManager()).probeSession(new AbortController().signal);
+
+    expect(result).toEqual({ status: 'session_unknown', outcome: 'ambiguous' });
+  });
+
+  it('does not report a captcha for dormant challenge markup', async () => {
+    synthetic.setMode('captcha-dormant');
+    const result = await createProbe(createManager()).probeSession(new AbortController().signal);
+
+    expect(result).toEqual({ status: 'session_unknown', outcome: 'ambiguous' });
+  });
+
   it('keeps an ambiguous page unknown instead of treating it as usable', async () => {
     synthetic.setMode('ambiguous');
     const manager = createManager();
@@ -518,6 +583,14 @@ async function startSyntheticServer(): Promise<SyntheticServer> {
     }
     if (pathname === '/marketplace/' && mode === 'captcha') {
       response.end('<!doctype html><html><body><iframe src="/captcha/challenge"></iframe><p>Please complete the captcha to continue.</p></body></html>');
+      return;
+    }
+    if (pathname === '/marketplace/' && mode === 'captcha-listing-text') {
+      response.end('<!doctype html><html><body><header><div aria-label="Your account"></div></header><main><h1>Marketplace</h1><a href="/marketplace/category/1">Cars</a><article><h2>Captcha art print, framed</h2><p>Collectible print in great shape.</p></article></main></body></html>');
+      return;
+    }
+    if (pathname === '/marketplace/' && mode === 'captcha-dormant') {
+      response.end('<!doctype html><html><body><header><div aria-label="Your account"></div></header><main><h1>Marketplace</h1><a href="/marketplace/category/1">Cars</a><div id="captcha-widget" style="display:none">Widget</div></main></body></html>');
       return;
     }
     if (pathname === '/marketplace/' && mode === 'ambiguous') {

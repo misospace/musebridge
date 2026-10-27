@@ -39,6 +39,14 @@ export interface ExtractedInboxPage {
   signals: ExtractedMessengerSignals;
   hasEmptyStateMarker: boolean;
   threads: ExtractedInboxThread[];
+  /** True when the page rendered more candidate anchors than the thread scan examined, so the
+   *  scan stopped at its bound with anchors left unread. An unread anchor could carry a thread
+   *  row, so the extracted threads are not proven to be everything the page offers: the listing
+   *  built from this page must never present itself as a complete one (#151). When the
+   *  collection cap stopped the scan first, this stays `false` and the cap itself carries the
+   *  `truncated` claim — the consumer must compare against the same cap the scan ran under,
+   *  as `interpretMessengerInboxPage`'s `maxExtractedThreads` input does. */
+  threadsScanSaturated: boolean;
 }
 
 export interface ExtractedMessage {
@@ -51,6 +59,11 @@ export interface ExtractedMessage {
 export interface ExtractedThreadPage {
   url: string;
   signals: ExtractedMessengerSignals;
+  /** True when the page renders one of the provider's explicit deleted/unavailable/nonexistent
+   *  notices in place of a conversation. Like the listing page's unavailable notice, it is only
+   *  ever consulted when the page renders no message content: a rendered conversation always
+   *  wins over notice text elsewhere on the page. */
+  hasUnavailableMarker: boolean;
   /** Attributed message rows found in the page, in DOM order. This is the candidate set; the
    *  newest end of the window is selected from it by explicit timestamps, never by DOM order. */
   messages: ExtractedMessage[];
@@ -58,6 +71,14 @@ export interface ExtractedThreadPage {
     hasMessageLog: boolean;
     hasArticleMessages: boolean;
     hasExplicitEmptyState: boolean;
+    /** Message-like structure the row counters cannot see: `article` elements and
+     *  `role="article"` nodes anywhere on the page — the accessibility element of a single
+     *  message — and elements that are not recognized rows but whose `aria-label` carries the
+     *  message row's attribution grammar ("You said ...", "... said: ..."). A notice cannot
+     *  disprove a rendered block of this kind, so verified absence requires the count to be
+     *  zero: a page whose unavailable wording is wrapped in message-like structure is an
+     *  ambiguous layout, never a proven deletion. */
+    messageLikeBlocks: number;
     /** The scope the message rows were collected from: the page's message log (`message_log`),
      *  the one container that holds the rendered rows (`page_container`), no scope at all
      *  because the page rendered no rows at all — no log and no row (`none`), or no trusted scope
@@ -203,7 +224,11 @@ export function extractMessengerInboxPage(options: ExtractMessengerInboxOptions)
     if (itemIds.size === 1) thread.itemId = itemIds.values().next().value;
     threads.push(thread);
   }
-  return { url, signals, hasEmptyStateMarker, threads };
+  // The scan bound is evidence, not an implementation detail: when anchors were left unread, a
+  // thread row may exist beyond the bound, so the page records that its extracted threads are
+  // not proven to be the whole inbox.
+  const threadsScanSaturated = anchors.length > maxThreadsScan;
+  return { url, signals, hasEmptyStateMarker, threads, threadsScanSaturated };
 }
 
 export function extractMessengerThreadPage(options: ExtractMessengerThreadOptions): ExtractedThreadPage {
@@ -231,6 +256,11 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
     mentionsCheckpoint: /security check|confirm your identity|unusual activity/i.test(pageText),
     mentionsCaptcha: /captcha|i'?m not a robot|verify you are a human/i.test(pageText)
   };
+  // The provider's own statement that this conversation is gone: an explicit unavailable,
+  // deleted, or nonexistent notice. The phrase list stays deliberately narrow, and the decision
+  // side consults it only when no message content rendered (see classifyMessengerThreadPage), so
+  // seller text quoting one of these phrases inside a live conversation never selects the state.
+  const hasUnavailableMarker = /this (?:content|conversation|thread) (?:isn'?t|is not|is no longer|is currently not) available|(?:this )?content (?:is |was )?(?:currently |no longer )?unavailable|content (?:not found|was not found)|you (?:can'?t|cannot) access this (?:content|conversation|thread)|(?:this |the )?page (?:not found|wasn'?t found|doesn'?t exist|does not exist)/i.test(pageText);
   const messages: ExtractedMessage[] = [];
   const messageLog = document.querySelector('[role="log"]');
   // The accessibility set accounting is the only observable statement of how many items the
@@ -251,6 +281,7 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
     hasMessageLog: messageLog !== null,
     hasArticleMessages: document.querySelector('[role="log"] [role="article"]') !== null,
     hasExplicitEmptyState: /no messages yet|no conversations|nothing here yet/i.test((messageLog?.textContent ?? '').slice(0, 20_000)),
+    messageLikeBlocks: 0,
     rowScope: 'none' as 'message_log' | 'page_container' | 'none' | 'ambiguous',
     roleRowsOutsideScope: 0,
     renderedRows: 0,
@@ -333,6 +364,22 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
   // the rows a document-wide collection would have taken, and the count says how much of the
   // page the scope does not cover.
   diagnostics.roleRowsOutsideScope = document.querySelectorAll('[role="row"]').length - rows.length;
+  // Message-like structure the row counters cannot see: article/message-role nodes, and elements
+  // that are not recognized rows but carry the message row's attribution grammar in their own
+  // `aria-label` — everything but the role attribute of a message row. The scan reads only the
+  // attribute, like the authentication-marker scan above, so it is exhaustive over the document.
+  diagnostics.messageLikeBlocks = document.querySelectorAll('article, [role="article"]').length;
+  const labelledElements = document.querySelectorAll('[aria-label]');
+  for (let index = 0; index < labelledElements.length; index += 1) {
+    const element = labelledElements[index];
+    if (!element || element.getAttribute('role') === 'row') continue;
+    // An article is already counted by the selector above, so its own label counts it once.
+    if (element.matches('article, [role="article"]')) continue;
+    const label = element.getAttribute('aria-label') ?? '';
+    if (/^you (?:said|sent|replied)/i.test(label) || /^[^\r\n]{1,128} said:/i.test(label)) {
+      diagnostics.messageLikeBlocks += 1;
+    }
+  }
   // Every declared size for this scope must agree: the container's counter and the rows' own
   // declarations describe the same set, so two different values mean the scope holds more than
   // one set and nothing here can be certified.
@@ -471,7 +518,7 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
     if (attestsBySize || attestsByPosition) attestedRows += 1;
   }
   diagnostics.attestedRows = attestedRows;
-  return { url, signals, messages, diagnostics };
+  return { url, signals, hasUnavailableMarker, messages, diagnostics };
 }
 
 // The message composer is recognized strictly by its accessibility contract: a contenteditable

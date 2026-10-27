@@ -48,6 +48,9 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
       { threadId: '1684432533', preview: 'Sample Buyer: Thanks for the details.Listing details', itemId: '123456789' },
       { threadId: '1684432534', preview: 'Example Seller: Pickup works tomorrow.' }
     ]);
+    // Every candidate anchor fit inside the scan bound, so the extracted threads are not
+    // suspected of leaving rows unread.
+    expect(extracted.threadsScanSaturated).toBe(false);
     expect(classifyMessengerInboxPage(extracted)).toBe('threads');
   });
 
@@ -71,6 +74,23 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     expect(classifyMessengerInboxPage(changed)).toBe('unknown');
   });
 
+  it('records scan saturation when candidate anchors remain beyond the thread scan bound', async () => {
+    const saturatedHtml = '<!doctype html><html><body><main><a href="/logout/">Log out</a>' +
+      '<a href="/messages/t/1684432532/">Visible thread</a>' +
+      Array.from({ length: MESSENGER_EXTRACT_LIMITS.maxThreadsScan + 5 }, (_, index) => `<a href="/about/${index}/">Filler</a>`).join('') +
+      '<a href="/messages/t/1684432599/">Beyond the scan bound</a></main></body></html>';
+    await page.setContent(saturatedHtml, { waitUntil: 'domcontentloaded' });
+    const saturated = await page.evaluate(extractMessengerInboxPage, {
+      threadPath: MESSENGER_THREAD_PATH,
+      limits: MESSENGER_EXTRACT_LIMITS
+    });
+    // The scan examined only its bound of anchors, so the thread anchor rendered beyond it was
+    // never read: the page must record that its extracted threads are not proven to be the
+    // whole inbox.
+    expect(saturated.threadsScanSaturated).toBe(true);
+    expect(saturated.threads.map((thread) => thread.threadId)).toEqual(['1684432532']);
+  });
+
   it('extracts only attributed text messages, sender names, and bounded valid dates', async () => {
     const html = readFileSync(new URL('./fixtures/facebook-messenger/thread-normal.html', import.meta.url), 'utf8');
     await page.setContent(html, { waitUntil: 'domcontentloaded' });
@@ -85,6 +105,7 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
       hasMessageLog: false,
       hasArticleMessages: false,
       hasExplicitEmptyState: false,
+      messageLikeBlocks: 0,
       // The page has no message log, so the rows are collected from the one container that holds
       // the declared message set, and every rendered row is inside that scope.
       rowScope: 'page_container',
@@ -103,6 +124,126 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
       distinctPositions: 6
     });
     expect(classifyMessengerThreadPage(extracted)).toBe('messages');
+    // A live conversation carries no unavailable notice, and the marker stays out of its report.
+    expect(extracted.hasUnavailableMarker).toBe(false);
+  });
+
+  it('recognizes explicit unavailable and nonexistent notices on synthetic thread pages', async () => {
+    const unavailableHtml = readFileSync(new URL('./fixtures/facebook-messenger/thread-unavailable.html', import.meta.url), 'utf8');
+    await page.setContent(unavailableHtml, { waitUntil: 'domcontentloaded' });
+    const unavailable = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(unavailable.hasUnavailableMarker).toBe(true);
+    expect(unavailable.messages).toEqual([]);
+    expect(unavailable.diagnostics?.hasMessageLog).toBe(false);
+    // The recognized notice state renders no message-like structure at all, so the absence
+    // proof's article/labelled-block counter is zero on both fixture pages.
+    expect(unavailable.diagnostics?.messageLikeBlocks).toBe(0);
+    expect(classifyMessengerThreadPage(unavailable)).toBe('unavailable');
+
+    const nonexistentHtml = readFileSync(new URL('./fixtures/facebook-messenger/thread-nonexistent.html', import.meta.url), 'utf8');
+    await page.setContent(nonexistentHtml, { waitUntil: 'domcontentloaded' });
+    const nonexistent = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(nonexistent.hasUnavailableMarker).toBe(true);
+    expect(nonexistent.diagnostics?.messageLikeBlocks).toBe(0);
+    expect(classifyMessengerThreadPage(nonexistent)).toBe('unavailable');
+  });
+
+  it('never selects the unavailable state over a rendered conversation or a contradicting message log', async () => {
+    // Seller text quoting the notice inside a live conversation must not turn it into a NOT_FOUND.
+    const conversationHtml = '<!doctype html><html><body><main><a href="/logout/">Log out</a>' +
+      '<div role="row" aria-setsize="1" aria-label="Synthetic Seller said: re-sending the notice">' +
+      'This content isn\'t available right now, here is the direct link<time datetime="2026-09-14T10:30:00Z"></time></div>' +
+      '</main></body></html>';
+    await page.setContent(conversationHtml, { waitUntil: 'domcontentloaded' });
+    const conversation = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(conversation.hasUnavailableMarker).toBe(true);
+    expect(classifyMessengerThreadPage(conversation)).toBe('messages');
+
+    // A page that renders a message log beside the notice contradicts itself: unrecognized, never absence.
+    const contradictingHtml = '<!doctype html><html><body><main><a href="/logout/">Log out</a>' +
+      '<div role="log" aria-label="Synthetic messages">This content isn\'t available right now</div>' +
+      '</main></body></html>';
+    await page.setContent(contradictingHtml, { waitUntil: 'domcontentloaded' });
+    const contradicting = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(contradicting.hasUnavailableMarker).toBe(true);
+    expect(contradicting.diagnostics?.hasMessageLog).toBe(true);
+    expect(classifyMessengerThreadPage(contradicting)).toBe('unknown');
+
+    // A no-log row with an unrecognized sender label quoting the notice is still row structure
+    // the notice cannot disprove: the report shows a rendered, unattributed row, so the layout
+    // is ambiguous and never verifies absence.
+    const noLogRowHtml = '<!doctype html><html><body><main><a href="/logout/">Log out</a>' +
+      '<div role="row" aria-label="Some unrecognized label">This content isn\'t available right now</div>' +
+      '</main></body></html>';
+    await page.setContent(noLogRowHtml, { waitUntil: 'domcontentloaded' });
+    const noLogRow = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(noLogRow.hasUnavailableMarker).toBe(true);
+    expect(noLogRow.messages).toEqual([]);
+    expect(noLogRow.diagnostics?.hasMessageLog).toBe(false);
+    expect(noLogRow.diagnostics?.renderedRows).toBe(1);
+    expect(noLogRow.diagnostics?.unattributedRows).toBe(1);
+    expect(classifyMessengerThreadPage(noLogRow)).toBe('unknown');
+
+    // A no-log `article` quoting the notice is message-like structure the row counters cannot
+    // see (#166): an article is the accessibility element of a single message, so the notice
+    // cannot disprove the block the page rendered, and the layout stays ambiguous.
+    const articleNoticeHtml = '<!doctype html><html><body><main><a href="/logout/">Log out</a>' +
+      '<article>This content isn\'t available right now</article>' +
+      '</main></body></html>';
+    await page.setContent(articleNoticeHtml, { waitUntil: 'domcontentloaded' });
+    const articleNotice = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(articleNotice.hasUnavailableMarker).toBe(true);
+    expect(articleNotice.messages).toEqual([]);
+    expect(articleNotice.diagnostics?.hasMessageLog).toBe(false);
+    expect(articleNotice.diagnostics?.renderedRows).toBe(0);
+    expect(articleNotice.diagnostics?.roleRowsOutsideScope).toBe(0);
+    expect(articleNotice.diagnostics?.messageLikeBlocks).toBe(1);
+    expect(classifyMessengerThreadPage(articleNotice)).toBe('unknown');
+
+    // The same holds when the message-like block is declared by its role instead of its tag.
+    const articleRoleNoticeHtml = '<!doctype html><html><body><main><a href="/logout/">Log out</a>' +
+      '<div role="article">This content isn\'t available right now</div>' +
+      '</main></body></html>';
+    await page.setContent(articleRoleNoticeHtml, { waitUntil: 'domcontentloaded' });
+    const articleRoleNotice = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(articleRoleNotice.hasUnavailableMarker).toBe(true);
+    expect(articleRoleNotice.diagnostics?.messageLikeBlocks).toBe(1);
+    expect(classifyMessengerThreadPage(articleRoleNotice)).toBe('unknown');
+
+    // Repeated plain message-like blocks that carry the message row's attribution grammar in
+    // their `aria-label` — everything but the `role="row"` attribute — are message structure the
+    // notice cannot disprove either, so the layout never verifies absence. The notice wording is
+    // rendered text here, so the page really is a candidate for verified absence and the
+    // message-like counter is what keeps it out of that state.
+    const labelledBlocksHtml = '<!doctype html><html><body><main><a href="/logout/">Log out</a>' +
+      '<div aria-label="Synthetic Seller said: This content isn\'t available right now">This content isn\'t available right now</div>' +
+      '<div aria-label="Synthetic Buyer said: This conversation isn\'t available right now">This conversation isn\'t available right now</div>' +
+      '</main></body></html>';
+    await page.setContent(labelledBlocksHtml, { waitUntil: 'domcontentloaded' });
+    const labelledBlocks = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(labelledBlocks.hasUnavailableMarker).toBe(true);
+    expect(labelledBlocks.messages).toEqual([]);
+    expect(labelledBlocks.diagnostics?.hasMessageLog).toBe(false);
+    expect(labelledBlocks.diagnostics?.renderedRows).toBe(0);
+    expect(labelledBlocks.diagnostics?.roleRowsOutsideScope).toBe(0);
+    expect(labelledBlocks.diagnostics?.messageLikeBlocks).toBe(2);
+    expect(classifyMessengerThreadPage(labelledBlocks)).toBe('unknown');
+
+    // The same wording that exists only in an accessible name is not a notice the page renders,
+    // so it never reaches the absence proof: the page stays unrecognized and typed. Reading the
+    // notice out of attributes would widen the set of pages that can verify absence, so this
+    // boundary stays pinned.
+    const labelOnlyNoticeHtml = '<!doctype html><html><body><main><a href="/logout/">Log out</a>' +
+      '<div aria-label="This content isn\'t available right now">Read it here</div>' +
+      '</main></body></html>';
+    await page.setContent(labelOnlyNoticeHtml, { waitUntil: 'domcontentloaded' });
+    const labelOnlyNotice = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(labelOnlyNotice.hasUnavailableMarker).toBe(false);
+    // Nothing else blocks this page: the missing marker is the only reason it stays unknown, so
+    // a marker read out of attributes would turn it into a verified absence.
+    expect(labelOnlyNotice.diagnostics?.renderedRows).toBe(0);
+    expect(labelOnlyNotice.diagnostics?.messageLikeBlocks).toBe(0);
+    expect(classifyMessengerThreadPage(labelOnlyNotice)).toBe('unknown');
   });
 
   it('collects every attributed candidate and lets the window selection bound the messages', async () => {
@@ -247,6 +388,10 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     // part of the evidence the window is proven from.
     expect(extracted.diagnostics).toEqual({
       hasMessageLog: true, hasArticleMessages: true, hasExplicitEmptyState: false,
+      // The article layout's two `role="article"` nodes are message-like structure, so the
+      // report counts them; the absence predicate can never reach this page anyway, because it
+      // renders a message log.
+      messageLikeBlocks: 2,
       // The message log renders no rows, so it is still the scope of the conversation: the row
       // the page rendered outside it is counted, never collected.
       rowScope: 'message_log',
@@ -819,10 +964,12 @@ describe('selectMessengerThreadWindow (pure window orientation contract)', () =>
       positionedRows: 0,
       distinctPositions: 0,
       ...overrides,
-      // The scope the rows were collected from and the rows the page rendered outside it belong
-      // to the extraction report, so a hand-built report carries them too.
+      // The scope the rows were collected from, the rows the page rendered outside it, and the
+      // message-like blocks the row counters cannot see belong to the extraction report, so a
+      // hand-built report carries them too.
       rowScope: overrides.rowScope ?? 'message_log',
-      roleRowsOutsideScope: overrides.roleRowsOutsideScope ?? 0
+      roleRowsOutsideScope: overrides.roleRowsOutsideScope ?? 0,
+      messageLikeBlocks: overrides.messageLikeBlocks ?? 0
     };
   };
 

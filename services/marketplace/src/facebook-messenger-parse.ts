@@ -17,7 +17,7 @@ import { buildMessengerThreadUrl } from './facebook-messenger-url.js';
 import type { MessengerInboxGraphQLObservation } from './facebook-messenger-inbox-graphql.js';
 
 export type MessengerInboxPageKind = 'captcha' | 'checkpoint' | 'login' | 'threads' | 'empty' | 'unknown';
-export type MessengerThreadPageKind = 'captcha' | 'checkpoint' | 'login' | 'messages' | 'unknown';
+export type MessengerThreadPageKind = 'captcha' | 'checkpoint' | 'login' | 'messages' | 'unavailable' | 'unknown';
 
 function isExpectedPathname(url: string, baseUrl: string, expectedPathname: (pathname: string) => boolean): boolean {
   try {
@@ -38,7 +38,7 @@ export function classifyMessengerInboxPage(page: ExtractedInboxPage): MessengerI
 }
 
 export type MessengerInboxOutcome =
-  | { kind: 'threads'; threads: ConversationThread[] }
+  | { kind: 'threads'; threads: ConversationThread[]; truncated: boolean }
   | { kind: 'empty' }
   | { kind: 'error'; code: ProviderErrorCode; message: string };
 
@@ -48,6 +48,10 @@ export function interpretMessengerInboxPage(input: {
   inboxPath: string;
   limit: number;
   graphql?: MessengerInboxGraphQLObservation;
+  // The extraction collection cap this page was read under. The backend's configured cap may be
+  // smaller than the contract maximum, and the DOM-fallback completeness check must compare
+  // against the cap that actually bounded the extraction, not the constant.
+  maxExtractedThreads?: number;
 }): MessengerInboxOutcome {
   const kind = classifyMessengerInboxPage(input.page);
   if (kind === 'captcha') return { kind: 'error', code: 'CAPTCHA_REQUIRED', message: 'Facebook requires a captcha challenge.' };
@@ -77,7 +81,15 @@ export function interpretMessengerInboxPage(input: {
       const parsed = conversationThreadSchema.safeParse({ thread_id: threadId });
       if (parsed.success) threads.push(parsed.data);
     }
-    if (threads.length > 0) return { kind: 'threads', threads };
+    // A verified chain is only a complete listing when nothing was left behind: ids dropped by
+    // the collector cap or by the caller's limit keep the result honestly `truncated` (#151).
+    if (threads.length > 0) {
+      return {
+        kind: 'threads',
+        threads,
+        truncated: graphql.truncated === true || graphql.threadIds.length > input.limit
+      };
+    }
   }
   if (graphql?.empty) return { kind: 'empty' };
   if (graphql?.recognized) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox threads could not be parsed.' };
@@ -103,21 +115,48 @@ export function interpretMessengerInboxPage(input: {
     if (parsed.success) threads.push(parsed.data);
   }
   if (threads.length === 0) {
-    return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox threads could not be parsed.' };
+    return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger inbox threads could not be parsed.' };
   }
-  return { kind: 'threads', threads };
+  // The DOM fallback is a bounded recent listing, never a proven-complete one: rows dropped by
+  // the caller's limit, left beyond the extractor's own collection cap, or anchors the scan
+  // never reached mean more threads may exist, so the result stays honestly `truncated` (#151).
+  const collectionCap = input.maxExtractedThreads ?? MESSENGER_EXTRACT_LIMITS.maxThreads;
+  const truncated = input.page.threadsScanSaturated
+    || input.page.threads.length > input.limit
+    || input.page.threads.length >= collectionCap;
+  return { kind: 'threads', threads, truncated };
 }
 
 export function classifyMessengerThreadPage(page: ExtractedThreadPage): MessengerThreadPageKind {
   if (page.signals.hasCaptchaFrame || page.signals.mentionsCaptcha) return 'captcha';
   if (page.signals.hasCheckpointForm || page.signals.mentionsCheckpoint) return 'checkpoint';
   if (page.signals.hasPasswordInput || page.signals.hasLoginForm || page.signals.hasLoginPrompt) return 'login';
-  if (page.signals.hasMainLandmark && page.signals.hasAuthenticatedMarker && page.messages.length > 0) return 'messages';
+  if (page.signals.hasMainLandmark && page.signals.hasAuthenticatedMarker) {
+    if (page.messages.length > 0) return 'messages';
+    // A rendered conversation wins over the notice text above, so notice wording inside a live
+    // thread never selects this state. An authenticated page that renders an explicit
+    // unavailable notice stands alone as verified absence only when the extraction report proves
+    // the page rendered no message-like structure at all: no message log, no collected row
+    // (even an unattributed one the probe would not read), no row rendered outside the collected
+    // scope, no article or message-labelled block the row counters cannot see, and no missing
+    // report that could hide any of them. A page whose report is absent or contradicts the
+    // notice is an ambiguous layout and stays unknown.
+    const diagnostics = page.diagnostics;
+    if (
+      page.hasUnavailableMarker &&
+      diagnostics !== undefined &&
+      !diagnostics.hasMessageLog &&
+      diagnostics.renderedRows === 0 &&
+      diagnostics.roleRowsOutsideScope === 0 &&
+      diagnostics.messageLikeBlocks === 0
+    ) return 'unavailable';
+  }
   return 'unknown';
 }
 
 export type MessengerThreadOutcome =
   | { kind: 'messages'; messages: ConversationMessage[]; coverage: ConversationReadCoverage }
+  | { kind: 'unavailable' }
   | { kind: 'error'; code: ProviderErrorCode; message: string };
 
 // The window contract: the newest end of the window is established only by explicit timestamps
@@ -170,6 +209,11 @@ export function interpretMessengerThreadPage(input: {
   if (input.page.diagnostics?.hasExplicitEmptyState && input.page.messages.length === 0) {
     return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger empty thread layout could not be verified.' };
   }
+  // A verified absence: the provider rendered an explicit deleted/unavailable/nonexistent notice
+  // at the requested thread's own address, with no message content and no message log
+  // contradicting it. The caller reports this as not-found (#150); auth challenges won above, a
+  // redirect never reaches here, and every other unrecognized layout stays a typed error below.
+  if (kind === 'unavailable') return { kind: 'unavailable' };
   if (kind === 'unknown') return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger thread page layout was not recognized.' };
 
   // The newest end of the window is selected from the candidates by their explicit timestamps.
