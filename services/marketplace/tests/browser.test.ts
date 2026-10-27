@@ -771,7 +771,8 @@ function createManager(options: BrowserSessionOptions = {}): BrowserSessionManag
 }
 
 function makeManager(profileDir: string, options: BrowserSessionOptions = {}): BrowserSessionManager {
-  const manager = new BrowserManager({ ...options, profileDir, logger: { error: () => undefined } });
+  // An explicit logger wins: tests that assert on teardown diagnostics need to see them.
+  const manager = new BrowserManager({ ...options, profileDir, logger: options.logger ?? { error: () => undefined } });
   managers.push(manager);
   return manager;
 }
