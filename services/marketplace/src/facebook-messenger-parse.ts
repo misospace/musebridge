@@ -29,7 +29,15 @@ function isExpectedPathname(url: string, baseUrl: string, expectedPathname: (pat
 }
 
 export function classifyMessengerInboxPage(page: ExtractedInboxPage): MessengerInboxPageKind {
-  if (page.signals.hasCaptchaFrame || page.signals.mentionsCaptcha) return 'captcha';
+  // Captcha requires visible challenge evidence (#168), mirroring the session probe's gate on
+  // classifyFacebookSession (#148): a dormant widget or hidden copy is not proof of a challenge,
+  // but the page is not trusted content either — it classifies `unknown` (a typed upstream
+  // error, never a success kind) exactly where the probe reports `ambiguous`, and the login
+  // circuit breaker never counts it because `unknown` carries no auth-class code. A page with no
+  // visibility observation keeps the conservative captcha verdict, as the probe does.
+  if (page.signals.hasCaptchaFrame || page.signals.mentionsCaptcha) {
+    return page.signals.captchaVisible === false ? 'unknown' : 'captcha';
+  }
   if (page.signals.hasCheckpointForm || page.signals.mentionsCheckpoint) return 'checkpoint';
   if (page.signals.hasPasswordInput || page.signals.hasLoginForm || page.signals.hasLoginPrompt) return 'login';
   if (page.signals.hasMainLandmark && page.signals.hasAuthenticatedMarker && page.threads.length > 0) return 'threads';
@@ -57,6 +65,12 @@ export function interpretMessengerInboxPage(input: {
   if (kind === 'captcha') return { kind: 'error', code: 'CAPTCHA_REQUIRED', message: 'Facebook requires a captcha challenge.' };
   if (kind === 'checkpoint') return { kind: 'error', code: 'SESSION_INVALID', message: 'The Facebook session requires a security check.' };
   if (kind === 'login') return { kind: 'error', code: 'LOGIN_REQUIRED', message: 'Facebook login is required to read Marketplace conversations.' };
+  // Matched-but-dormant captcha evidence (#168): the page is the probe's `ambiguous`, so the
+  // read fails closed with a typed error even when the GraphQL collector verified a chain —
+  // a page still carrying captcha-shaped markup never becomes a success outcome.
+  if (kind === 'unknown' && (input.page.signals.hasCaptchaFrame || input.page.signals.mentionsCaptcha) && input.page.signals.captchaVisible === false) {
+    return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox page layout was not recognized.' };
+  }
   // Navigation follows redirects, so the page that rendered may not be the page that was asked
   // for. Content is only trusted from the configured inbox address; anything else is a typed
   // error rather than data attributed to the inbox.
@@ -128,7 +142,12 @@ export function interpretMessengerInboxPage(input: {
 }
 
 export function classifyMessengerThreadPage(page: ExtractedThreadPage): MessengerThreadPageKind {
-  if (page.signals.hasCaptchaFrame || page.signals.mentionsCaptcha) return 'captcha';
+  // Same visible-evidence gate as the inbox page (#168): dormant captcha markup or hidden copy is
+  // neither a challenge nor trusted content — `unknown`, never a message success, exactly where
+  // the probe reports `ambiguous`.
+  if (page.signals.hasCaptchaFrame || page.signals.mentionsCaptcha) {
+    return page.signals.captchaVisible === false ? 'unknown' : 'captcha';
+  }
   if (page.signals.hasCheckpointForm || page.signals.mentionsCheckpoint) return 'checkpoint';
   if (page.signals.hasPasswordInput || page.signals.hasLoginForm || page.signals.hasLoginPrompt) return 'login';
   if (page.signals.hasMainLandmark && page.signals.hasAuthenticatedMarker) {

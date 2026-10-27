@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Synthetic dormant captcha inbox</title></head>
+<body>
+  <main role="main">
+    <a href="/logout/">Log out</a>
+    <div style="display:none">
+      <iframe src="https://example.invalid/captcha/embed"></iframe>
+      <div id="captcha-widget"></div>
+    </div>
+    <!-- Zero-sized placeholder rendered in full view: no bounding box, no visible challenge. -->
+    <div data-testid="captcha-placeholder" style="width:0;height:0"></div>
+    <p>Synthetic inbox without threads.</p>
+  </main>
+</body>
+</html>

@@ -21,6 +21,15 @@ export interface ExtractedMessengerSignals {
   hasLoginForm: boolean;
   hasCheckpointForm: boolean;
   hasCaptchaFrame: boolean;
+  /**
+   * Whether matched captcha evidence includes something actually rendered: a visible captcha
+   * structural element or visible text matching the challenge grammar (like the probe's
+   * `hasVisibleCaptchaEvidence` for the Messenger surface, this surface counts visible
+   * "captcha" wording too — #85). A dormant widget or hidden copy keeps the page out of
+   * `captcha` (issue #168), mirroring the probe's visibility gate (#148). Absent only on
+   * hand-built legacy snapshots, where the conservative captcha verdict is kept.
+   */
+  captchaVisible?: boolean;
   hasMainLandmark: boolean;
   hasAuthenticatedMarker: boolean;
   hasLoginPrompt: boolean;
@@ -166,12 +175,89 @@ export function extractMessengerInboxPage(options: ExtractMessengerInboxOptions)
   const body = document.body ?? document.documentElement;
   const pageText = (body.textContent ?? '').slice(0, 20_000);
   const url = location.href.slice(0, 2048);
+  // Captcha visibility gate (#168): restates hasVisibleCaptchaEvidence + observeSignal from
+  // src/facebook.ts for the Messenger surface — visible structural markup or visible challenge
+  // wording (this surface counts visible "captcha" text too, #85). An in-page function cannot
+  // close over module scope, so the rule is deliberately duplicated here.
+  const isVisiblyRendered = (element: Element): boolean => {
+    // Playwright's visible check requires a non-empty bounding box, so a zero-sized captcha
+    // placeholder is never a rendered challenge, exactly as locator visible:true sees it.
+    const rect = element.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) return false;
+    for (let current: Element | null = element; current; current = current.parentElement) {
+      const style = getComputedStyle(current);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
+    }
+    return true;
+  };
+  const captchaEvidenceVisible = (): boolean => {
+    for (const element of document.querySelectorAll('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]')) {
+      if (isVisiblyRendered(element)) return true;
+    }
+    const challengePhrase = /captcha|i'?m\s+not\s+a\s+robot|verify\s+you\s+are\s+a\s+human/gi;
+    // A challenge phrase can be split across inline elements ("I'm not" + "a robot"), so the
+    // phrase is matched over the page's rendered text instead of one text node at a time. The
+    // stream is the document's text in document order with no separator inserted — exactly how the
+    // probe assembles an element's text — so a phrase matches only where it is rendered inside
+    // one element's text, never where unrelated text merely sits close together. Each part keeps
+    // the element that renders it, and a match is visible evidence only when every part it covers
+    // is rendered.
+    const parts: { start: number; end: number; element: Element }[] = [];
+    let stream = '';
+    const walker = document.createTreeWalker(document.body ?? document.documentElement, 4);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const parent = node.parentElement;
+      if (!parent) continue;
+      if (parent.matches('script, style, template, noscript, [hidden]')) {
+        // Content that is not rendered never renders a challenge, and it breaks the stream so the
+        // text around it cannot be read as one phrase.
+        stream += '\u0000';
+        continue;
+      }
+      const value = node.textContent ?? '';
+      if (!value) continue;
+      if (stream.length >= 20000) break;
+      parts.push({ start: stream.length, end: stream.length + value.length, element: parent });
+      stream += value;
+    }
+    let match = challengePhrase.exec(stream);
+    let cursor = 0;
+    while (match !== null) {
+      const start = match.index;
+      const end = start + match[0].length;
+      while (cursor < parts.length) {
+        const part = parts[cursor];
+        if (!part || part.end <= start) {
+          cursor += 1;
+          continue;
+        }
+        break;
+      }
+      let covered = 0;
+      let rendered = true;
+      for (let index = cursor; index < parts.length; index += 1) {
+        const part = parts[index];
+        if (!part || part.start >= end) break;
+        covered += 1;
+        if (!isVisiblyRendered(part.element)) {
+          rendered = false;
+          break;
+        }
+      }
+      if (covered > 0 && rendered) return true;
+      if (match[0].length === 0) challengePhrase.lastIndex += 1;
+      match = challengePhrase.exec(stream);
+    }
+    return false;
+  };
   // These checks mirror readFacebookPage in src/facebook.ts; an in-page function cannot close over it.
+  const captchaVisible = captchaEvidenceVisible();
   const signals: ExtractedMessengerSignals = {
     hasPasswordInput: document.querySelector('input[type="password"]') !== null,
     hasLoginForm: document.querySelector('form[action*="/login"], input[name="pass"]') !== null,
     hasCheckpointForm: document.querySelector('form[action*="checkpoint"], [data-testid*="checkpoint"]') !== null,
     hasCaptchaFrame: document.querySelector('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]') !== null,
+    captchaVisible,
     hasMainLandmark: document.querySelector('main, [role="main"]') !== null,
     hasAuthenticatedMarker: document.querySelector('a[href*="logout" i], [aria-label*="your account" i], [aria-label*="your profile" i]') !== null
       || Array.from(document.querySelectorAll('a')).some((anchor) => /^\s*log ?out\s*$/i.test(anchor.textContent ?? '')),
@@ -180,7 +266,10 @@ export function extractMessengerInboxPage(options: ExtractMessengerInboxOptions)
       return /^\s*log ?in( to facebook)?\s*$/i.test(label);
     }),
     mentionsCheckpoint: /security check|confirm your identity|unusual activity/i.test(pageText),
-    mentionsCaptcha: /captcha|i'?m not a robot|verify you are a human/i.test(pageText)
+    // The challenge phrases allow flexible inner whitespace so a phrase rendered across a line
+    // break ("Verify\n you are a human") is the raw signal that lets the #168 visibility gate
+    // decide it, exactly as the probe's getByText normalization sees it.
+    mentionsCaptcha: /captcha|i'?m\s+not\s+a\s+robot|verify\s+you\s+are\s+a\s+human/i.test(pageText)
   };
   const hasEmptyStateMarker = /no conversations|no messages yet|nothing here yet/i.test(pageText);
   const threadIds = new Set<string>();
@@ -240,12 +329,87 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
   const body = document.body ?? document.documentElement;
   const pageText = (body.textContent ?? '').slice(0, 20_000);
   const url = location.href.slice(0, 2048);
+  // Captcha visibility gate (#168): same restatement as in extractMessengerInboxPage — the probe's
+  // Messenger-surface rule counts visible structural markup or visible challenge wording, and an
+  // in-page function cannot close over module scope.
+  const isVisiblyRendered = (element: Element): boolean => {
+    // Playwright's visible check requires a non-empty bounding box, so a zero-sized captcha
+    // placeholder is never a rendered challenge, exactly as locator visible:true sees it.
+    const rect = element.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) return false;
+    for (let current: Element | null = element; current; current = current.parentElement) {
+      const style = getComputedStyle(current);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
+    }
+    return true;
+  };
+  const captchaEvidenceVisible = (): boolean => {
+    for (const element of document.querySelectorAll('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]')) {
+      if (isVisiblyRendered(element)) return true;
+    }
+    const challengePhrase = /captcha|i'?m\s+not\s+a\s+robot|verify\s+you\s+are\s+a\s+human/gi;
+    // A challenge phrase can be split across inline elements ("I'm not" + "a robot"), so the
+    // phrase is matched over the page's rendered text instead of one text node at a time. The
+    // stream is the document's text in document order with no separator inserted — exactly how the
+    // probe assembles an element's text — so a phrase matches only where it is rendered inside
+    // one element's text, never where unrelated text merely sits close together. Each part keeps
+    // the element that renders it, and a match is visible evidence only when every part it covers
+    // is rendered.
+    const parts: { start: number; end: number; element: Element }[] = [];
+    let stream = '';
+    const walker = document.createTreeWalker(document.body ?? document.documentElement, 4);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const parent = node.parentElement;
+      if (!parent) continue;
+      if (parent.matches('script, style, template, noscript, [hidden]')) {
+        // Content that is not rendered never renders a challenge, and it breaks the stream so the
+        // text around it cannot be read as one phrase.
+        stream += '\u0000';
+        continue;
+      }
+      const value = node.textContent ?? '';
+      if (!value) continue;
+      if (stream.length >= 20000) break;
+      parts.push({ start: stream.length, end: stream.length + value.length, element: parent });
+      stream += value;
+    }
+    let match = challengePhrase.exec(stream);
+    let cursor = 0;
+    while (match !== null) {
+      const start = match.index;
+      const end = start + match[0].length;
+      while (cursor < parts.length) {
+        const part = parts[cursor];
+        if (!part || part.end <= start) {
+          cursor += 1;
+          continue;
+        }
+        break;
+      }
+      let covered = 0;
+      let rendered = true;
+      for (let index = cursor; index < parts.length; index += 1) {
+        const part = parts[index];
+        if (!part || part.start >= end) break;
+        covered += 1;
+        if (!isVisiblyRendered(part.element)) {
+          rendered = false;
+          break;
+        }
+      }
+      if (covered > 0 && rendered) return true;
+      if (match[0].length === 0) challengePhrase.lastIndex += 1;
+      match = challengePhrase.exec(stream);
+    }
+    return false;
+  };
   // Keep the probe selectors in lockstep with readFacebookPage in src/facebook.ts.
   const signals: ExtractedMessengerSignals = {
     hasPasswordInput: document.querySelector('input[type="password"]') !== null,
     hasLoginForm: document.querySelector('form[action*="/login"], input[name="pass"]') !== null,
     hasCheckpointForm: document.querySelector('form[action*="checkpoint"], [data-testid*="checkpoint"]') !== null,
     hasCaptchaFrame: document.querySelector('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]') !== null,
+    captchaVisible: captchaEvidenceVisible(),
     hasMainLandmark: document.querySelector('main, [role="main"]') !== null,
     hasAuthenticatedMarker: document.querySelector('a[href*="logout" i], [aria-label*="your account" i], [aria-label*="your profile" i]') !== null
       || Array.from(document.querySelectorAll('a')).some((anchor) => /^\s*log ?out\s*$/i.test(anchor.textContent ?? '')),
@@ -254,7 +418,10 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
       return /^\s*log ?in( to facebook)?\s*$/i.test(label);
     }),
     mentionsCheckpoint: /security check|confirm your identity|unusual activity/i.test(pageText),
-    mentionsCaptcha: /captcha|i'?m not a robot|verify you are a human/i.test(pageText)
+    // The challenge phrases allow flexible inner whitespace so a phrase rendered across a line
+    // break ("Verify\n you are a human") is the raw signal that lets the #168 visibility gate
+    // decide it, exactly as the probe's getByText normalization sees it.
+    mentionsCaptcha: /captcha|i'?m\s+not\s+a\s+robot|verify\s+you\s+are\s+a\s+human/i.test(pageText)
   };
   // The provider's own statement that this conversation is gone: an explicit unavailable,
   // deleted, or nonexistent notice. The phrase list stays deliberately narrow, and the decision

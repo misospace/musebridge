@@ -590,7 +590,7 @@ async function startSyntheticServer(): Promise<SyntheticServer> {
       return;
     }
     if (pathname === '/marketplace/' && mode === 'captcha-dormant') {
-      response.end('<!doctype html><html><body><header><div aria-label="Your account"></div></header><main><h1>Marketplace</h1><a href="/marketplace/category/1">Cars</a><div id="captcha-widget" style="display:none">Widget</div></main></body></html>');
+      response.end('<!doctype html><html><body><header><div aria-label="Your account"></div></header><main><h1>Marketplace</h1><a href="/marketplace/category/1">Cars</a><div id="captcha-widget" style="display:none">Widget</div><div data-testid="captcha-placeholder" style="width:0;height:0"></div></main></body></html>');
       return;
     }
     if (pathname === '/marketplace/' && mode === 'ambiguous') {

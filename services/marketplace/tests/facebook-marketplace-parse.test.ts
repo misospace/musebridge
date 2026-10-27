@@ -134,6 +134,17 @@ describe('Marketplace page classification', () => {
     expect(classifyMarketplacePage(page([], { hasNoResultsNotice: true }))).toBe('no_results');
     expect(classifyMarketplacePage(page([]))).toBe('unknown');
   });
+
+  it('downgrades matched-but-dormant captcha evidence to unknown (#168)', () => {
+    // A dormant widget beside real cards never becomes `captcha` and never a success kind either.
+    expect(classifyMarketplacePage(page([card()], { hasCaptcha: true, captchaVisible: false }))).toBe('unknown');
+    expect(classifyMarketplacePage(page([], { hasCaptcha: true, captchaVisible: false }))).toBe('unknown');
+    expect(interpretMarketplacePage(input([card()], { page: page([card()], { hasCaptcha: true, captchaVisible: false }) })))
+      .toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+    // Visible evidence, and unobserved visibility (conservative legacy), stay `captcha`.
+    expect(classifyMarketplacePage(page([card()], { hasCaptcha: true, captchaVisible: true }))).toBe('captcha');
+    expect(classifyMarketplacePage(page([card()], { hasCaptcha: true }))).toBe('captcha');
+  });
 });
 
 describe('Marketplace result parsing', () => {
@@ -307,6 +318,16 @@ describe('Marketplace item parsing', () => {
     const pageValue = itemPage({ signals: { ...cleanSignals, hasLoginForm: true, hasCheckpoint: true } });
     expect(classifyMarketplaceItem(pageValue)).toBe('checkpoint');
     expect(interpretMarketplaceItem(itemInput(pageValue))).toMatchObject({ kind: 'error', code: 'SESSION_INVALID' });
+  });
+
+  it('downgrades matched-but-dormant captcha evidence to unknown (#168)', () => {
+    // A dormant captcha widget on a listing page is neither a challenge nor a trusted listing.
+    const dormant = itemPage({ signals: { ...cleanSignals, hasCaptcha: true, captchaVisible: false } });
+    expect(classifyMarketplaceItem(dormant)).toBe('unknown');
+    expect(interpretMarketplaceItem(itemInput(dormant))).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+    // Visible evidence, and unobserved visibility (conservative legacy), stay `captcha`.
+    expect(classifyMarketplaceItem(itemPage({ signals: { ...cleanSignals, hasCaptcha: true, captchaVisible: true } }))).toBe('captcha');
+    expect(classifyMarketplaceItem(itemPage({ signals: { ...cleanSignals, hasCaptcha: true } }))).toBe('captcha');
   });
 
   it('classifies a title-less page with an unavailable notice as unavailable', () => {

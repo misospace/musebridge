@@ -23,6 +23,16 @@ export interface ExtractedMarketplaceSignals {
   hasLoginForm: boolean;
   hasCheckpoint: boolean;
   hasCaptcha: boolean;
+  /**
+   * Whether matched captcha evidence includes something actually rendered: a visible captcha
+   * structural element or a visible challenge phrase ("I'm not a robot", "verify you are a
+   * human"). On Marketplace the bare word "captcha" in page text is arbitrary feed content, so
+   * it never counts as visible evidence. A dormant widget or passing text keeps the page out of
+   * `captcha` (issue #168), mirroring the probe's visibility gate in `classifyFacebookSession`
+   * (#148). Absent only on hand-built legacy snapshots, where the conservative captcha verdict is
+   * kept.
+   */
+  captchaVisible?: boolean;
   hasRateLimitNotice: boolean;
   hasNoResultsNotice: boolean;
 }
@@ -228,13 +238,107 @@ export function extractMarketplacePage(options: ExtractMarketplaceOptions): Extr
   const unboundedBodyText = pageTextParts.join(' ').replace(/\s+/g, ' ');
   const bodyText = unboundedBodyText.slice(0, 20000);
   const unfilteredBodyText = unfilteredTextParts.join(' ').replace(/\s+/g, ' ');
-  // Auth/interstitial selectors intentionally mirror the session probe in src/facebook.ts; duplication is deliberate because an in-page function cannot reference module scope.
+  // Captcha visibility gate (#168): a dormant widget or passing feed text is not a challenge.
+  // Mirrors hasVisibleCaptchaEvidence + observeSignal in src/facebook.ts; an in-page function
+  // cannot close over module scope, so the rule is deliberately restated here. Structural captcha
+  // markup counts only when rendered, and on Marketplace only the challenge phrases (never the
+  // bare word "captcha") can be visible text evidence.
+  const isVisiblyRendered = (element: Element): boolean => {
+    // Playwright's visible check requires a non-empty bounding box, so a zero-sized captcha
+    // placeholder is never a rendered challenge, exactly as locator visible:true sees it.
+    const rect = element.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) return false;
+    for (let current: Element | null = element; current; current = current.parentElement) {
+      const style = getComputedStyle(current);
+      // opacity:0 stands in for Playwright's visible-but-transparent gap in src/facebook.ts:
+      // a fully transparent element is never a rendered challenge.
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
+    }
+    return true;
+  };
+  const captchaEvidenceVisible = (): boolean => {
+    for (const element of document.querySelectorAll('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]')) {
+      if (isVisiblyRendered(element)) return true;
+    }
+    const challengePhrase = /i'?m\s+not\s+a\s+robot|verify\s+you\s+are\s+a\s+human/gi;
+    // A challenge phrase can be split across inline elements ("I'm not" + "a robot"), so the
+    // phrase is matched over the page's rendered text instead of one text node at a time. The
+    // stream is the document's text in document order with no separator inserted — exactly how the
+    // probe assembles an element's text — so a phrase matches only where it is rendered inside
+    // one element's text, never where unrelated text merely sits close together. Each part keeps
+    // the element that renders it, and a match is visible evidence only when every part it covers
+    // is rendered.
+    const parts: { start: number; end: number; element: Element }[] = [];
+    let stream = '';
+    const walker = document.createTreeWalker(document.body ?? document.documentElement, 4);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const parent = node.parentElement;
+      if (!parent) continue;
+      if (parent.matches('script, style, template, noscript, [hidden]')) {
+        // Content that is not rendered never renders a challenge, and it breaks the stream so the
+        // text around it cannot be read as one phrase.
+        stream += '\u0000';
+        continue;
+      }
+      // Card prose is seller copy and stays out of page-level interstitial signals in both
+      // directions, exactly as it does for the hasCaptcha text scan above.
+      let ancestor: Element | null = parent;
+      let insideCard = false;
+      while (ancestor) {
+        if (cardRootSet.has(ancestor)) {
+          insideCard = true;
+          break;
+        }
+        ancestor = ancestor.parentElement;
+      }
+      if (insideCard) {
+        stream += '\u0000';
+        continue;
+      }
+      const value = node.textContent ?? '';
+      if (!value) continue;
+      if (stream.length >= 20000) break;
+      parts.push({ start: stream.length, end: stream.length + value.length, element: parent });
+      stream += value;
+    }
+    let match = challengePhrase.exec(stream);
+    let cursor = 0;
+    while (match !== null) {
+      const start = match.index;
+      const end = start + match[0].length;
+      while (cursor < parts.length) {
+        const part = parts[cursor];
+        if (!part || part.end <= start) {
+          cursor += 1;
+          continue;
+        }
+        break;
+      }
+      let covered = 0;
+      let rendered = true;
+      for (let index = cursor; index < parts.length; index += 1) {
+        const part = parts[index];
+        if (!part || part.start >= end) break;
+        covered += 1;
+        if (!isVisiblyRendered(part.element)) {
+          rendered = false;
+          break;
+        }
+      }
+      if (covered > 0 && rendered) return true;
+      if (match[0].length === 0) challengePhrase.lastIndex += 1;
+      match = challengePhrase.exec(stream);
+    }
+    return false;
+  };
+  const captchaVisible = captchaEvidenceVisible();
   const signals: ExtractedMarketplaceSignals = {
     hasLoginForm: document.querySelector('input[type="password"], form[action*="/login"], input[name="pass"]') !== null,
     hasCheckpoint: document.querySelector('form[action*="checkpoint"], [data-testid*="checkpoint"]') !== null
       || /security check|confirm your identity|unusual activity/i.test(bodyText),
     hasCaptcha: document.querySelector('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]') !== null
       || /captcha|i'?m not a robot|verify you are a human/i.test(bodyText),
+    captchaVisible,
     // Rate-limit detection is deliberately conservative and text-based.
     hasRateLimitNotice: /you'?re temporarily blocked|temporarily blocked|we limit how often|too many requests|try again later|please try again later/i.test(bodyText),
     hasNoResultsNotice: /no results|no listings|no items found|nothing found|try a different search|no marketplace listings/i.test(bodyText)
@@ -382,12 +486,86 @@ export function extractMarketplaceItem(options: ExtractMarketplaceItemOptions): 
     : (stateElement?.textContent ?? '');
   const stateText = stateRawText.split('\n').map((line) => line.replace(/\s+/g, ' ').trim()).filter(Boolean).join('\n').slice(0, maxTextLength) || null;
   // Keep these selectors aligned with the search/session probe; this page function cannot use module scope.
+  // The captcha visibility gate (#168) is restated here exactly as in extractMarketplacePage:
+  // dormant markup or arbitrary page text mentioning captcha is never a visible challenge.
+  const isVisiblyRendered = (element: Element): boolean => {
+    // Playwright's visible check requires a non-empty bounding box, so a zero-sized captcha
+    // placeholder is never a rendered challenge, exactly as locator visible:true sees it.
+    const rect = element.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) return false;
+    for (let current: Element | null = element; current; current = current.parentElement) {
+      const style = getComputedStyle(current);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
+    }
+    return true;
+  };
+  const captchaEvidenceVisible = (): boolean => {
+    for (const element of document.querySelectorAll('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]')) {
+      if (isVisiblyRendered(element)) return true;
+    }
+    const challengePhrase = /i'?m\s+not\s+a\s+robot|verify\s+you\s+are\s+a\s+human/gi;
+    // A challenge phrase can be split across inline elements ("I'm not" + "a robot"), so the
+    // phrase is matched over the page's rendered text instead of one text node at a time. The
+    // stream is the document's text in document order with no separator inserted — exactly how the
+    // probe assembles an element's text — so a phrase matches only where it is rendered inside
+    // one element's text, never where unrelated text merely sits close together. Each part keeps
+    // the element that renders it, and a match is visible evidence only when every part it covers
+    // is rendered.
+    const parts: { start: number; end: number; element: Element }[] = [];
+    let stream = '';
+    const walker = document.createTreeWalker(document.body ?? document.documentElement, 4);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const parent = node.parentElement;
+      if (!parent) continue;
+      if (parent.matches('script, style, template, noscript, [hidden]')) {
+        // Content that is not rendered never renders a challenge, and it breaks the stream so the
+        // text around it cannot be read as one phrase.
+        stream += '\u0000';
+        continue;
+      }
+      const value = node.textContent ?? '';
+      if (!value) continue;
+      if (stream.length >= 20000) break;
+      parts.push({ start: stream.length, end: stream.length + value.length, element: parent });
+      stream += value;
+    }
+    let match = challengePhrase.exec(stream);
+    let cursor = 0;
+    while (match !== null) {
+      const start = match.index;
+      const end = start + match[0].length;
+      while (cursor < parts.length) {
+        const part = parts[cursor];
+        if (!part || part.end <= start) {
+          cursor += 1;
+          continue;
+        }
+        break;
+      }
+      let covered = 0;
+      let rendered = true;
+      for (let index = cursor; index < parts.length; index += 1) {
+        const part = parts[index];
+        if (!part || part.start >= end) break;
+        covered += 1;
+        if (!isVisiblyRendered(part.element)) {
+          rendered = false;
+          break;
+        }
+      }
+      if (covered > 0 && rendered) return true;
+      if (match[0].length === 0) challengePhrase.lastIndex += 1;
+      match = challengePhrase.exec(stream);
+    }
+    return false;
+  };
   const signals: ExtractedMarketplaceSignals = {
     hasLoginForm: document.querySelector('input[type="password"], form[action*="/login"], input[name="pass"]') !== null,
     hasCheckpoint: document.querySelector('form[action*="checkpoint"], [data-testid*="checkpoint"]') !== null
       || /security check|confirm your identity|unusual activity/i.test(bodyText),
     hasCaptcha: document.querySelector('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]') !== null
       || /captcha|i'?m not a robot|verify you are a human/i.test(bodyText),
+    captchaVisible: captchaEvidenceVisible(),
     // Rate-limit detection is deliberately conservative and text-based.
     hasRateLimitNotice: /you'?re temporarily blocked|temporarily blocked|we limit how often|too many requests|try again later|please try again later/i.test(bodyText),
     hasNoResultsNotice: /no results|no listings|no items found|nothing found|try a different search|no marketplace listings/i.test(bodyText)

@@ -70,8 +70,87 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
       threadPath: MESSENGER_THREAD_PATH,
       limits: MESSENGER_EXTRACT_LIMITS
     });
-    expect(changed.hasEmptyStateMarker).toBe(false);
-    expect(classifyMessengerInboxPage(changed)).toBe('unknown');
+  expect(changed.hasEmptyStateMarker).toBe(false);
+  expect(classifyMessengerInboxPage(changed)).toBe('unknown');
+});
+it('gates inbox captcha on visible evidence and downgrades a dormant widget (#168)', async () => {
+  const dormantHtml = readFileSync(new URL('./fixtures/facebook-messenger/inbox-captcha-dormant.html', import.meta.url), 'utf8');
+  await page.setContent(dormantHtml, { waitUntil: 'domcontentloaded' });
+  const dormant = await page.evaluate(extractMessengerInboxPage, {
+    threadPath: MESSENGER_THREAD_PATH,
+    limits: MESSENGER_EXTRACT_LIMITS
+  });
+  // The hidden widget still matches the raw structural signal, but it is not visible evidence.
+  expect(dormant.signals.hasCaptchaFrame).toBe(true);
+  expect(dormant.signals.captchaVisible).toBe(false);
+  expect(classifyMessengerInboxPage(dormant)).toBe('unknown');
+  const visibleHtml = readFileSync(new URL('./fixtures/facebook-messenger/inbox-captcha-visible.html', import.meta.url), 'utf8');
+  await page.setContent(visibleHtml, { waitUntil: 'domcontentloaded' });
+  const visible = await page.evaluate(extractMessengerInboxPage, {
+    threadPath: MESSENGER_THREAD_PATH,
+    limits: MESSENGER_EXTRACT_LIMITS
+  });
+  // A rendered captcha widget keeps the challenge classification.
+  expect(visible.signals.hasCaptchaFrame).toBe(true);
+  expect(visible.signals.captchaVisible).toBe(true);
+  expect(classifyMessengerInboxPage(visible)).toBe('captcha');
+});
+
+  it('recognizes a challenge phrase split across inline elements on inbox and thread pages (#168)', async () => {
+    const inboxHtml = readFileSync(new URL('./fixtures/facebook-messenger/inbox-captcha-phrase-split.html', import.meta.url), 'utf8');
+    await page.setContent(inboxHtml, { waitUntil: 'domcontentloaded' });
+    const inbox = await page.evaluate(extractMessengerInboxPage, {
+      threadPath: MESSENGER_THREAD_PATH,
+      limits: MESSENGER_EXTRACT_LIMITS
+    });
+    // The phrase is matched over the rendered text, so a challenge split across inline elements is
+    // visible evidence: the page is a challenge, not a downgraded unknown.
+    expect(inbox.signals.mentionsCaptcha).toBe(true);
+    expect(inbox.signals.captchaVisible).toBe(true);
+    expect(classifyMessengerInboxPage(inbox)).toBe('captcha');
+
+    const threadHtml = readFileSync(new URL('./fixtures/facebook-messenger/thread-captcha-phrase-split.html', import.meta.url), 'utf8');
+    await page.setContent(threadHtml, { waitUntil: 'domcontentloaded' });
+    const thread = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(thread.signals.mentionsCaptcha).toBe(true);
+    expect(thread.signals.captchaVisible).toBe(true);
+    expect(classifyMessengerThreadPage(thread)).toBe('captcha');
+  });
+
+  it('keeps the raw captcha signal aligned with the visibility gate when a phrase breaks across lines (#168)', async () => {
+    const inboxHtml = readFileSync(new URL('./fixtures/facebook-messenger/inbox-captcha-phrase-newline.html', import.meta.url), 'utf8');
+    await page.setContent(inboxHtml, { waitUntil: 'domcontentloaded' });
+    const inbox = await page.evaluate(extractMessengerInboxPage, {
+      threadPath: MESSENGER_THREAD_PATH,
+      limits: MESSENGER_EXTRACT_LIMITS
+    });
+    // The rendered-text gate reads the line-broken phrase as a visible challenge, so the raw
+    // signal must match it too; otherwise the classifier never enters the captcha branch and a
+    // genuinely rendered challenge stays unknown instead of hard-opening the breaker.
+    expect(inbox.signals.mentionsCaptcha).toBe(true);
+    expect(inbox.signals.captchaVisible).toBe(true);
+    expect(classifyMessengerInboxPage(inbox)).toBe('captcha');
+
+    const threadHtml = readFileSync(new URL('./fixtures/facebook-messenger/thread-captcha-phrase-newline.html', import.meta.url), 'utf8');
+    await page.setContent(threadHtml, { waitUntil: 'domcontentloaded' });
+    const thread = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+    expect(thread.signals.mentionsCaptcha).toBe(true);
+    expect(thread.signals.captchaVisible).toBe(true);
+    expect(classifyMessengerThreadPage(thread)).toBe('captcha');
+  });
+
+  it('keeps a split challenge phrase dormant while it is not rendered (#168)', async () => {
+    const dormantHtml = readFileSync(new URL('./fixtures/facebook-messenger/inbox-captcha-phrase-split-dormant.html', import.meta.url), 'utf8');
+    await page.setContent(dormantHtml, { waitUntil: 'domcontentloaded' });
+    const dormant = await page.evaluate(extractMessengerInboxPage, {
+      threadPath: MESSENGER_THREAD_PATH,
+      limits: MESSENGER_EXTRACT_LIMITS
+    });
+    // The words still match the raw signal, but a transparent challenge is not a visible one, so
+    // the page stays the probe's `ambiguous` instead of asserting a challenge.
+    expect(dormant.signals.mentionsCaptcha).toBe(true);
+    expect(dormant.signals.captchaVisible).toBe(false);
+    expect(classifyMessengerInboxPage(dormant)).toBe('unknown');
   });
 
   it('records scan saturation when candidate anchors remain beyond the thread scan bound', async () => {
@@ -143,10 +222,20 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     const nonexistentHtml = readFileSync(new URL('./fixtures/facebook-messenger/thread-nonexistent.html', import.meta.url), 'utf8');
     await page.setContent(nonexistentHtml, { waitUntil: 'domcontentloaded' });
     const nonexistent = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
-    expect(nonexistent.hasUnavailableMarker).toBe(true);
-    expect(nonexistent.diagnostics?.messageLikeBlocks).toBe(0);
-    expect(classifyMessengerThreadPage(nonexistent)).toBe('unavailable');
-  });
+  expect(nonexistent.hasUnavailableMarker).toBe(true);
+  expect(nonexistent.diagnostics?.messageLikeBlocks).toBe(0);
+  expect(classifyMessengerThreadPage(nonexistent)).toBe('unavailable');
+});
+it('downgrades a dormant captcha widget on a thread page instead of asserting a challenge (#168)', async () => {
+  const html = readFileSync(new URL('./fixtures/facebook-messenger/thread-captcha-dormant.html', import.meta.url), 'utf8');
+  await page.setContent(html, { waitUntil: 'domcontentloaded' });
+  const extracted = await page.evaluate(extractMessengerThreadPage, { limits: MESSENGER_EXTRACT_LIMITS });
+  // The hidden widget still matches the raw structural signal, but it is not visible evidence:
+  // the page is neither a challenge nor a trusted thread layout.
+  expect(extracted.signals.hasCaptchaFrame).toBe(true);
+  expect(extracted.signals.captchaVisible).toBe(false);
+  expect(classifyMessengerThreadPage(extracted)).toBe('unknown');
+});
 
   it('never selects the unavailable state over a rendered conversation or a contradicting message log', async () => {
     // Seller text quoting the notice inside a live conversation must not turn it into a NOT_FOUND.

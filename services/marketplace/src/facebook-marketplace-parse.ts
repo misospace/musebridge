@@ -15,7 +15,14 @@ export type MarketplacePageKind = typeof MARKETPLACE_PAGE_KINDS[number];
 
 export function classifyMarketplacePage(page: ExtractedMarketplacePage): MarketplacePageKind {
   // Precedence is deliberate: captcha, checkpoint, login, rate limit, cards, no-results notice, then unknown.
-  if (page.signals.hasCaptcha) return 'captcha';
+  // Captcha requires visible challenge evidence (#168), mirroring the session probe's gate on
+  // classifyFacebookSession (#148): a dormant captcha widget or arbitrary feed text mentioning
+  // "captcha" is not proof of a challenge, so the page is never `usable`, but it is also not
+  // trusted content — it classifies `unknown` (a typed upstream error) rather than falling
+  // through to the success kinds below, exactly where the probe reports `ambiguous`. The breaker
+  // never counts the downgraded page, because `unknown` carries no auth-class code. A snapshot
+  // with no visibility observation keeps the conservative captcha verdict, as the probe does.
+  if (page.signals.hasCaptcha) return page.signals.captchaVisible === false ? 'unknown' : 'captcha';
   if (page.signals.hasCheckpoint) return 'checkpoint';
   if (page.signals.hasLoginForm) return 'login';
   if (page.signals.hasRateLimitNotice) return 'rate_limited';
@@ -416,7 +423,10 @@ export const MARKETPLACE_ITEM_KINDS = ['item', 'unavailable', 'login', 'checkpoi
 export type MarketplaceItemKind = typeof MARKETPLACE_ITEM_KINDS[number];
 
 export function classifyMarketplaceItem(page: ExtractedMarketplaceItem): MarketplaceItemKind {
-  if (page.signals.hasCaptcha) return 'captcha';
+  // Same visible-evidence gate as classifyMarketplacePage (#168): dormant captcha markup or
+  // page text quoting "captcha" is not a challenge and not a trusted listing — the page is
+  // `unknown`, never `usable`, exactly where the probe reports `ambiguous`.
+  if (page.signals.hasCaptcha) return page.signals.captchaVisible === false ? 'unknown' : 'captcha';
   if (page.signals.hasCheckpoint) return 'checkpoint';
   if (page.signals.hasLoginForm) return 'login';
   if (page.signals.hasRateLimitNotice) return 'rate_limited';
