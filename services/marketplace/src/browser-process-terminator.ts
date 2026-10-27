@@ -5,7 +5,7 @@ export interface OwnedBrowserTerminationResult {
   platformSupported: boolean;
   /** Processes this call signalled and confirmed exited within a grace window. */
   terminatedPids: number[];
-  /** Owned processes that were still alive when the sequence ended, or could never be signalled (EPERM). */
+  /** Owned processes still alive when the sequence ended. A process that could never be signalled (EPERM) counts only while it is still alive at the final accounting; one that exited on its own is not a survivor. */
   failedPids: number[];
 }
 
@@ -28,8 +28,9 @@ const DEFAULT_POLL_INTERVAL_MS = 25;
  * resolved against the scanning process's own working directory, never the target's, so it
  * never matches. Ownership is re-proved immediately before every single signal, so a pid that
  * exited and was recycled in the meantime is never signalled. The whole sequence is bounded:
- * SIGTERM, a grace window, then SIGKILL, then a final grace window; anything still alive, or
- * that could not be signalled at all, is reported, never waited on.
+ * SIGTERM, a grace window, then SIGKILL, then a final grace window; anything still alive at the
+ * end is reported, never waited on. A process that could never be signalled (EPERM) counts as
+ * failed only while it is still alive; one that exited on its own is not.
  */
 export async function terminateOwnedBrowserProcesses(
   profileDir: string,
