@@ -48,6 +48,9 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
       { threadId: '1684432533', preview: 'Sample Buyer: Thanks for the details.Listing details', itemId: '123456789' },
       { threadId: '1684432534', preview: 'Example Seller: Pickup works tomorrow.' }
     ]);
+    // Every candidate anchor fit inside the scan bound, so the extracted threads are not
+    // suspected of leaving rows unread.
+    expect(extracted.threadsScanSaturated).toBe(false);
     expect(classifyMessengerInboxPage(extracted)).toBe('threads');
   });
 
@@ -69,6 +72,23 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     });
     expect(changed.hasEmptyStateMarker).toBe(false);
     expect(classifyMessengerInboxPage(changed)).toBe('unknown');
+  });
+
+  it('records scan saturation when candidate anchors remain beyond the thread scan bound', async () => {
+    const saturatedHtml = '<!doctype html><html><body><main><a href="/logout/">Log out</a>' +
+      '<a href="/messages/t/1684432532/">Visible thread</a>' +
+      Array.from({ length: MESSENGER_EXTRACT_LIMITS.maxThreadsScan + 5 }, (_, index) => `<a href="/about/${index}/">Filler</a>`).join('') +
+      '<a href="/messages/t/1684432599/">Beyond the scan bound</a></main></body></html>';
+    await page.setContent(saturatedHtml, { waitUntil: 'domcontentloaded' });
+    const saturated = await page.evaluate(extractMessengerInboxPage, {
+      threadPath: MESSENGER_THREAD_PATH,
+      limits: MESSENGER_EXTRACT_LIMITS
+    });
+    // The scan examined only its bound of anchors, so the thread anchor rendered beyond it was
+    // never read: the page must record that its extracted threads are not proven to be the
+    // whole inbox.
+    expect(saturated.threadsScanSaturated).toBe(true);
+    expect(saturated.threads.map((thread) => thread.threadId)).toEqual(['1684432532']);
   });
 
   it('extracts only attributed text messages, sender names, and bounded valid dates', async () => {

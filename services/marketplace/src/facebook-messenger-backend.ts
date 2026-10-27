@@ -1,6 +1,6 @@
 import { errors } from 'playwright';
 import { BrowserSessionManager, BrowserUnavailableError, sleepUntilAbort } from './browser.js';
-import type { ConversationBackend } from './backend.js';
+import type { ConversationBackend, ConversationThreadListPage } from './backend.js';
 import { ProviderError as MarketplaceProviderError, SurfaceDisabledError, renderDeliveredMessage } from './backend.js';
 import { validateTimeout, waitForRequestBudget } from './timeout.js';
 import {
@@ -132,13 +132,13 @@ export class FacebookMessengerBackend implements ConversationBackend {
   async listThreads(
     input: ReturnType<typeof threadsListInputSchema.parse>,
     signal: AbortSignal
-  ): Promise<ConversationThread[]> {
+  ): Promise<ConversationThreadListPage> {
     if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
     await this.ensureUsableSession(signal);
 
     const inboxUrl = assertFacebookOrigin(buildMessengerInboxUrl({ baseUrl: this.probe.baseUrl, inboxPath: this.inboxPath }));
     let extracted: ExtractedInboxPage;
-    let graphql: MessengerInboxGraphQLObservation = { recognized: false, malformed: false, empty: false, incomplete: false, threadIds: [] };
+    let graphql: MessengerInboxGraphQLObservation = { recognized: false, malformed: false, empty: false, incomplete: false, truncated: false, threadIds: [] };
     try {
       const result = await this.browser.runExclusive(signal, async (page, taskSignal) => {
         const collector = new MessengerInboxGraphQLCollector({ maxThreads: this.maxThreads });
@@ -236,14 +236,19 @@ export class FacebookMessengerBackend implements ConversationBackend {
       baseUrl: this.probe.baseUrl,
       inboxPath: this.inboxPath,
       limit: input.limit,
+      // The completeness check must know the cap this backend actually extracted under, not the
+      // contract maximum (#151).
+      maxExtractedThreads: this.maxThreads,
       graphql
     });
     if (outcome.kind === 'error') {
       this.recordObservedAuthFailure(outcome.code);
       throw new MarketplaceProviderError(outcome.code, outcome.message);
     }
-    if (outcome.kind === 'empty') return [];
-    return [...outcome.threads];
+    if (outcome.kind === 'empty') return { threads: [], truncated: false };
+    // The interpretation already weighed the verified cursor chain and the caller's limit, so
+    // its coverage flag is the honest bound for this listing (#151).
+    return { threads: [...outcome.threads], truncated: outcome.truncated };
   }
 
   async readThread(

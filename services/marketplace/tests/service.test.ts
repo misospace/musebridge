@@ -373,8 +373,12 @@ describe('fixture MCP service', () => {
     expect(threads.backend).toBe('fixture');
     expect(threads.threads.map((thread: { thread_id: string }) => thread.thread_id)).toEqual(['t-synth-0001', 't-synth-0002', 't-synth-0003']);
     expect(threads.threads[0].item_id).toBe('fixture-bike-001');
-    expect(structured(await client.callTool({ name: 'messenger_threads_list', arguments: { limit: 1 } })).threads)
-      .toHaveLength(1);
+    expect(threads.truncated).toBe(false);
+    // The fixture holds three conversations, so a limit of one is a bounded window that says so (#151).
+    expect(structured(await client.callTool({ name: 'messenger_threads_list', arguments: { limit: 1 } }))).toMatchObject({
+      threads: [{ thread_id: 't-synth-0001' }],
+      truncated: true
+    });
     const thread = structured(await client.callTool({ name: 'messenger_thread_read', arguments: { thread_id: 't-synth-0001' } }));
     expect(thread.messages).toHaveLength(3);
     expect(thread.messages[0].sender).toBe('other');
@@ -578,7 +582,11 @@ describe('fixture MCP service', () => {
     expect(listed).not.toContain('messenger_send');
     // The reads the backend does serve keep working through the composition root.
     expect(structured(await client.callTool({ name: 'messenger_thread_read', arguments: { thread_id: 't-synth-0001' } })).ok).toBe(true);
-    expect(structured(await client.callTool({ name: 'messenger_threads_list', arguments: { limit: 1 } })).threads).toHaveLength(1);
+    const legacyList = structured(await client.callTool({ name: 'messenger_threads_list', arguments: { limit: 1 } }));
+    expect(legacyList.threads).toHaveLength(1);
+    // A host-injected backend that returns a bare array predates #151: its listing omits
+    // `truncated` rather than inheriting a completeness claim the backend never made.
+    expect(legacyList).not.toHaveProperty('truncated');
     // The unserved tools are unknown tools, never an INTERNAL_ERROR envelope.
     await expect(client.callTool({ name: 'messenger_prepare', arguments: { thread_id: 't-synth-0001', message: 'Is the bike still available?' } }))
       .rejects.toMatchObject({ code: ErrorCode.InvalidParams, message: expect.stringContaining('Unknown tool: messenger_prepare') });
@@ -821,7 +829,7 @@ describe('fixture MCP service', () => {
     expect(result).toEqual({
       ok: true,
       service_version: packageVersion,
-      schema_version: '1.7.0',
+      schema_version: '1.8.0',
       backend: 'status-only',
       facebook_session: { status: 'session_unknown' },
       // Neither surface is served by a Facebook browser scope here: the marketplace backend is
@@ -953,7 +961,7 @@ describe('fixture MCP service', () => {
     expect(customSearch.backend).toBe('consumer-test');
     expect(customFetch.backend).toBe('consumer-test');
     expect(customStatus.backend).toBe('consumer-test');
-    expect(customStatus.schema_version).toBe('1.7.0');
+    expect(customStatus.schema_version).toBe('1.8.0');
     expect(customStatus.capabilities).toEqual([
       { surface: 'marketplace', provider: 'facebook', backend: 'consumer-test' },
       { surface: 'shopping', provider: 'ebay', backend: 'fixture' },
@@ -1189,7 +1197,7 @@ describe('fixture MCP service', () => {
     ]);
     expect(structured(first).listings[0].id).toBe('fixture-chair-002');
     expect(structured(second).listing.state).toBe('sold');
-    expect(structured(third).schema_version).toBe('1.7.0');
+    expect(structured(third).schema_version).toBe('1.8.0');
   });
 
   it('bounds shutdown with both an in-flight backend call and a partial request body', async () => {

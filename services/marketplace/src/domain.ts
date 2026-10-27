@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { PROVIDER_SESSION_ASSESSMENTS } from './browser.js';
 
-export const SCHEMA_VERSION = '1.7.0';
+export const SCHEMA_VERSION = '1.8.0';
 export const SERVICE_VERSION = '0.1.0'; // x-release-please-version
 export const MAX_QUERY_LENGTH = 256;
 export const MAX_LOCATION_LENGTH = 256;
@@ -529,7 +529,15 @@ export const threadsListOutputSchema = z.union([
   z.object({
     ok: z.literal(true),
     backend: backendNameSchema,
-    threads: z.array(conversationThreadSchema).max(20)
+    threads: z.array(conversationThreadSchema).max(20),
+    // Listing coverage (#151). `truncated: true` means more threads exist (or may exist) beyond
+    // this bounded recent window — the verified cursor chain carried more ids than the cap or
+    // limit returned, or the bounded DOM fallback could not see past its own collection bound.
+    // `truncated: false` means the provider set behind this listing was proven exhausted.
+    // The field is absent only for a host-injected backend that predates this additive field and
+    // still returns a bare thread array; an absent field is unknown coverage, never a claim that
+    // the listing is complete.
+    truncated: z.boolean().optional()
   }).strict(),
   runtimeFailureSchema
 ]);

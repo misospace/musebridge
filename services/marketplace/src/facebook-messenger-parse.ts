@@ -38,7 +38,7 @@ export function classifyMessengerInboxPage(page: ExtractedInboxPage): MessengerI
 }
 
 export type MessengerInboxOutcome =
-  | { kind: 'threads'; threads: ConversationThread[] }
+  | { kind: 'threads'; threads: ConversationThread[]; truncated: boolean }
   | { kind: 'empty' }
   | { kind: 'error'; code: ProviderErrorCode; message: string };
 
@@ -48,6 +48,10 @@ export function interpretMessengerInboxPage(input: {
   inboxPath: string;
   limit: number;
   graphql?: MessengerInboxGraphQLObservation;
+  // The extraction collection cap this page was read under. The backend's configured cap may be
+  // smaller than the contract maximum, and the DOM-fallback completeness check must compare
+  // against the cap that actually bounded the extraction, not the constant.
+  maxExtractedThreads?: number;
 }): MessengerInboxOutcome {
   const kind = classifyMessengerInboxPage(input.page);
   if (kind === 'captcha') return { kind: 'error', code: 'CAPTCHA_REQUIRED', message: 'Facebook requires a captcha challenge.' };
@@ -77,7 +81,15 @@ export function interpretMessengerInboxPage(input: {
       const parsed = conversationThreadSchema.safeParse({ thread_id: threadId });
       if (parsed.success) threads.push(parsed.data);
     }
-    if (threads.length > 0) return { kind: 'threads', threads };
+    // A verified chain is only a complete listing when nothing was left behind: ids dropped by
+    // the collector cap or by the caller's limit keep the result honestly `truncated` (#151).
+    if (threads.length > 0) {
+      return {
+        kind: 'threads',
+        threads,
+        truncated: graphql.truncated === true || graphql.threadIds.length > input.limit
+      };
+    }
   }
   if (graphql?.empty) return { kind: 'empty' };
   if (graphql?.recognized) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox threads could not be parsed.' };
@@ -103,9 +115,16 @@ export function interpretMessengerInboxPage(input: {
     if (parsed.success) threads.push(parsed.data);
   }
   if (threads.length === 0) {
-    return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox threads could not be parsed.' };
+    return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger inbox threads could not be parsed.' };
   }
-  return { kind: 'threads', threads };
+  // The DOM fallback is a bounded recent listing, never a proven-complete one: rows dropped by
+  // the caller's limit, left beyond the extractor's own collection cap, or anchors the scan
+  // never reached mean more threads may exist, so the result stays honestly `truncated` (#151).
+  const collectionCap = input.maxExtractedThreads ?? MESSENGER_EXTRACT_LIMITS.maxThreads;
+  const truncated = input.page.threadsScanSaturated
+    || input.page.threads.length > input.limit
+    || input.page.threads.length >= collectionCap;
+  return { kind: 'threads', threads, truncated };
 }
 
 export function classifyMessengerThreadPage(page: ExtractedThreadPage): MessengerThreadPageKind {
