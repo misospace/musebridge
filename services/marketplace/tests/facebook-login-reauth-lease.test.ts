@@ -10,6 +10,7 @@ import { FacebookLoginCircuitBreaker } from '../src/facebook-login-circuit-break
 import { FacebookMarketplaceBackend } from '../src/facebook-marketplace-backend.js';
 import { FacebookMessengerBackend } from '../src/facebook-messenger-backend.js';
 import { ReauthManager } from '../src/reauth.js';
+import { createReauthAdminServer, type ReauthAdminServer } from '../src/admin.js';
 import { searchInputSchema, threadsListInputSchema } from '../src/domain.js';
 import { FakeReauthRuntime } from './helpers/fake-reauth-runtime.js';
 
@@ -203,8 +204,10 @@ const browsers: FakeChromiumBrowser[] = [];
 const reauths: ReauthManager[] = [];
 const runtimes: FakeReauthRuntime[] = [];
 const profileDirs: string[] = [];
+const admins: ReauthAdminServer[] = [];
 
 afterEach(async () => {
+  await Promise.allSettled(admins.splice(0).map((admin) => admin.close()));
   await Promise.allSettled(reauths.splice(0).map((reauth) => reauth.stop()));
   await Promise.allSettled(browsers.splice(0).map((browser) => browser.close()));
   await Promise.allSettled(runtimes.splice(0).map((runtime) => runtime.stopAll()));
@@ -223,10 +226,11 @@ function createBrowser(label: string): FakeChromiumBrowser {
 }
 
 /**
- * Starts a real lease over the real browser manager. The Chromium launch is stubbed with a fake
- * context so the lease lifecycle -- start, active, stop -- runs for real without a browser.
+ * Builds a real lease over the real browser manager without starting it, so a test can drive the
+ * lease through the admin HTTP routes instead of calling the manager directly. The Chromium launch
+ * is stubbed with a fake context so the lifecycle runs for real without a browser.
  */
-async function startLease(browser: FakeChromiumBrowser): Promise<{ reauth: ReauthManager; leasePage: FakePage }> {
+function createLease(browser: FakeChromiumBrowser): { reauth: ReauthManager; leasePage: FakePage } {
   const runtime = new FakeReauthRuntime();
   runtimes.push(runtime);
   const leasePage = new FakePage();
@@ -239,8 +243,45 @@ async function startLease(browser: FakeChromiumBrowser): Promise<{ reauth: Reaut
     logger: { error: () => undefined, info: () => undefined }
   });
   reauths.push(reauth);
-  await reauth.start();
   return { reauth, leasePage };
+}
+
+/** Starts a real lease over the real browser manager (see createLease). */
+async function startLease(browser: FakeChromiumBrowser): Promise<{ reauth: ReauthManager; leasePage: FakePage }> {
+  const lease = createLease(browser);
+  await lease.reauth.start();
+  return lease;
+}
+
+/** Serves the lease's admin routes on a loopback port and returns the base URL. */
+async function listenAdmin(reauth: ReauthManager): Promise<string> {
+  const admin = createReauthAdminServer({ reauth, logger: { error: () => undefined } });
+  admins.push(admin);
+  await new Promise<void>((resolve, reject) => {
+    admin.server.once('error', reject);
+    admin.server.listen(admin.port, admin.host, resolve);
+  });
+  const address = admin.address();
+  if (!address || typeof address === 'string') throw new Error('Expected admin TCP address');
+  return `http://127.0.0.1:${address.port}`;
+}
+
+/**
+ * Bounds a promise so a queued-not-preempted lease start fails with a named message rather than
+ * the suite timeout, which is the regression this file exists to catch.
+ */
+async function withDeadline<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /** Timing overrides so a credential attempt that is (wrongly) permitted concludes quickly. */
@@ -550,6 +591,109 @@ describe('manual re-auth lease blocks credential submission', () => {
     expectNoCredentials(failure);
     // The takeover is not a challenge: the attempt is abandoned, so the account spends no retry
     // budget on it and the gate stays closed.
+    expect(scope.gate.snapshot()).toEqual({ status: 'closed' });
+  });
+});
+
+describe('manual re-auth lease preempts the automated login wait over the admin routes', () => {
+  // The finding's exact scenario, at the admin HTTP boundary: while a credential attempt holds the
+  // serialized profile in its approval wait, `POST /reauth/start` must be answered with a bounded
+  // typed lease status instead of queueing behind that wait. The lease reaches `active` while the
+  // credential attempt is still held on the login form, so the response is proof of preemption,
+  // and the preempted request concludes with the same typed, bounded result an attempt that starts
+  // during a lease already gets, with no credential submitted and no retry budget spent.
+  const adminLeaseShape = {
+    phase: 'active',
+    lease: {
+      id: expect.any(String),
+      startedAt: expect.any(String),
+      expiresAt: expect.any(String),
+      consoleUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/vnc\.html/),
+      viewerPort: expect.any(Number)
+    },
+    expiresAt: expect.any(String),
+    remainingMs: expect.any(Number)
+  } as const;
+
+  it('answers an admin lease start while a Marketplace credential attempt holds the profile', async () => {
+    const scope = setupMarketplace();
+    const held = new LoginNavigationGate();
+    scope.browser.headlessContext.loginNavigationGate = held;
+
+    const request = scope.backend.search(search, signal());
+    await awaitHeldNavigation(held, request);
+
+    const lease = createLease(scope.browser);
+    const baseUrl = await listenAdmin(lease.reauth);
+
+    const startResponse = await withDeadline(
+      fetch(`${baseUrl}/reauth/start`, { method: 'POST' }),
+      5_000,
+      'the admin lease start queued behind the credential approval wait'
+    );
+    expect(startResponse.status).toBe(200);
+    const startBody = await startResponse.json();
+    expect(startBody).toMatchObject(adminLeaseShape);
+    // The lease is the owner now even though the credential attempt is still held on the login
+    // form: the start answer did not wait for the wait it preempted.
+    expect(scope.browser.getInfo().interactive).toBe(true);
+
+    const statusResponse = await fetch(`${baseUrl}/reauth/status`);
+    expect(statusResponse.status).toBe(200);
+    expect(await statusResponse.json()).toMatchObject({ phase: 'active' });
+
+    held.releaseHeld();
+
+    const failure = await failureOf(request);
+    expect(failure).toMatchObject({
+      name: 'ProviderError',
+      code: 'UPSTREAM_ERROR',
+      message: 'The browser session is not available.'
+    });
+    expect(credentialActivity(scope.browser)).toEqual({ typed: [], submitted: false });
+    expectNoCredentials([startBody, failure]);
+    expect(scope.gate.snapshot()).toEqual({ status: 'closed' });
+
+    const stopResponse = await withDeadline(
+      fetch(`${baseUrl}/reauth/stop`, { method: 'POST' }),
+      5_000,
+      'the admin lease stop did not conclude'
+    );
+    expect(stopResponse.status).toBe(200);
+    expect(await stopResponse.json()).toMatchObject({ phase: 'idle', lease: null });
+  });
+
+  it('answers an admin lease start while a Messenger credential attempt holds the profile', async () => {
+    const scope = setupMessenger();
+    const held = new LoginNavigationGate();
+    scope.browser.headlessContext.loginNavigationGate = held;
+
+    const request = scope.backend.listThreads(threads, signal());
+    await awaitHeldNavigation(held, request);
+
+    const lease = createLease(scope.browser);
+    const baseUrl = await listenAdmin(lease.reauth);
+
+    const startResponse = await withDeadline(
+      fetch(`${baseUrl}/reauth/start`, { method: 'POST' }),
+      5_000,
+      'the admin lease start queued behind the credential approval wait'
+    );
+    expect(startResponse.status).toBe(200);
+    const startBody = await startResponse.json();
+    expect(startBody).toMatchObject(adminLeaseShape);
+    expect(scope.browser.getInfo().interactive).toBe(true);
+
+    held.releaseHeld();
+
+    const failure = await failureOf(request);
+    expect(failure).toMatchObject({
+      name: 'ProviderError',
+      code: 'UPSTREAM_ERROR',
+      message: 'The browser session is not available.'
+    });
+    expect(credentialActivity(scope.browser)).toEqual({ typed: [], submitted: false });
+    expectNoCredentials([startBody, failure]);
     expect(scope.gate.snapshot()).toEqual({ status: 'closed' });
   });
 });
