@@ -17,7 +17,7 @@ locked = true
 # (the canonical version range; do not restate it here).
 # Optional contributor conveniences are kept out of [tools]; see tasks below.
 [tools]
-node = "24.22.1"
+node = "26.12.1"
 
 [tasks.bootstrap]
 description = "Install workspace dependencies from the committed lockfile (idempotent, no lifecycle scripts, no credentials)"
