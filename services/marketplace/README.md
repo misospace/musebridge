@@ -4,7 +4,7 @@ A small Model Context Protocol service for exercising Marketplace-shaped integra
 
 ## Run
 
-Requires Node.js 24.
+Requires Node.js 26.
 
 Run these commands from the repository root:
 
@@ -23,7 +23,7 @@ docker build -f services/marketplace/Dockerfile -t marketplace-mcp .
 docker run --rm -p 8080:8080 marketplace-mcp
 ```
 
-GHCR publishes `ghcr.io/misospace/marketplace-mcp` for pushes to `main` and semantic version tags matching `v*.*.*`, after the Node 24 typecheck, lint, test, and build checks pass. The existing version-tag release scheme is retained; image tags (`main`, SHA, and semantic version) remain unchanged. Future image, profile, or tag changes must be coordinated with the service owner. Renovate uses the shared org preset; automatic dependency merges remain disabled for manual review during the fixture milestone.
+GHCR publishes `ghcr.io/misospace/marketplace-mcp` for pushes to `main` and semantic version tags matching `v*.*.*`, after the Node 26 typecheck, lint, test, and build checks pass. The existing version-tag release scheme is retained; image tags (`main`, SHA, and semantic version) remain unchanged. Future image, profile, or tag changes must be coordinated with the service owner. Renovate uses the shared org preset; automatic dependency merges remain disabled for manual review during the fixture milestone.
 
 The service has no built-in authentication. Run it only on a trusted private network and provide network-level access controls before exposing it to other networks. ToolHive can use the service's Streamable HTTP transport at port `8080` and path `/mcp`, but it is not registered with ToolHive yet.
 

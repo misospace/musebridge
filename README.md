@@ -1,6 +1,6 @@
 # Musebridge
 
-Musebridge is a Node.js 24 ESM monorepo. The Marketplace MCP service lives in [`services/marketplace`](services/marketplace/README.md); it provides synthetic fixture data by default and an opt-in Facebook backend.
+Musebridge is a Node.js 26 ESM monorepo. The Marketplace MCP service lives in [`services/marketplace`](services/marketplace/README.md); it provides synthetic fixture data by default and an opt-in Facebook backend.
 
 - `package.json` and `package-lock.json` — shared npm workspace root and single lockfile.
 - `services/marketplace/` — service package, implementation, tests, scripts, and service documentation; there are no shared app packages.
