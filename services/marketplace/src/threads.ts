@@ -1,4 +1,5 @@
 import { normalizeRetryAfterHeader } from './retry-after.js';
+import { resolveCredentialBaseUrl } from './credential-url.js';
 
 export interface ThreadsClientOptions {
   accessToken: string;
@@ -30,21 +31,13 @@ export class ThreadsClient {
     if (!options || typeof options !== 'object') throw new TypeError('options must be an object');
     if (typeof options.accessToken !== 'string' || !options.accessToken.trim()) throw new TypeError('accessToken must not be empty');
     if (typeof options.threadsUserId !== 'string' || !options.threadsUserId.trim()) throw new TypeError('threadsUserId must not be empty');
-    const base = options.baseUrl ?? 'https://graph.threads.net';
-    // Credential-destination restriction: the Threads Graph API travels a bearer token, so
-    // the client must not be pointable at arbitrary origins. The only runtime target is
-    // the official Threads Graph host over HTTPS; loopback exists solely as an explicit
-    // test seam. There is deliberately no environment variable that can move this
-    // destination (mirrors Ticketmaster / eBay).
-    let parsed: URL;
-    try { parsed = new URL(base); } catch { throw new TypeError('baseUrl must be a valid URL'); }
-    const host = parsed.hostname.toLowerCase();
-    const isLoopback = ['127.0.0.1', '::1', 'localhost'].includes(host);
-    const isThreadsHost = parsed.protocol === 'https:' && host === 'graph.threads.net';
-    if (parsed.username || parsed.password || parsed.search || parsed.hash || (!isThreadsHost && !(isLoopback && ['http:', 'https:'].includes(parsed.protocol)))) {
-      throw new TypeError('baseUrl must be https://graph.threads.net or a loopback test address');
-    }
-    this.baseUrl = base.replace(/\/$/, '');
+    // The Threads Graph API travels a bearer token; destination restriction
+    // shared with the other provider clients (see credential-url.ts).
+    this.baseUrl = resolveCredentialBaseUrl(
+      options.baseUrl ?? 'https://graph.threads.net',
+      ['graph.threads.net'],
+      'baseUrl must be https://graph.threads.net or a loopback test address'
+    );
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.accessToken = options.accessToken;
     this.threadsUserId = options.threadsUserId;
