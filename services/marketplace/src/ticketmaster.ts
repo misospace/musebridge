@@ -1,4 +1,5 @@
 import { normalizeRetryAfterHeader } from './retry-after.js';
+import { resolveCredentialBaseUrl } from './credential-url.js';
 
 export interface TicketmasterClientOptions {
   apiKey: string;
@@ -28,20 +29,13 @@ export class TicketmasterClient {
   constructor(options: TicketmasterClientOptions) {
     if (!options || typeof options !== 'object') throw new TypeError('options must be an object');
     if (typeof options.apiKey !== 'string' || !options.apiKey.trim()) throw new TypeError('apiKey must not be empty');
-    const base = options.baseUrl ?? 'https://app.ticketmaster.com';
-    // Credential-destination restriction: the Discovery API key travels as a query parameter,
-    // so the client must not be pointable at arbitrary origins. The only runtime target is
-    // Ticketmaster's production host over HTTPS; loopback exists solely as an explicit test
-    // seam. There is deliberately no environment variable that can move this destination.
-    let parsed: URL;
-    try { parsed = new URL(base); } catch { throw new TypeError('baseUrl must be a valid URL'); }
-    const host = parsed.hostname.toLowerCase();
-    const isLoopback = ['127.0.0.1', '::1', 'localhost'].includes(host);
-    const isTicketmasterHost = parsed.protocol === 'https:' && host === 'app.ticketmaster.com';
-    if (parsed.username || parsed.password || parsed.search || parsed.hash || (!isTicketmasterHost && !(isLoopback && ['http:', 'https:'].includes(parsed.protocol)))) {
-      throw new TypeError('baseUrl must be https://app.ticketmaster.com or a loopback test address');
-    }
-    this.baseUrl = base.replace(/\/$/, '');
+    // The Discovery API key travels as a query parameter; destination restriction
+    // shared with the other provider clients (see credential-url.ts).
+    this.baseUrl = resolveCredentialBaseUrl(
+      options.baseUrl ?? 'https://app.ticketmaster.com',
+      ['app.ticketmaster.com'],
+      'baseUrl must be https://app.ticketmaster.com or a loopback test address'
+    );
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.apiKey = options.apiKey;
   }

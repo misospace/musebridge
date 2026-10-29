@@ -1,4 +1,5 @@
 import { normalizeRetryAfterHeader } from './retry-after.js';
+import { resolveCredentialBaseUrl } from './credential-url.js';
 
 export interface EbayClientOptions {
   clientId: string;
@@ -44,20 +45,13 @@ export class EbayClient {
     if (!options || typeof options !== 'object') throw new TypeError('options must be an object');
     if (typeof options.clientId !== 'string' || !options.clientId.trim()) throw new TypeError('clientId must not be empty');
     if (typeof options.clientSecret !== 'string' || !options.clientSecret.trim()) throw new TypeError('clientSecret must not be empty');
-    const base = options.baseUrl ?? 'https://api.ebay.com';
-    // Credential destination restriction: the token POST carries Basic-encoded application
-    // credentials, so the client must not be pointable at arbitrary origins. Runtime targets
-    // are eBay's production and sandbox hosts over HTTPS only; loopback HTTP exists solely
-    // as an explicit test seam. There is deliberately no environment variable that can move
-    // this destination (see review of #61: EBAY_BASE_URL was removed for exactly that reason).
-    let parsed: URL;
-    try { parsed = new URL(base); } catch { throw new TypeError('baseUrl must be a valid URL'); }
-    const host = parsed.hostname.toLowerCase();
-    const isLoopback = ['127.0.0.1', '::1', 'localhost'].includes(host);
-    const isEbayHost = parsed.protocol === 'https:' && ['api.ebay.com', 'api.sandbox.ebay.com'].includes(host);
-    if (parsed.username || parsed.password || parsed.search || parsed.hash || (!isEbayHost && !(isLoopback && ['http:', 'https:'].includes(parsed.protocol)))) {
-      throw new TypeError('baseUrl must be https://api.ebay.com, https://api.sandbox.ebay.com, or a loopback test address');
-    }
+    // The token POST carries Basic-encoded application credentials; destination
+    // restriction shared with the other provider clients (see credential-url.ts).
+    const base = resolveCredentialBaseUrl(
+      options.baseUrl ?? 'https://api.ebay.com',
+      ['api.ebay.com', 'api.sandbox.ebay.com'],
+      'baseUrl must be https://api.ebay.com, https://api.sandbox.ebay.com, or a loopback test address'
+    );
     // Upper bound: setTimeout coerces delays above 2^31-1 to 1, which would fire instantly.
     if (options.tokenRequestTimeoutMs !== undefined
       && (!Number.isInteger(options.tokenRequestTimeoutMs)
@@ -65,7 +59,7 @@ export class EbayClient {
         || options.tokenRequestTimeoutMs > 2_147_483_647)) {
       throw new TypeError('tokenRequestTimeoutMs must be a positive integer within setTimeout range');
     }
-    this.baseUrl = base.replace(/\/$/, '');
+    this.baseUrl = base;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.tokenRequestTimeoutMs = options.tokenRequestTimeoutMs ?? DEFAULT_TOKEN_REQUEST_TIMEOUT_MS;
     this.clientId = options.clientId;
