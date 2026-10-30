@@ -1,4 +1,5 @@
 import type { ExtractedMarketplacePage } from './facebook-marketplace-extract.js';
+import type { MarketplaceParseStats } from './facebook-marketplace-parse.js';
 import { classifyMarketplacePage } from './facebook-marketplace-parse.js';
 
 /** Explicit projection: never spread browser data into logs. */
@@ -51,5 +52,22 @@ export function marketplaceSearchDiagnostic(input: {
     visibleMainHasNoResults: diagnostics?.visibleMainHasNoResults ?? false,
     englishLocale: diagnostics?.englishLocale ?? false,
     radius500Matched: diagnostics?.radius500Matched ?? false
+  };
+}
+
+/**
+ * Explicit projection of the search parse stats (#182): counts only, never card text,
+ * prices, or any provider content. `cardPriceTokens` carries one count per card that
+ * reached price parsing, so deployed evidence can show multi-price cards without
+ * recording what those prices were.
+ */
+export function marketplaceSearchParseDiagnostic(stats: MarketplaceParseStats) {
+  return {
+    cardsSeen: stats.cardsSeen,
+    structurallyValid: stats.structurallyValid,
+    duplicates: stats.duplicates,
+    ambiguousPrices: stats.ambiguousPrices,
+    cardPriceTokens: [...stats.cardPriceTokens],
+    skipReasons: { ...stats.skipReasons }
   };
 }
