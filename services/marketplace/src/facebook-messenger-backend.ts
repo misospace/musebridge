@@ -1,12 +1,14 @@
 import { errors } from 'playwright';
 import { BrowserSessionManager, BrowserUnavailableError, sleepUntilAbort } from './browser.js';
-import type { ConversationBackend, ConversationThreadListPage } from './backend.js';
+import type { ConversationBackend, ConversationThreadListPage, ConsumerThreadListPage, ConsumerThreadSearchPage } from './backend.js';
 import { ProviderError as MarketplaceProviderError, SurfaceDisabledError, renderDeliveredMessage } from './backend.js';
 import { validateTimeout, waitForRequestBudget } from './timeout.js';
 import {
   threadsListInputSchema,
   threadReadInputSchema,
   threadSendInputSchema,
+  consumerThreadsListInputSchema,
+  consumerThreadsSearchInputSchema,
   type ConversationDraft,
   type ConversationThread,
   type ConversationThreadMessages,
@@ -33,6 +35,20 @@ import {
   buildMessengerThreadUrl,
   MESSENGER_THREAD_PATH
 } from './facebook-messenger-url.js';
+import {
+  buildConsumerMenuUrl,
+  CONSUMER_MENU_PATHNAME
+} from './facebook-consumer-url.js';
+import {
+  extractConsumerMenuPage,
+  CONSUMER_EXTRACT_LIMITS,
+  type ExtractedConsumerMenuPage
+} from './facebook-consumer-extract.js';
+import {
+  classifyConsumerMenuPage,
+  interpretConsumerMenuPage
+} from './facebook-consumer-parse.js';
+import { searchConsumerThreads } from './consumer-thread-search.js';
 import { assertFacebookOrigin, FacebookSessionProbe, isFacebookAuthClassCode, type FacebookProbeCode } from './facebook.js';
 import { FacebookCredentialLogin } from './facebook-login.js';
 import { FacebookLoginCircuitBreaker, type FacebookLoginAttemptPermit, type FacebookLoginScope } from './facebook-login-circuit-breaker.js';
@@ -48,6 +64,9 @@ import {
  * Marketplace scope keeps its own.
  */
 const LOGIN_SCOPE: FacebookLoginScope = 'messenger';
+
+/** The menu-window label the consumer coverage contract uses (#79): one observed homepage load. */
+const CONSUMER_MENU_WINDOW = 'recent-load' as const;
 
 export interface FacebookMessengerBackendOptions {
   browser: BrowserSessionManager;
@@ -249,6 +268,143 @@ export class FacebookMessengerBackend implements ConversationBackend {
     // The interpretation already weighed the verified cursor chain and the caller's limit, so
     // its coverage flag is the honest bound for this listing (#151).
     return { threads: [...outcome.threads], truncated: outcome.truncated };
+  }
+
+  /**
+   * Personal-inbox menu discovery (#79), over the verified homepage header menu source: one
+   * navigation to the configured origin's root, one real trusted click on the Messenger control,
+   * and a region-scoped extraction of the rendered conversation rows. The probe and reauth
+   * landing paths are untouched — they stay on the Marketplace inbox — and the menu load opens no
+   * conversation: a load that leaves the root pathname is contained as a typed error before any
+   * content is trusted. The source exposes no pagination signal, so `coverage.complete` is
+   * permanently `false` here: a bounded recent window, never a proven-complete listing.
+   */
+  async listConsumerThreads(
+    input: ReturnType<typeof consumerThreadsListInputSchema.parse>,
+    signal: AbortSignal
+  ): Promise<ConsumerThreadListPage> {
+    if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
+    await this.ensureUsableSession(signal);
+
+    const menuUrl = assertFacebookOrigin(buildConsumerMenuUrl({ baseUrl: this.probe.baseUrl }));
+    let extracted: ExtractedConsumerMenuPage;
+    try {
+      extracted = await this.browser.runExclusive(signal, async (page, taskSignal) => {
+        await page.goto(menuUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: this.navigationTimeoutMs,
+          signal: taskSignal
+        });
+
+        // The Messenger control is a role="button" element — not a <button> tag — and the live
+        // menu renders hidden zero-size duplicates of it, so the contract is exactly one VISIBLE
+        // match inside the banner (2026-10-31 evidence run). Playwright's role engine already
+        // excludes hidden elements; the visible filter keeps the rule explicit.
+        const menuButton = page
+          .locator('[role="banner"] [role="button"][aria-label^="Messenger"]')
+          .filter({ visible: true });
+        const controlCount = await menuButton.count();
+        if (taskSignal.aborted) throw taskSignal.reason ?? new Error('Browser operation aborted');
+        if (controlCount !== 1) {
+          throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook Messenger menu control was not recognized.');
+        }
+        try {
+          await menuButton.click({ timeout: this.navigationTimeoutMs, signal: taskSignal });
+        } catch (error) {
+          if (taskSignal.aborted) throw taskSignal.reason ?? error;
+          if (!(error instanceof errors.TimeoutError)) throw error;
+          // The control re-renders continuously enough that Playwright's stability gate can time
+          // out on a freshly loaded page (2026-10-31 live finding). A forced click is still a
+          // real, trusted input sequence at the element's own coordinates — the bare in-page
+          // el.click() is not, and does not open the menu.
+          await menuButton.click({ force: true, timeout: this.navigationTimeoutMs, signal: taskSignal });
+        }
+
+        const extractOptions = { limits: { ...CONSUMER_EXTRACT_LIMITS, maxThreads: this.maxThreads } };
+        // The click can trigger a same-document navigation (an unexpected conversation open), and
+        // an in-flight navigation tears down the execution context an evaluate is about to use.
+        // Polling treats that like any other not-yet-recognized page: the settle window stays in
+        // charge, so the containment guard below observes the final document rather than failing
+        // on teardown debris. A page that classifies (menu or verified empty) ends the poll.
+        let pageResult: ExtractedConsumerMenuPage | undefined;
+        const deadline = Date.now() + this.settleTimeoutMs;
+        for (;;) {
+          if (taskSignal.aborted) throw taskSignal.reason ?? new Error('Browser operation aborted');
+          try {
+            const candidate = await page.evaluate(extractConsumerMenuPage, extractOptions);
+            pageResult = candidate;
+            if (classifyConsumerMenuPage(candidate) !== 'unknown') break;
+          } catch {
+            // Navigation in flight; keep polling within the settle window.
+          }
+          if (Date.now() >= deadline) break;
+          await sleepUntilAbort(200, taskSignal);
+        }
+        if (taskSignal.aborted) throw taskSignal.reason ?? new Error('Browser operation aborted');
+        if (pageResult === undefined) {
+          throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook Messenger menu could not be read.');
+        }
+        return pageResult;
+      });
+    } catch (error) {
+      if (signal.aborted) throw signal.reason ?? error;
+      if (error instanceof errors.TimeoutError) {
+        throw new MarketplaceProviderError('TIMEOUT', 'The Facebook Messenger menu did not load in time.');
+      }
+      if (error instanceof MarketplaceProviderError) throw error;
+      if (error instanceof BrowserUnavailableError) {
+        throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
+      }
+      this.logger.error('Facebook Messenger menu read failed:', error instanceof Error ? error.name : 'UnknownError');
+      throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook Messenger menu could not be read.');
+    }
+
+    const outcome = interpretConsumerMenuPage({
+      page: extracted,
+      baseUrl: this.probe.baseUrl,
+      limit: input.limit,
+      maxExtractedThreads: this.maxThreads
+    });
+    if (outcome.kind === 'error') {
+      this.recordObservedAuthFailure(outcome.code);
+      throw new MarketplaceProviderError(outcome.code, outcome.message);
+    }
+    if (outcome.kind === 'empty') {
+      // A window-scoped negative, not a definitive absence: this source can never prove the
+      // whole inbox was covered, so the empty result carries `complete: false` (#79 contract).
+      return { threads: [], truncated: false, coverage: { threads_observed: 0, window: CONSUMER_MENU_WINDOW, complete: false } };
+    }
+    return {
+      threads: outcome.threads,
+      truncated: outcome.truncated,
+      coverage: { threads_observed: outcome.threadsObserved, window: CONSUMER_MENU_WINDOW, complete: false }
+    };
+  }
+
+  /**
+   * Search over the verified menu observation (#79): the same single listing load, filtered in
+   * memory by the shared matcher. The search layer issues no additional search/query/pagination
+   * request and replays nothing; the query is never typed into the provider. The whole observed
+   * window is examined regardless of the caller's match limit — the limit only caps the return —
+   * so `truncated` means the window held more matches than were returned.
+   */
+  async searchConsumerThreads(
+    input: ReturnType<typeof consumerThreadsSearchInputSchema.parse>,
+    signal: AbortSignal
+  ): Promise<ConsumerThreadSearchPage> {
+    const observed = await this.listConsumerThreads({ limit: CONSUMER_EXTRACT_LIMITS.maxThreads }, signal);
+    const outcome = searchConsumerThreads({ threads: observed.threads, query: input.query });
+    const matches = outcome.matches.slice(0, input.limit);
+    return {
+      matches,
+      truncated: outcome.matches.length > matches.length,
+      coverage: {
+        threads_observed: observed.coverage.threads_observed,
+        window: CONSUMER_MENU_WINDOW,
+        complete: false,
+        searchable_fields: outcome.searchableFields
+      }
+    };
   }
 
   async readThread(

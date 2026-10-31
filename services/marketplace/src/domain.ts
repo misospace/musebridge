@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { PROVIDER_SESSION_ASSESSMENTS } from './browser.js';
 
-export const SCHEMA_VERSION = '1.8.0';
+export const SCHEMA_VERSION = '1.9.0';
 export const SERVICE_VERSION = '0.1.0'; // x-release-please-version
 export const MAX_QUERY_LENGTH = 256;
 export const MAX_LOCATION_LENGTH = 256;
@@ -595,6 +595,90 @@ export const prepareSuccessSchema = z.object({
 }).strict();
 
 export const prepareOutputSchema = z.union([prepareSuccessSchema, runtimeFailureSchema]);
+
+// Personal-inbox consumer discovery (#79, evidence record merged in docs/
+// messenger-personal-search-design.md). The verified source is the Facebook homepage header
+// Messenger menu: one region-scoped chats grid whose rows each carry one provider-supplied
+// same-origin thread route — plain `/messages/t/{key}` or E2EE `/messages/e2ee/t/{key}` — plus
+// provider-rendered per-row text. `route` preserves the provider's own route provenance: an
+// E2EE-surfaced key is never rewritten to the plain path. `participants` and `preview` carry
+// provider-supplied per-row text only, never inferred values; the deployed menu renders name and
+// snippet in separate spans whose field-level semantics are still being characterized, so the
+// Facebook backend returns the row's text as `preview` and omits `participants` until that
+// characterization pass completes (a recorded runtime item of #185, not a gate).
+export const consumerThreadSchema = z.object({
+  thread_id: conversationThreadIdSchema,
+  route: z.enum(['plain', 'e2ee']),
+  participants: z.array(z.string().min(1).max(128)).max(8).optional(),
+  preview: z.string().min(1).max(280).optional()
+}).strict();
+
+export type ConsumerThread = z.infer<typeof consumerThreadSchema>;
+
+// Menu-window coverage (#79). The menu source exposes no pagination signal — no `page_info` was
+// ever observed on it — so `complete` is `false` permanently for the Facebook backend: the
+// listing covers only the observed recent menu window, a partial scan is never labelled
+// comprehensive, and an empty result is a window-scoped negative ("no match in the observed
+// window"), never authoritative absence. `truncated` stays cap-truthful (#151 rule): true when
+// the verified observation carried more threads than the bounded return window kept. The fixture
+// backend, which holds its whole synthetic list by construction, reports `complete: true`.
+export const consumerMenuCoverageSchema = z.object({
+  threads_observed: z.number().int().nonnegative(),
+  window: z.literal('recent-load'),
+  complete: z.boolean()
+}).strict();
+
+export type ConsumerMenuCoverage = z.infer<typeof consumerMenuCoverageSchema>;
+
+export const consumerThreadsListInputSchema = z.object({
+  limit: z.number().int().min(1).max(20).default(10)
+}).strict();
+
+export type ConsumerThreadsListInput = z.infer<typeof consumerThreadsListInputSchema>;
+
+export const consumerThreadsListOutputSchema = z.union([
+  z.object({
+    ok: z.literal(true),
+    backend: backendNameSchema,
+    threads: z.array(consumerThreadSchema).max(20),
+    truncated: z.boolean(),
+    coverage: consumerMenuCoverageSchema
+  }).strict(),
+  runtimeFailureSchema
+]);
+
+export const consumerThreadsSearchInputSchema = z.object({
+  query: z.string().trim().min(1).max(MAX_QUERY_LENGTH).regex(/\S/),
+  limit: z.number().int().min(1).max(20).default(10)
+}).strict();
+
+export type ConsumerThreadsSearchInput = z.infer<typeof consumerThreadsSearchInputSchema>;
+
+// The searched field set is part of the result: `matched_on` names the allowlisted fields that
+// matched per thread, and `coverage.searchable_fields` names the fields the query was matched
+// against at all, so a caller always knows what an empty result means.
+export const consumerThreadMatchSchema = consumerThreadSchema.extend({
+  matched_on: z.array(z.enum(['participants', 'preview'])).min(1)
+}).strict();
+
+export type ConsumerThreadMatch = z.infer<typeof consumerThreadMatchSchema>;
+
+export const consumerSearchCoverageSchema = consumerMenuCoverageSchema.extend({
+  searchable_fields: z.array(z.enum(['participants', 'preview'])).max(2)
+}).strict();
+
+export type ConsumerSearchCoverage = z.infer<typeof consumerSearchCoverageSchema>;
+
+export const consumerThreadsSearchOutputSchema = z.union([
+  z.object({
+    ok: z.literal(true),
+    backend: backendNameSchema,
+    matches: z.array(consumerThreadMatchSchema).max(20),
+    truncated: z.boolean(),
+    coverage: consumerSearchCoverageSchema
+  }).strict(),
+  runtimeFailureSchema
+]);
 export type RuntimeFailure = z.infer<typeof runtimeFailureSchema>;
 export type ProviderErrorCode = typeof PROVIDER_ERROR_CODES[number];
 export type ProviderErrorMetadata = z.infer<typeof providerErrorMetadataSchema>;
