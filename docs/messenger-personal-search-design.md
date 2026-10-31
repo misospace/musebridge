@@ -142,9 +142,48 @@ This reuses #78's read-only protocol — informed consent before the first poten
 
 End-to-end operator validation of any implementation happens only after separate, explicit permission, per #79's scope.
 
+## Evidence record (2026-10-31): header-menu source verified
+
+The maintainer authorized the header-menu-only branch of the protocol above: no `/messages/` navigation, no thread opens. The run executed in the ZCode in-app browser — a fresh browser profile in which the operator performed an interactive login (no automated credential submission; the investigator never touched credential material). Two homepage loads, each followed by opening the header Messenger menu once. All probes were read-only, in-page, and returned counts, booleans, shapes, and length distributions only: no thread keys, participant names, snippets, or message text were extracted, echoed, or persisted; no screenshots were taken; no request was replayed. Key values never crossed the page boundary, so cross-load key-set equality was not measured (the #77 no-hash rule forbids persisting correlation-capable hashes); metric-level stability stands in for it.
+
+**The two loads agreed on every metric:**
+
+| Observation | Load 1 | Load 2 |
+|---|---|---|
+| URL retained on the homepage root while the menu is open | yes | yes |
+| `[aria-label="Chats"]` regions | 1 | 1 |
+| Region element / role | `DIV` / `grid`, inside a labeled dialog | same |
+| Same-origin `/messages/(e2ee/)?t/{key}` links | 18 | 18 |
+| Thread links inside the Chats region | 18 of 18 | 18 of 18 |
+| Distinct thread keys / distinct linked rows | 18 / 18 | 18 / 18 |
+| E2EE-form links (`/messages/e2ee/t/`) | 11 | 11 |
+| All keys numeric, 10–25 digits | yes | yes |
+| Rows inside the region / rows without a thread link | 19 / 1 | 19 / 1 |
+| `aria-selected="true"` inside the region | 0 — the two selected elements are the dialog's own tabs, outside the grid | 0 |
+| Chat composer detected (`contenteditable`) | no | no |
+| Per-row rendered text (lengths only) | 18 of 18 rows, 44–143 chars | identical distribution |
+| Header Messenger unread badge | "1 unread" | cleared (see below) |
+
+**Hydration/bootstrap connection (both loads):** one `message_threads` object carrying only `unseen_count` / `recent_unread_count_with_e2ee`, and one connection with 10 edges. All 10 node ids decode to `message_thread:<thread_fbid>` exactly (10/10 — extends #78, which recorded the shape but not this check). Node field names/types: `thread_key` (object, `thread_fbid` only), `id` (string), `name` (string), `image` (object), `all_participants` (object), `customization_info` (object), `updated_time` (number), `is_xac` (boolean). **No `page_info` on either object.** Only 5 of the 10 bootstrap keys correspond to rendered menu-row keys — the same partial overlap #78 observed, now measured against the verified row set: the connection corroborates key grammar but is not the list.
+
+**Resource Timing (whole-page accumulation, not isolated to menu opening — same limitation as #78):** 293 resource entries, 14 same-origin `/api/graphql/`, 0 legacy `/ajax/mercury/(change_read_status|mark_read)` paths. Operation names ride in POST bodies and are not exposed by Resource Timing, so #78's operation-name record remains the reference. Zero mercury-path matches still cannot establish receipt suppression.
+
+**Observed side effect:** the header unread badge ("1 unread" at load 1) was cleared by the end of the run. The cause was not isolated between the page reload and the two menu openings, and whether any participant-visible state changed is unknown — no thread was opened, and the badge is the caller's own unread counter. Recorded for the contract's disclosure obligations: a menu-based listing clears the operator's own unread badge, so the tool description must disclose this bookkeeping effect rather than describe the operation as absolutely side-effect-free.
+
+**Protocol positives, mapped:**
+
+1. **Non-opening source, repeating across two loads in a fresh profile — verified.** URL retained, no selection markers, no composer, no thread opened. This retires #78's "behavior repeats in another session" gap for the menu path; the `/messages/` auto-selection question in a fresh profile was deliberately not revisited.
+2. **Per-row authoritative key — verified for the rendered menu rows.** Provider-supplied same-origin thread links, one distinct key per linked row (1:1 in both samples), grammar-bounded, independent of presentation order; region containment 18/18. The hydration connection corroborates grammar (10/10 decode consistency) but only partially corresponds to the rows.
+3. **Matchable per-row text — present.** Every linked row carries provider-rendered text (44–143 chars) in child elements; rows carry no `aria-label`. Field-level semantics (participant label vs snippet vs timestamp, and their per-row association) remain the one pre-implementation pass, folded into the extractor work.
+4. **Terminality — not provable.** No `page_info` on either hydration object; `coverage.complete` stays `false` permanently for this source, exactly as the contract defaults.
+5. **Personal-vs-Marketplace scoping — unverified.** No Marketplace discriminator was observed in the menu rows; whether Marketplace-origin threads appear is undetermined. It does not block the search contract, which matches over observed rows regardless of origin.
+6. **E2EE rows — present** (11 of 18 on both loads), routed under `/messages/e2ee/t/`; later readability of those threads is untouched by this evidence, per the contract's `route` provenance rule.
+
+**Consequence for this document:** the header-menu rendered rows are a verified, non-opening, region-scoped, per-row-keyed personal-inbox observation source with per-row matchable text — the source class the conditional `consumer_threads_list`/`consumer_threads_search` contracts require. The gate this document set for implementation is satisfied for the menu path, with two recorded conditions carried into implementation: the field-level semantics pass for the per-row text, and the badge-clearing disclosure in the tool description. Acceptance items 1–2 and this evidence stand ready; item 3 (synthetic tests) and item 4 (the narrow tool) can now be planned. The `/messages/` direct-navigation branch was not exercised and remains closed by #78's no-go.
+
 ## Verified vs assumed
 
-**Verified:** the Marketplace-inbox passive collector and its fail-closed coverage semantics (#64/#97/#151, audited); the read-window coverage contract (#146/#158); the #78 observations cited above; the current probe/reauth landing path; the existing error taxonomy and grant machinery this design reuses.
+**Verified:** the Marketplace-inbox passive collector and its fail-closed coverage semantics (#64/#97/#151, audited); the read-window coverage contract (#146/#158); the #78 observations cited above; the current probe/reauth landing path; the existing error taxonomy and grant machinery this design reuses; and, per the 2026-10-31 evidence record above, the header-menu rendered-row source (non-opening across two loads, per-row keys, region containment, matchable per-row text, E2EE presence, absent `page_info`).
 
 **Assumed / unverified (must not be treated as fact):** that any non-opening personal-inbox source exists; that it supplies per-row keys or matchable fields; that terminality is ever provable there; that automatic selection does not recur in a service profile; that E2EE rows are usable for anything. The conditional contract above is written so that none of these assumptions is load-bearing: each maps to a protocol step or to the no-go branch.
 
