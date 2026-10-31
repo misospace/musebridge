@@ -617,13 +617,21 @@ export class BrowserSessionManager {
     }
   }
 
+  /**
+   * Abandon a context the browser failed to hand a page to or failed to close a page on. The
+   * teardown goes through the same escalation ladder as the normal close path: a context close
+   * that confirms a clean close ends it there, and anything else escalates to the browser close
+   * and then to the bounded owned-process termination, so a wedged context cannot survive with
+   * the profile singleton lock and strand the next launch. The ladder is bounded end to end and
+   * never rejects; assessments reset to `session_unknown` and never record `session_usable`.
+   */
   private discardContext(reason: string): void {
     const context = this.context;
     if (!context) return;
     this.context = undefined;
     this.lastAssessment = 'session_unknown';
     this.lastFailure = reason;
-    this.pendingTeardown = this.settleIgnoring(context.close().catch(() => undefined));
+    this.pendingTeardown = this.closePersistentContext(context, 'Abandoned headless browser context');
   }
 
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {

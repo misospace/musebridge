@@ -427,6 +427,8 @@ describe('last-resort orphan termination', () => {
   interface StubOptions {
     contextClose?: 'clean' | 'hang';
     browserMode?: 'clean' | 'hang' | 'throws' | 'null';
+    pageClose?: 'clean' | 'hang';
+    newPageMode?: 'clean' | 'hang';
     terminate?: (profileDir: string) => Promise<OwnedBrowserTerminationResult>;
   }
 
@@ -434,15 +436,16 @@ describe('last-resort orphan termination', () => {
     const profileDir = makeProfileDir();
     const errors: string[] = [];
     const hang = () => new Promise<void>(() => undefined);
-    const page = { close: async () => undefined };
+    const page = { close: options.pageClose === 'hang' ? hang : async () => undefined };
+    const newPage = options.newPageMode === 'hang' ? hang : async () => page;
     const browser = options.browserMode === 'hang'
       ? { close: hang }
       : { close: async () => undefined };
     const context = options.browserMode === 'throws'
-      ? { close: options.contextClose === 'hang' ? hang : async () => undefined, once: () => undefined, browser: () => { throw new Error('browser detached'); }, newPage: async () => page }
+      ? { close: options.contextClose === 'hang' ? hang : async () => undefined, once: () => undefined, browser: () => { throw new Error('browser detached'); }, newPage }
       : options.browserMode === 'null'
-        ? { close: options.contextClose === 'hang' ? hang : async () => undefined, once: () => undefined, browser: () => null, newPage: async () => page }
-        : { close: options.contextClose === 'hang' ? hang : async () => undefined, once: () => undefined, browser: () => browser, newPage: async () => page };
+        ? { close: options.contextClose === 'hang' ? hang : async () => undefined, once: () => undefined, browser: () => null, newPage }
+        : { close: options.contextClose === 'hang' ? hang : async () => undefined, once: () => undefined, browser: () => browser, newPage };
     const manager = new class extends BrowserManager {
       loadPlaywright(): Promise<typeof import('playwright')> {
         return Promise.resolve({
@@ -577,6 +580,131 @@ describe('last-resort orphan termination', () => {
     await startAndClose(stub);
     expect(Date.now() - startedAt).toBeLessThan(2_000);
     expect(stub.errors).toContain('Owned browser process termination did not settle within 20 ms; abandoning it without waiting');
+  });
+
+  it('escalates an abandoned context whose close hangs to owned-process termination', async () => {
+    const calls: string[] = [];
+    const stub = createTerminationStub({
+      pageClose: 'hang',
+      contextClose: 'hang',
+      browserMode: 'hang',
+      terminate: async (profileDir) => {
+        calls.push(profileDir);
+        return { platformSupported: true, terminatedPids: [4242], failedPids: [] };
+      }
+    });
+    const startedAt = Date.now();
+    await stub.manager.runExclusive(new AbortController().signal, async () => undefined);
+    expect(stub.manager.getInfo()).toMatchObject({
+      status: 'browser_unavailable',
+      browserStarted: false,
+      reason: 'Browser did not close a page in time'
+    });
+    await stub.manager.close();
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(calls).toEqual([stub.profileDir]);
+    expect(stub.errors).toContain('Abandoned headless browser context did not close within the configured timeout');
+    expect(stub.errors).toContain('Persistent browser did not close within the configured timeout');
+    expect(stub.errors).toContain('Terminated 1 orphaned browser process(es) after graceful close failed');
+  });
+
+  it('escalates the abandoned context from the page-acquisition timeout path', async () => {
+    const calls: string[] = [];
+    const stub = createTerminationStub({
+      newPageMode: 'hang',
+      contextClose: 'hang',
+      browserMode: 'hang',
+      terminate: async (profileDir) => {
+        calls.push(profileDir);
+        return { platformSupported: true, terminatedPids: [7], failedPids: [] };
+      }
+    });
+    await expect(stub.manager.runExclusive(new AbortController().signal, async () => undefined))
+      .rejects.toMatchObject({ name: 'BrowserUnavailableError', message: 'Browser did not provide a page in time' });
+    await stub.manager.close();
+    expect(calls).toEqual([stub.profileDir]);
+    expect(stub.errors).toContain('Abandoned headless browser context did not close within the configured timeout');
+    expect(stub.errors).toContain('Terminated 1 orphaned browser process(es) after graceful close failed');
+  });
+
+  it('does not escalate an abandoned context that closes cleanly', async () => {
+    let calls = 0;
+    const stub = createTerminationStub({
+      pageClose: 'hang',
+      terminate: async () => {
+        calls += 1;
+        return { platformSupported: true, terminatedPids: [], failedPids: [] };
+      }
+    });
+    await stub.manager.runExclusive(new AbortController().signal, async () => undefined);
+    await stub.manager.close();
+    expect(calls).toBe(0);
+    expect(stub.errors).toEqual([]);
+  });
+
+  it('ends the abandoned-context escalation at a clean browser fallback close', async () => {
+    let calls = 0;
+    const stub = createTerminationStub({
+      pageClose: 'hang',
+      contextClose: 'hang',
+      browserMode: 'clean',
+      terminate: async () => {
+        calls += 1;
+        return { platformSupported: true, terminatedPids: [], failedPids: [] };
+      }
+    });
+    await stub.manager.runExclusive(new AbortController().signal, async () => undefined);
+    await stub.manager.close();
+    expect(calls).toBe(0);
+    expect(stub.errors).toContain('Abandoned headless browser context did not close within the configured timeout');
+  });
+
+  it('relaunches on the next operation after an abandoned-context termination', async () => {
+    const profileDir = makeProfileDir();
+    let launches = 0;
+    let terminateCalls = 0;
+    const hang = () => new Promise<void>(() => undefined);
+    const manager = new class extends BrowserManager {
+      loadPlaywright(): Promise<typeof import('playwright')> {
+        return Promise.resolve({
+          chromium: {
+            launchPersistentContext: async () => {
+              launches += 1;
+              if (launches === 1) {
+                return {
+                  close: hang,
+                  once: () => undefined,
+                  browser: () => ({ close: hang }),
+                  newPage: async () => ({ close: hang })
+                };
+              }
+              return {
+                close: async () => undefined,
+                once: () => undefined,
+                browser: () => null,
+                newPage: async () => ({ close: async () => undefined })
+              };
+            }
+          }
+        } as unknown as typeof import('playwright'));
+      }
+    }({
+      profileDir,
+      settleTimeoutMs: 20,
+      launchTimeoutMs: 100,
+      logger: { error: () => undefined },
+      terminateOwnedProcesses: async () => {
+        terminateCalls += 1;
+        return { platformSupported: true, terminatedPids: [3], failedPids: [] };
+      }
+    });
+    managers.push(manager);
+    await manager.runExclusive(new AbortController().signal, async () => undefined);
+    await manager.runExclusive(new AbortController().signal, async () => undefined);
+    expect(launches).toBe(2);
+    expect(terminateCalls).toBe(1);
+    expect(manager.getInfo()).toMatchObject({ status: 'session_unknown', browserStarted: true });
+    await manager.close();
   });
 });
 
