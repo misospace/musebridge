@@ -4,6 +4,8 @@ import {
   threadsListInputSchema,
   threadReadInputSchema,
   threadSendInputSchema,
+  consumerThreadsListInputSchema,
+  consumerThreadsSearchInputSchema,
   shoppingFetchInputSchema,
   shoppingSearchInputSchema,
   eventsFetchInputSchema,
@@ -13,6 +15,10 @@ import {
   providerErrorMetadataSchema,
   providerErrorSchema,
   searchInputSchema,
+  type ConsumerSearchCoverage,
+  type ConsumerThread,
+  type ConsumerThreadMatch,
+  type ConsumerMenuCoverage,
   type Listing,
   type ConversationMessage,
   type ConversationThread,
@@ -27,6 +33,7 @@ import {
   type ThreadsReply
 } from './domain.js';
 import { FIXTURE_CONVERSATIONS, FIXTURE_LISTINGS } from './fixtures.js';
+import { searchConsumerThreads } from './consumer-thread-search.js';
 
 export interface MarketplaceBackend {
   readonly name: string;
@@ -52,6 +59,28 @@ export interface ConversationBackend {
   /** Conversation-scoped draft context for a proposed send, or null when no such thread exists. Never sends and never records a message. */
   prepareDraft(input: ReturnType<typeof threadSendInputSchema.parse>, signal: AbortSignal): Promise<ConversationDraft | null> | ConversationDraft | null;
   sendThread(input: ReturnType<typeof threadSendInputSchema.parse>, signal: AbortSignal): Promise<void> | void;
+  // Personal-inbox consumer discovery (#79), over the verified homepage header menu source. Both
+  // methods are optional on the interface on purpose: a backend that does not implement them
+  // keeps the consumer tools unregistered (the `requires` gate reads them off the tool entries)
+  // instead of advertised and failing at dispatch. Coverage semantics live in `ConsumerMenuCoverage`.
+  listConsumerThreads?(input: ReturnType<typeof consumerThreadsListInputSchema.parse>, signal: AbortSignal): Promise<ConsumerThreadListPage> | ConsumerThreadListPage;
+  /** Search is the same single listing load filtered in memory — the query is never typed into the provider and the search layer adds no request. */
+  searchConsumerThreads?(input: ReturnType<typeof consumerThreadsSearchInputSchema.parse>, signal: AbortSignal): Promise<ConsumerThreadSearchPage> | ConsumerThreadSearchPage;
+}
+
+// The verified menu observation, bounded and deduplicated. `coverage.complete` is `false` for the
+// Facebook backend permanently — the menu exposes no pagination signal — and `true` for the
+// fixture backend, which holds its whole synthetic list by construction.
+export interface ConsumerThreadListPage {
+  threads: ConsumerThread[];
+  truncated: boolean;
+  coverage: ConsumerMenuCoverage;
+}
+
+export interface ConsumerThreadSearchPage {
+  matches: ConsumerThreadMatch[];
+  truncated: boolean;
+  coverage: ConsumerSearchCoverage;
 }
 
 // Cross-site shopping surface (#48). HTTP-API-backed, no browser session; `name` is the
@@ -190,7 +219,46 @@ export class FixtureBackend implements MarketplaceBackend, ConversationBackend {
     messages.push({ sender: 'you' as const, text: renderDeliveredMessage(input) });
     this.sentMessages.set(input.thread_id, messages);
   }
+
+  // Personal-inbox consumer discovery (#79). The fixture holds its whole synthetic list by
+  // construction, so its menu window is complete by construction — the same reasoning behind the
+  // fixture read coverage — and its `truncated` is exactly the rows the caller's limit left out.
+  listConsumerThreads(input: ReturnType<typeof consumerThreadsListInputSchema.parse>, _signal: AbortSignal): ConsumerThreadListPage {
+    const threads: ConsumerThread[] = FIXTURE_CONVERSATIONS.slice(0, input.limit).map(({ thread }) => ({
+      thread_id: thread.thread_id,
+      route: 'plain' as const,
+      ...(thread.participants ? { participants: thread.participants } : {}),
+      ...(thread.preview ? { preview: thread.preview } : {})
+    }));
+    return {
+      threads,
+      truncated: FIXTURE_CONVERSATIONS.length > input.limit,
+      coverage: { threads_observed: FIXTURE_CONVERSATIONS.length, window: 'recent-load', complete: true }
+    };
+  }
+
+  searchConsumerThreads(input: ReturnType<typeof consumerThreadsSearchInputSchema.parse>, signal: AbortSignal): ConsumerThreadSearchPage {
+    // The search examines the whole observed window, so the fixture's own cap — not the caller's
+    // match limit — bounds what the query runs over; the match limit only caps the return.
+    const observed = this.listConsumerThreads({ limit: CONSUMER_EXTRACT_MAX_THREADS }, signal);
+    const outcome = searchConsumerThreads({ threads: observed.threads, query: input.query });
+    const matches = outcome.matches.slice(0, input.limit);
+    return {
+      matches,
+      truncated: outcome.matches.length > matches.length,
+      coverage: {
+        threads_observed: observed.coverage.threads_observed,
+        window: 'recent-load',
+        complete: true,
+        searchable_fields: outcome.searchableFields
+      }
+    };
+  }
 }
+
+// The menu source's extraction cap (#79): the window a search runs over, independent of any
+// caller's return limit.
+const CONSUMER_EXTRACT_MAX_THREADS = 20;
 
 export function canonicalHttpUrl(value: string): string {
   const url = new URL(value);

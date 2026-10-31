@@ -46,7 +46,11 @@ import {
   threadsPostsListInputSchema,
   threadsRepliesListInputSchema,
   threadsPostsListOutputSchema,
-  threadsRepliesListOutputSchema
+  threadsRepliesListOutputSchema,
+  consumerThreadsListInputSchema,
+  consumerThreadsListOutputSchema,
+  consumerThreadsSearchInputSchema,
+  consumerThreadsSearchOutputSchema
 } from './domain.js';
 
 const marketplaceScope = { provider: 'facebook', account: 'default', surface: 'marketplace' } as const;
@@ -57,11 +61,12 @@ const socialScope = { provider: 'threads', account: 'default', surface: 'social'
 
 /**
  * The conversation backend methods a tool may require. Only the method keys of
- * `ConversationBackend` qualify, so naming a method that does not exist is a compile error
- * instead of a tool that silently never registers.
+ * `ConversationBackend` qualify — including its optional methods, which a host backend may
+ * legitimately omit (#79 consumer discovery) — so naming a method that does not exist is a
+ * compile error instead of a tool that silently never registers.
  */
 type ConversationBackendMethod = {
-  [K in keyof ConversationBackend]: ConversationBackend[K] extends (...args: never[]) => unknown ? K : never;
+  [K in keyof ConversationBackend]: NonNullable<ConversationBackend[K]> extends (...args: never[]) => unknown ? K : never;
 }[keyof ConversationBackend];
 
 /**
@@ -228,6 +233,22 @@ export const TOOLS = [
     outputSchema: sendOutputSchema,
     requires: { method: 'sendThread' },
     definition: { riskClass: 'send', scope: messengerScope }
+  },
+  {
+    name: 'consumer_threads_list',
+    description: 'List recent personal Messenger conversations from the Facebook header chats menu. Loads the Facebook homepage and opens the Messenger menu once; never opens a conversation and sends no read receipt, but may clear your own unread badge. Results cover only the observed recent menu window, not full history.',
+    inputSchema: consumerThreadsListInputSchema,
+    outputSchema: consumerThreadsListOutputSchema,
+    requires: { method: 'listConsumerThreads' },
+    definition: { riskClass: 'read', scope: messengerScope }
+  },
+  {
+    name: 'consumer_threads_search',
+    description: 'Search recent personal Messenger conversations by matching a query in memory against provider-supplied per-row text; the query is never typed into Facebook. One homepage load and menu open per call, never opens a conversation and sends no read receipt, but may clear your own unread badge. Results cover only the observed recent menu window: an empty result means no match in that window, not that a conversation does not exist.',
+    inputSchema: consumerThreadsSearchInputSchema,
+    outputSchema: consumerThreadsSearchOutputSchema,
+    requires: { method: 'searchConsumerThreads' },
+    definition: { riskClass: 'read', scope: messengerScope }
   },
   {
     name: 'threads_posts_list',
@@ -509,6 +530,28 @@ export function registerMarketplaceTools(
           // message was never sent.
           const delivered = await reconcileSentThread(conversations, sendInput, backendTimeoutMs, extra.signal, shutdownSignal);
           output = { ok: true, backend: backendName, thread_id: sendInput.thread_id, status: delivered ? 'sent' : 'unknown' };
+        } else if (name === 'consumer_threads_list') {
+          const conversations = options.conversations;
+          const listConsumerThreads = conversations?.listConsumerThreads;
+          if (!conversations || !listConsumerThreads) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');
+          const page = await runBackendOperation(
+            (signal) => listConsumerThreads.call(conversations, parsed.data as z.infer<typeof consumerThreadsListInputSchema>, signal),
+            backendTimeoutMs,
+            extra.signal,
+            shutdownSignal
+          );
+          output = { ok: true, backend: backendName, threads: page.threads, truncated: page.truncated, coverage: page.coverage };
+        } else if (name === 'consumer_threads_search') {
+          const conversations = options.conversations;
+          const searchConsumerThreadsMethod = conversations?.searchConsumerThreads;
+          if (!conversations || !searchConsumerThreadsMethod) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');
+          const page = await runBackendOperation(
+            (signal) => searchConsumerThreadsMethod.call(conversations, parsed.data as z.infer<typeof consumerThreadsSearchInputSchema>, signal),
+            backendTimeoutMs,
+            extra.signal,
+            shutdownSignal
+          );
+          output = { ok: true, backend: backendName, matches: page.matches, truncated: page.truncated, coverage: page.coverage };
         } else if (name === 'shopping_search') {
           const shopping = options.shopping;
           if (!shopping) throw new ProviderError('UPSTREAM_ERROR', 'The shopping surface is not configured on this deployment.');
