@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 const fixtureNames = [
   'results-normal.html', 'results-multi-currency.html', 'results-vehicle.html', 'results-sponsored.html',
   'results-missing-price.html', 'results-sold-pending.html', 'results-duplicate.html', 'results-malformed.html',
-  'results-all-malformed.html', 'no-results.html', 'layout-changed.html', 'login.html', 'checkpoint.html',
+  'results-all-malformed.html', 'results-ambiguous-price.html', 'no-results.html', 'layout-changed.html', 'login.html', 'checkpoint.html',
   'captcha.html', 'captcha-phrase-split.html', 'rate-limited.html', 'no-listings-calgary.html', 'no-listings-delayed.html', 'browse-nested.html'
 ] as const;
 export type FixtureName = typeof fixtureNames[number];

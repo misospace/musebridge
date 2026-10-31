@@ -1,5 +1,5 @@
 import { errors } from 'playwright';
-import { marketplaceSearchDiagnostic } from './facebook-marketplace-diagnostics.js';
+import { marketplaceSearchDiagnostic, marketplaceSearchParseDiagnostic } from './facebook-marketplace-diagnostics.js';
 import { BrowserSessionManager, BrowserUnavailableError, sleepUntilAbort } from './browser.js';
 import {
   fetchInputSchema,
@@ -205,6 +205,8 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
       this.recordObservedAuthFailure(outcome.code);
       throw new ProviderError(outcome.code, outcome.message);
     }
+    // Structural parse evidence for the search (#182): counts only, never card text or prices.
+    this.logger.error('Facebook Marketplace search parse diagnostics:', marketplaceSearchParseDiagnostic(outcome.stats));
     if (outcome.kind === 'empty') return [];
     return [...outcome.listings];
   }

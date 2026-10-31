@@ -163,8 +163,9 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace backend', () => {
     const logger = { error: vi.fn() };
     const { backend } = createBackend({ settleTimeoutMs: 1_000, logger });
     await expect(backend.search(searchInput({ query: 'sensitive-query' }), new AbortController().signal)).resolves.toEqual([]);
-    expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledTimes(2);
     expect(logger.error).toHaveBeenCalledWith('Facebook Marketplace search diagnostics:', expect.objectContaining({firstKind: 'unknown', finalKind: 'no_results', samples: expect.any(Number), hasNoResultsNotice: true, itemAnchorCount: 0, sameOrigin: true, samePath: true, queryMatches: true, settleExpired: false}));
+    expect(logger.error).toHaveBeenCalledWith('Facebook Marketplace search parse diagnostics:', expect.objectContaining({cardsSeen: 0, structurallyValid: 0, ambiguousPrices: 0, cardPriceTokens: []}));
     const logged = JSON.stringify(logger.error.mock.calls);
     expect(logged).not.toContain('sensitive-query');
     expect(logged).not.toContain('Jetson');
@@ -202,6 +203,26 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace backend', () => {
     const { backend } = createBackend();
     const listings = await backend.search(searchInput({ min_price: 100, max_price: 200 }), new AbortController().signal);
     expect(listings.map(({ id, price }) => ({ id, price }))).toEqual([{ id: '100000000000014', price: 175 }]);
+  });
+
+  it('reports conflicting card prices as null and counts the ambiguity (#182)', async () => {
+    synthetic.configure('results-normal.html', 'results-ambiguous-price.html');
+    const logger = { error: vi.fn() };
+    const { backend } = createBackend({ logger });
+    const listings = await backend.search(searchInput(), new AbortController().signal);
+    expect(listings.map(({ id, price }) => ({ id, price }))).toEqual([
+      { id: '100000000000024', price: null },
+      { id: '100000000000025', price: 180 }
+    ]);
+    expect(logger.error).toHaveBeenCalledWith('Facebook Marketplace search parse diagnostics:', expect.objectContaining({
+      cardsSeen: 2,
+      structurallyValid: 2,
+      ambiguousPrices: 1,
+      cardPriceTokens: [2, 2]
+    }));
+    const logged = JSON.stringify(logger.error.mock.calls);
+    expect(logged).not.toContain('http');
+    expect(logged).not.toContain('$25');
   });
 
   it('rejects an unresolvable location without navigating', async () => {

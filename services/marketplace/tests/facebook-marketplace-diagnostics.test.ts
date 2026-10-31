@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { marketplaceSearchDiagnostic } from '../src/facebook-marketplace-diagnostics.js';
+import { marketplaceSearchDiagnostic, marketplaceSearchParseDiagnostic } from '../src/facebook-marketplace-diagnostics.js';
 import type { ExtractedMarketplacePage } from '../src/facebook-marketplace-extract.js';
 
 describe('Marketplace search diagnostic projection', () => {
@@ -14,5 +14,27 @@ describe('Marketplace search diagnostic projection', () => {
     expect(logged).toMatchObject({firstKind: 'checkpoint', finalKind: 'checkpoint', sameOrigin: true, samePath: false, queryMatches: false, checkpointRoute: true});
     expect(Object.values(logged).every(value => typeof value === 'boolean' || typeof value === 'number' || value === 'checkpoint')).toBe(true);
     expect(JSON.stringify(logged)).not.toMatch(/secret|private|facebook|https/);
+  });
+});
+
+describe('Marketplace search parse diagnostic projection (#182)', () => {
+  it('logs only counts and structural skip reasons', () => {
+    const logged = marketplaceSearchParseDiagnostic({
+      cardsSeen: 3,
+      structurallyValid: 2,
+      duplicates: 1,
+      skipReasons: { duplicate: 1 },
+      ambiguousPrices: 1,
+      cardPriceTokens: [2, 1, 2]
+    });
+    expect(logged).toEqual({
+      cardsSeen: 3,
+      structurallyValid: 2,
+      duplicates: 1,
+      ambiguousPrices: 1,
+      cardPriceTokens: [2, 1, 2],
+      skipReasons: { duplicate: 1 }
+    });
+    expect(JSON.stringify(logged)).not.toMatch(/http|[$]|\d{5,}/);
   });
 });

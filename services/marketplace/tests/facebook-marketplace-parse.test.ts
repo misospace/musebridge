@@ -4,6 +4,7 @@ import {
   classifyMarketplacePage,
   interpretMarketplaceItem,
   interpretMarketplacePage,
+  parseMarketplaceCardPrice,
   parseMarketplacePage,
   parseMarketplacePrice,
   type MarketplacePageKind,
@@ -271,6 +272,88 @@ describe('Marketplace result parsing', () => {
     expect(() => parseMarketplacePage(input([], { limit: 0 }))).toThrow(RangeError);
     expect(() => parseMarketplacePage(input([], { minPrice: -1 }))).toThrow(RangeError);
     expect(() => parseMarketplacePage(input([], { maxPrice: Infinity }))).toThrow(RangeError);
+  });
+});
+
+describe('Marketplace card price disambiguation (#182)', () => {
+  it('counts valid price tokens without recording content', () => {
+    expect(parseMarketplaceCardPrice('Desk\n$450\nBrooklyn, NY', 'USD')).toEqual({
+      status: 'ok', price: 450, currency: 'USD', marker: '$', tokens: 1
+    });
+    expect(parseMarketplaceCardPrice('Standing desk\n$180\n$180\nQueens, NY', 'USD')).toEqual({
+      status: 'ok', price: 180, currency: 'USD', marker: '$', tokens: 2
+    });
+    expect(parseMarketplaceCardPrice('Desk\n2018\nBrooklyn, NY', 'USD')).toEqual({
+      status: 'absent', price: null, currency: 'USD', tokens: 0
+    });
+    expect(parseMarketplaceCardPrice('Desk\n$1,2,3', 'USD')).toEqual({
+      status: 'malformed', price: null, currency: 'USD', marker: '$', tokens: 0
+    });
+  });
+
+  it('reports no price when card text carries conflicting values', () => {
+    expect(parseMarketplaceCardPrice('Solid oak desk\n$450\nBrooklyn, NY\nGreat condition, $25 chair included', 'USD')).toEqual({
+      status: 'ambiguous', price: null, currency: 'USD', tokens: 2
+    });
+  });
+
+  it('treats a free marker beside a priced marker as ambiguous', () => {
+    expect(parseMarketplaceCardPrice('Desk\n$50\nFree\nBrooklyn, NY', 'USD')).toEqual({
+      status: 'ambiguous', price: null, currency: 'USD', tokens: 2
+    });
+  });
+
+  it('treats the same value in different currencies as ambiguous', () => {
+    expect(parseMarketplaceCardPrice('Desk\nUS$200\nCA$200', 'USD')).toEqual({
+      status: 'ambiguous', price: null, currency: 'USD', tokens: 2
+    });
+  });
+
+  it('keeps a valid price when a malformed marker precedes it', () => {
+    expect(parseMarketplaceCardPrice('Desk\n$1,2,3\n$200', 'USD')).toEqual({
+      status: 'ok', price: 200, currency: 'USD', marker: '$', tokens: 1
+    });
+  });
+});
+
+describe('Marketplace result price ambiguity (#182)', () => {
+  it('returns conflicting-price cards with a null price and counts them', () => {
+    const result = parseMarketplacePage(input([card({
+      text: 'Solid oak desk\n$450\nBrooklyn, NY\nGreat condition, $25 chair included',
+      headingText: 'Solid oak desk'
+    })]));
+    expect(result.listings).toHaveLength(1);
+    expect(result.listings[0]?.price).toBeNull();
+    expect(result.listings[0]?.currency).toBe('USD');
+    expect(result.stats.ambiguousPrices).toBe(1);
+    expect(result.stats.cardPriceTokens).toEqual([2]);
+  });
+
+  it('keeps agreeing duplicate prices and leaves ambiguity counters at zero', () => {
+    const result = parseMarketplacePage(input([card({
+      text: 'Standing desk\n$180\n$180\nQueens, NY',
+      headingText: 'Standing desk'
+    })]));
+    expect(result.listings[0]?.price).toBe(180);
+    expect(result.stats.ambiguousPrices).toBe(0);
+    expect(result.stats.cardPriceTokens).toEqual([2]);
+  });
+
+  it('records one token for an ordinary single-price card', () => {
+    const result = parseMarketplacePage(input([card()]));
+    expect(result.listings[0]?.price).toBe(450);
+    expect(result.stats.ambiguousPrices).toBe(0);
+    expect(result.stats.cardPriceTokens).toEqual([1]);
+  });
+
+  it('carries the ambiguity counters through a no-results outcome', () => {
+    const noResults = interpretMarketplacePage(input([], { page: page([], { hasNoResultsNotice: true }) }));
+    expect(noResults).toMatchObject({ kind: 'empty', stats: { cardsSeen: 0, ambiguousPrices: 0, cardPriceTokens: [] } });
+  });
+
+  it('leaves the fetched item price on the first-token rule', () => {
+    const outcome = interpretMarketplaceItem(itemInput({ ...itemPage(), priceText: '$500 $400' }));
+    expect(outcome).toMatchObject({ kind: 'listing', listing: { price: 500 } });
   });
 });
 

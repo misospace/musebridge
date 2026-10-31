@@ -137,15 +137,29 @@ function markerCurrency(marker: string, marketCurrency: string): string {
   return CURRENCY_SYMBOLS[marker] ?? marker;
 }
 
-export function parseMarketplacePrice(text: string, marketCurrency: string): MarketplacePriceParse {
+interface PriceToken {
+  value: number;
+  currency: string;
+  marker?: string;
+}
+
+interface CollectedPriceTokens {
+  tokens: PriceToken[];
+  malformed: { currency: string; marker: string } | null;
+}
+
+function collectPriceTokens(text: string, marketCurrency: string): CollectedPriceTokens {
   // Bare numbers are intentionally not prices: years, mileage, and distances must not become listing prices.
-  // Only the first valid price token is used, so a strikethrough/previous price is not distinguished from the current price.
   const boundedText = text.slice(0, 600);
+  const tokens: PriceToken[] = [];
   let malformedCurrency: string | null = null;
   let malformedMarker: string | null = null;
 
   for (const line of boundedText.split('\n')) {
-    if (/^free\s*[.!]?$/i.test(line.trim())) return makePriceResult('ok', 0, marketCurrency);
+    if (/^free\s*[.!]?$/i.test(line.trim())) {
+      tokens.push({ value: 0, currency: marketCurrency });
+      continue;
+    }
 
     MARKER_PATTERN.lastIndex = 0;
     for (const found of line.matchAll(MARKER_PATTERN)) {
@@ -179,7 +193,10 @@ export function parseMarketplacePrice(text: string, marketCurrency: string): Mar
 
       const signPrefixed = /-\s*$/.test(before) || /^\s*-\s*\d/.test(after);
       const price = numberToken && !signPrefixed ? parseNumberToken(numberToken, currency) : null;
-      if (price !== null) return makePriceResult('ok', price, currency, marker);
+      if (price !== null) {
+        tokens.push({ value: price, currency, marker });
+        continue;
+      }
       if (malformedCurrency === null) {
         malformedCurrency = currency;
         malformedMarker = marker;
@@ -187,9 +204,59 @@ export function parseMarketplacePrice(text: string, marketCurrency: string): Mar
     }
   }
 
-  return malformedCurrency !== null
-    ? makePriceResult('malformed', null, malformedCurrency, malformedMarker ?? undefined)
+  return {
+    tokens,
+    malformed: malformedCurrency !== null ? { currency: malformedCurrency, marker: malformedMarker ?? '' } : null
+  };
+}
+
+export function parseMarketplacePrice(text: string, marketCurrency: string): MarketplacePriceParse {
+  const collected = collectPriceTokens(text, marketCurrency);
+  const first = collected.tokens[0];
+  if (first) return makePriceResult('ok', first.value, first.currency, first.marker);
+  return collected.malformed !== null
+    ? makePriceResult('malformed', null, collected.malformed.currency, collected.malformed.marker)
     : makePriceResult('absent', null, marketCurrency);
+}
+
+export const MARKETPLACE_CARD_PRICE_STATUSES = ['ok', 'absent', 'malformed', 'ambiguous'] as const;
+
+export interface MarketplaceCardPriceParse {
+  status: typeof MARKETPLACE_CARD_PRICE_STATUSES[number];
+  price: number | null;
+  currency: string;
+  marker?: string;
+  /** Valid price tokens found in the bounded card text; a count only, never content (#182). */
+  tokens: number;
+}
+
+/**
+ * Search cards report a price only when the card text agrees with itself: a card whose text
+ * carries more than one distinct valid price value (a bundle mention, a strikethrough, a
+ * related item's price) cannot prove which one is the listing's price, so it reports no price
+ * rather than the first marker's guess (#182). Repeated identical prices (the same amount
+ * rendered twice) stay unambiguous. The fetched detail page parses a dedicated price element
+ * and keeps the first-token rule through `parseMarketplacePrice`.
+ */
+export function parseMarketplaceCardPrice(text: string, marketCurrency: string): MarketplaceCardPriceParse {
+  const collected = collectPriceTokens(text, marketCurrency);
+  const first = collected.tokens[0];
+  const distinct = new Set(collected.tokens.map((token) => `${token.currency}:${token.value}`));
+  if (distinct.size > 1) {
+    return { status: 'ambiguous', price: null, currency: marketCurrency, tokens: collected.tokens.length };
+  }
+  if (first) {
+    return {
+      status: 'ok',
+      price: first.value,
+      currency: first.currency,
+      ...(first.marker !== undefined ? { marker: first.marker } : {}),
+      tokens: collected.tokens.length
+    };
+  }
+  return collected.malformed !== null
+    ? { status: 'malformed', price: null, currency: collected.malformed.currency, marker: collected.malformed.marker, tokens: 0 }
+    : { status: 'absent', price: null, currency: marketCurrency, tokens: 0 };
 }
 
 export interface ParseMarketplaceInput {
@@ -206,6 +273,10 @@ export interface MarketplaceParseStats {
   structurallyValid: number;
   duplicates: number;
   skipReasons: Readonly<Record<string, number>>;
+  /** Cards whose text carried more than one distinct valid price value; their price is null (#182). */
+  ambiguousPrices: number;
+  /** Valid price tokens per card reaching price parsing, in parse order; counts only, never content (#182). */
+  cardPriceTokens: readonly number[];
 }
 
 export interface MarketplaceParseResult {
@@ -278,8 +349,10 @@ export function parseMarketplacePage(input: ParseMarketplaceInput): MarketplaceP
   const skip = (reason: string): void => { skipReasons[reason] = (skipReasons[reason] ?? 0) + 1; };
   const candidates: Listing[] = [];
   const seenIds = new Set<string>();
+  const cardPriceTokens: number[] = [];
   let structurallyValid = 0;
   let duplicates = 0;
+  let ambiguousPrices = 0;
 
   for (const card of input.page.cards) {
     const id = parseMarketplaceItemId(card.itemHref);
@@ -289,7 +362,9 @@ export function parseMarketplacePage(input: ParseMarketplaceInput): MarketplaceP
     }
 
     const lines = cleanLines(card);
-    const priceResult = parseMarketplacePrice(card.text, input.market.currency);
+    const priceResult = parseMarketplaceCardPrice(card.text, input.market.currency);
+    cardPriceTokens.push(priceResult.tokens);
+    if (priceResult.status === 'ambiguous') ambiguousPrices += 1;
     let locationIndex = -1;
     let location = input.market.label;
     for (let index = 0; index < lines.length; index += 1) {
@@ -410,7 +485,7 @@ export function parseMarketplacePage(input: ParseMarketplaceInput): MarketplaceP
   for (let index = input.limit; index < candidates.length; index += 1) skip('limit');
   return {
     listings,
-    stats: { cardsSeen: input.page.cards.length, structurallyValid, duplicates, skipReasons }
+    stats: { cardsSeen: input.page.cards.length, structurallyValid, duplicates, skipReasons, ambiguousPrices, cardPriceTokens }
   };
 }
 
@@ -534,5 +609,5 @@ export function interpretMarketplacePage(input: ParseMarketplaceInput): Marketpl
 }
 
 function emptyStats(cardsSeen: number): MarketplaceParseStats {
-  return { cardsSeen, structurallyValid: 0, duplicates: 0, skipReasons: {} };
+  return { cardsSeen, structurallyValid: 0, duplicates: 0, skipReasons: {}, ambiguousPrices: 0, cardPriceTokens: [] };
 }
