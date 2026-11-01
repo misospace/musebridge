@@ -102,6 +102,13 @@ describe('consumer discovery tools over the fixture backend', () => {
     expect(matches[0]).toMatchObject({ thread_id: 't-synth-0001', matched_on: ['preview'] });
     expect(output.coverage).toMatchObject({ complete: true, searchable_fields: ['participants', 'preview'] });
 
+    // Participant labels are their own allowlisted field: a name match reports participants,
+    // never preview.
+    const byParticipant = await callTool('consumer_threads_search', { query: 'seller' });
+    const participantMatches = byParticipant.matches as Array<{ thread_id: string; matched_on: string[] }>;
+    expect(participantMatches.length).toBeGreaterThanOrEqual(1);
+    for (const match of participantMatches) expect(match.matched_on).toEqual(['participants']);
+
     const noMatch = await callTool('consumer_threads_search', { query: 'kayak' });
     expect(noMatch.matches).toEqual([]);
     expect(noMatch.truncated).toBe(false);

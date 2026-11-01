@@ -100,7 +100,8 @@ export function interpretConsumerMenuPage(input: {
     const candidate = {
       thread_id: row.threadId,
       route: row.route,
-      ...(row.rowText ? { preview: row.rowText } : {})
+      participants: row.participants,
+      ...(row.preview ? { preview: row.preview } : {})
     };
     const parsed = consumerThreadSchema.safeParse(candidate);
     // A row that cannot be represented means the window is not the verified window: fail closed

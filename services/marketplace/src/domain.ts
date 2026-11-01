@@ -600,12 +600,13 @@ export const prepareOutputSchema = z.union([prepareSuccessSchema, runtimeFailure
 // messenger-personal-search-design.md). The verified source is the Facebook homepage header
 // Messenger menu: one region-scoped chats grid whose rows each carry one provider-supplied
 // same-origin thread route — plain `/messages/t/{key}` or E2EE `/messages/e2ee/t/{key}` — plus
-// provider-rendered per-row text. `route` preserves the provider's own route provenance: an
-// E2EE-surfaced key is never rewritten to the plain path. `participants` and `preview` carry
-// provider-supplied per-row text only, never inferred values; the deployed menu renders name and
-// snippet in separate spans whose field-level semantics are still being characterized, so the
-// Facebook backend returns the row's text as `preview` and omits `participants` until that
-// characterization pass completes (a recorded runtime item of #185, not a gate).
+// provider-rendered per-row fields. `route` preserves the provider's own route provenance: an
+// E2EE-surfaced key is never rewritten to the plain path. The 2026-10-31 field-semantics record
+// attributes the row's rendered text structurally: the first text span is the participant/thread
+// label (`participants`), the second is the message snippet (`preview`), while the row's
+// presence label and its timestamp (the single `abbr`) are excluded — they are not allowlisted
+// search fields and are never flattened into one. Any row whose text shape does not match that
+// contract is structure drift and fails the whole observation closed (#186 review).
 export const consumerThreadSchema = z.object({
   thread_id: conversationThreadIdSchema,
   route: z.enum(['plain', 'e2ee']),

@@ -38,12 +38,12 @@ const homeShell = (variant: 'normal' | 'conflicting' | 'no-control' | 'auto-open
 };
 
 function menuMarkup(variant: 'normal' | 'conflicting' | 'no-control' | 'auto-open' | 'wide'): string {
-  const row = (key: string, e2ee: boolean, name: string, text: string) =>
-    `<div role="row"><a href="/messages/${e2ee ? 'e2ee/' : ''}t/${key}/"><span>${name}</span><span>${text}</span></a></div>`;
+  const row = (key: string, e2ee: boolean, name: string, text: string, presence = false) =>
+    `<div role="row"><a href="/messages/${e2ee ? 'e2ee/' : ''}t/${key}/">${presence ? '<div>Active now</div>' : ''}<span>${name}</span><span>${text}</span><span>·</span><abbr>${e2ee ? '3h' : '2h'}</abbr></a></div>`;
   if (variant === 'conflicting') {
     // One row carrying two distinct conversation keys: the association is ambiguous, so the
     // whole observation must fail closed rather than pick a key.
-    return `<div role="grid" aria-label="Chats"><div role="row"><a href="/messages/t/111111111111111/"><span>Synthetic Alpha</span><span>Is the fixture bike available?</span></a><a href="/messages/t/222222222222222/"><span>Synthetic Beta</span><span>Which key is mine?</span></a></div>${row('333333333333333', false, 'Synthetic Gamma', 'Pickup works.')}</div>`;
+    return `<div role="grid" aria-label="Chats"><div role="row"><a href="/messages/t/111111111111111/"><span>Synthetic Alpha</span><span>Is the fixture bike available?</span><span>·</span><abbr>2h</abbr></a><a href="/messages/t/222222222222222/"><span>Synthetic Beta</span><span>Which key is mine?</span><span>·</span><abbr>2h</abbr></a></div>${row('333333333333333', false, 'Synthetic Gamma', 'Pickup works.')}</div>`;
   }
   if (variant === 'wide') {
     // Thirty unique rows: wider than the list contract's return cap, so the search-window
@@ -54,7 +54,7 @@ function menuMarkup(variant: 'normal' | 'conflicting' | 'no-control' | 'auto-ope
     ).join('');
     return `<div role="grid" aria-label="Chats">${rows}</div>`;
   }
-  return `<div role="grid" aria-label="Chats">${row('111111111111111', false, 'Synthetic Alpha', 'Is the fixture bike available?')}${row('222222222222222', true, 'Synthetic Beta', 'The E2EE route keeps its provenance.')}${row('333333333333333', false, 'Synthetic Gamma', 'Pickup works tomorrow.')}</div>`;
+  return `<div role="grid" aria-label="Chats">${row('111111111111111', false, 'Synthetic Alpha', 'Is the fixture bike available?')}${row('222222222222222', true, 'Synthetic Beta', 'The E2EE route keeps its provenance.')}${row('333333333333333', false, 'Synthetic Gamma', 'Pickup works tomorrow.', true)}</div>`;
 }
 
 let server: Server;
@@ -138,7 +138,8 @@ describe.skipIf(!browserAvailable)('Facebook consumer menu discovery', () => {
       { thread_id: '222222222222222', route: 'e2ee' },
       { thread_id: '333333333333333', route: 'plain' }
     ]);
-    expect(page.threads[0]?.preview).toBe('Synthetic AlphaIs the fixture bike available?');
+    expect(page.threads[0]?.participants).toEqual(['Synthetic Alpha']);
+    expect(page.threads[0]?.preview).toBe('Is the fixture bike available?');
     // No pagination signal exists on this source, so the window is never proven complete.
     expect(page.coverage).toEqual({ threads_observed: 3, window: 'recent-load', complete: false });
     expect(page.truncated).toBe(false);
@@ -161,9 +162,27 @@ describe.skipIf(!browserAvailable)('Facebook consumer menu discovery', () => {
       threads_observed: 3,
       window: 'recent-load',
       complete: false,
-      searchable_fields: ['preview']
+      searchable_fields: ['participants', 'preview']
     });
     expect(page.truncated).toBe(false);
+  });
+
+  it('matches participant labels with truthful provenance', async () => {
+    const backend = createBackend();
+    const page = await backend.searchConsumerThreads(searchInput({ query: 'gamma' }), signal());
+    expect(page.matches).toHaveLength(1);
+    expect(page.matches[0]).toMatchObject({ thread_id: '333333333333333', matched_on: ['participants'] });
+  });
+
+  it('never searches timestamps or presence labels', async () => {
+    // The row renders "2h" as its timestamp (inside the single abbr) and one row carries the
+    // static "Active now" presence label; neither is an allowlisted search field, so neither can
+    // produce a match — the review's field-provenance requirement, pinned.
+    const backend = createBackend();
+    const timestampQuery = await backend.searchConsumerThreads(searchInput({ query: '2h' }), signal());
+    expect(timestampQuery.matches).toEqual([]);
+    const presenceQuery = await backend.searchConsumerThreads(searchInput({ query: 'Active now' }), signal());
+    expect(presenceQuery.matches).toEqual([]);
   });
 
   it('reports an empty search as a window-scoped negative, never authoritative absence', async () => {
@@ -172,7 +191,7 @@ describe.skipIf(!browserAvailable)('Facebook consumer menu discovery', () => {
     expect(page.matches).toEqual([]);
     expect(page.truncated).toBe(false);
     expect(page.coverage.complete).toBe(false);
-    expect(page.coverage.searchable_fields).toEqual(['preview']);
+    expect(page.coverage.searchable_fields).toEqual(['participants', 'preview']);
   });
 
   it('caps matches at the caller limit with truthful truncation', async () => {

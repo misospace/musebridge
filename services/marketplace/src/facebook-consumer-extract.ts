@@ -21,7 +21,10 @@ export interface ExtractConsumerMenuOptions {
 export interface ExtractedConsumerRow {
   threadId: string;
   route: 'plain' | 'e2ee';
-  rowText?: string;
+  /** The provider-rendered participant/thread label, attributed to the row's first text span. */
+  participants: string[];
+  /** The provider-rendered message snippet, attributed to the row's second text span. */
+  preview?: string;
 }
 
 export interface ExtractedConsumerMenuPage {
@@ -60,7 +63,6 @@ export function extractConsumerMenuPage(options: ExtractConsumerMenuOptions): Ex
   const threadIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
   const routePattern = /^\/messages\/(?:e2ee\/)?t\/([^/]+)\/?$/;
   const e2eePrefix = '/messages/e2ee/';
-  const normalizeText = (value: string, maximum: number): string => value.replace(/\s+/g, ' ').trim().slice(0, maximum);
   const baseHref = location.href.startsWith('http://') || location.href.startsWith('https://')
     ? location.href
     : 'https://www.facebook.com/';
@@ -151,6 +153,53 @@ export function extractConsumerMenuPage(options: ExtractConsumerMenuOptions): Ex
   };
   const hasEmptyStateMarker = /no conversations|no messages yet|nothing here yet/i.test(pageText);
 
+  // Attributes the row's rendered text to the verified field structure, in document order inside
+  // the conversation link:
+  //
+  //   [presence label (a `div`, optional)] [participant label span] [snippet span]
+  //   [one-character separator span (excluded)] [timestamp inside the row's single `abbr` (excluded)]
+  //
+  // The presence label is a static provider-rendered string ("Active now"-shaped, observed on 4
+  // of 18 live rows) and the timestamp is the `abbr`'s own text; neither is an allowlisted search
+  // field, so both are excluded from the returned fields rather than flattened into one
+  // searchable value. Any other element count, order, or tag shape is structure drift: the row is
+  // unattributable and its caller fails the whole observation closed. The shape contract must be
+  // kept in sync with `facebook-consumer-parse.ts` and the fixtures.
+  const attributeRowFields = (row: Element): { participants: string[]; preview?: string } | undefined => {
+    const own = (el: Element): string => [...el.childNodes]
+      .filter((n): n is Text => n.nodeType === 3)
+      .map((n) => n.textContent ?? '')
+      .join('')
+      .trim();
+    const abbrs = row.querySelectorAll('abbr');
+    if (abbrs.length !== 1) return undefined;
+    const timestampEl = abbrs[0];
+
+    const link = row.querySelector('a[href]');
+    const scope = link ?? row;
+    const outside = [...scope.querySelectorAll('*')].filter(
+      (el) => own(el).length > 0 && !(timestampEl && (el === timestampEl || timestampEl.contains(el)))
+    );
+    const fields = outside.filter((el) => {
+      const text = own(el);
+      // The one-character separator between snippet and timestamp is not a field.
+      return !(text.length === 1 && !/[a-z0-9]/i.test(text));
+    });
+    if (fields.length < 2 || fields.length > 3) return undefined;
+    // The verified shapes: [name span, snippet span] or [presence div, name span, snippet span].
+    if (fields.length === 3 && fields[0]?.tagName !== 'DIV') return undefined;
+    const nameEl = fields[fields.length === 3 ? 1 : 0];
+    const snippetEl = fields[fields.length === 3 ? 2 : 1];
+    if (!nameEl || !snippetEl || nameEl.tagName !== 'SPAN' || snippetEl.tagName !== 'SPAN') return undefined;
+    const name = own(nameEl);
+    const snippet = own(snippetEl);
+    if (!name) return undefined;
+    // A name over the participant bound is not truncated (a truncated label would be a fabricated
+    // participant); the row is unattributable and the observation fails closed.
+    if (name.length > 128) return undefined;
+    return { participants: [name], ...(snippet ? { preview: snippet.slice(0, maxRowTextLength) } : {}) };
+  };
+
   const result: ExtractedConsumerMenuPage = {
     url,
     pathname: location.pathname.slice(0, 512),
@@ -208,11 +257,19 @@ export function extractConsumerMenuPage(options: ExtractConsumerMenuOptions): Ex
         result.malformedRows += 1;
         continue;
       }
+      const fields = attributeRowFields(row);
+      if (fields === undefined) {
+        // The row's text structure does not match the field contract verified against the live
+        // menu (2026-10-31 field-semantics record): the row cannot be attributed, so the whole
+        // observation fails closed instead of flattening unattributed text into a searchable
+        // field (#186 review).
+        result.malformedRows += 1;
+        continue;
+      }
       const entry = [...keys.entries()][0];
       if (!entry) continue;
       const [threadId, route] = entry;
-      const rowText = normalizeText(row.textContent ?? '', maxRowTextLength);
-      result.rows.push({ threadId, route, ...(rowText ? { rowText } : {}) });
+      result.rows.push({ threadId, route, participants: fields.participants, ...(fields.preview ? { preview: fields.preview } : {}) });
       continue;
     }
     if (malformedLink) result.malformedRows += 1;
@@ -221,3 +278,4 @@ export function extractConsumerMenuPage(options: ExtractConsumerMenuOptions): Ex
   }
   return result;
 }
+

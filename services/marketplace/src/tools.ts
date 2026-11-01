@@ -244,7 +244,7 @@ export const TOOLS = [
   },
   {
     name: 'consumer_threads_search',
-    description: 'Search recent personal Messenger conversations by matching a query in memory against provider-supplied per-row text; the query is never typed into Facebook. One homepage load and menu open per call; by design it never opens a conversation — if the load unexpectedly navigates into one, the call aborts and whether a read receipt was emitted in that case is unknown. The load may clear your own unread badge. Results cover only the observed recent menu window: an empty result means no match in that window, not that a conversation does not exist.',
+    description: 'Search recent personal Messenger conversations by matching a query in memory against provider-supplied participant labels and message snippets; the query is never typed into Facebook. One homepage load and menu open per call; by design it never opens a conversation — if the load unexpectedly navigates into one, the call aborts and whether a read receipt was emitted in that case is unknown. The load may clear your own unread badge. Results cover only the observed recent menu window: an empty result means no match in that window, not that a conversation does not exist.',
     inputSchema: consumerThreadsSearchInputSchema,
     outputSchema: consumerThreadsSearchOutputSchema,
     requires: { method: 'searchConsumerThreads' },

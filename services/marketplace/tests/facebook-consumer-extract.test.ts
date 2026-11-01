@@ -43,15 +43,29 @@ describe.skipIf(!browserAvailable)('Facebook consumer menu extraction', () => {
     await browser?.close();
   });
 
-  it('extracts region-scoped rows with route provenance and row text, and the interpreter deduplicates keys', async () => {
+  it('extracts region-scoped rows with route provenance and attributed fields, and the interpreter deduplicates keys', async () => {
     const extracted = await extractOf(loadFixture('menu-normal.html'));
     expect(extracted.chatsRegionCount).toBe(1);
     expect(extracted.regionRowCount).toBe(5);
     // The extractor keeps every linked row raw, including the repeated key; the interpreter owns
     // deduplication, so the observation stays evidence rather than a partially processed result.
     expect(extracted.rows).toHaveLength(4);
-    expect(extracted.rows[0]).toMatchObject({ threadId: '111111111111111', route: 'plain' });
-    expect(extracted.rows[1]).toMatchObject({ threadId: '222222222222222', route: 'e2ee' });
+    // Field attribution per the 2026-10-31 field-semantics record: first text span is the
+    // participant label, second is the snippet; the separator and the timestamp (the row's
+    // single abbr) are excluded, and the presence label never enters the searchable fields.
+    expect(extracted.rows[0]).toEqual({
+      threadId: '111111111111111',
+      route: 'plain',
+      participants: ['Synthetic Alpha'],
+      preview: 'Is the fixture bike available?'
+    });
+    expect(extracted.rows[1]).toEqual({
+      threadId: '222222222222222',
+      route: 'e2ee',
+      participants: ['Synthetic Beta'],
+      preview: 'The E2EE route keeps its provenance.'
+    });
+    expect(extracted.rows[2]?.participants).toEqual(['Synthetic Gamma']);
     expect(extracted.rows[3]?.threadId).toBe('111111111111111');
     expect(extracted.rowsScanSaturated).toBe(false);
     expect(extracted.duplicateKeyRows).toBe(0);
@@ -69,8 +83,8 @@ describe.skipIf(!browserAvailable)('Facebook consumer menu extraction', () => {
       { thread_id: '222222222222222', route: 'e2ee' },
       { thread_id: '333333333333333', route: 'plain' }
     ]);
-    // The row text is the provider-rendered text of the row, verbatim and bounded.
-    expect(outcome.threads[0]?.preview).toBe('Synthetic AlphaIs the fixture bike available?2h');
+    expect(outcome.threads[0]?.participants).toEqual(['Synthetic Alpha']);
+    expect(outcome.threads[0]?.preview).toBe('Is the fixture bike available?');
   });
 
   it('recognizes an explicitly empty menu and never mistakes a changed layout for one', async () => {
@@ -84,7 +98,7 @@ describe.skipIf(!browserAvailable)('Facebook consumer menu extraction', () => {
     expect(interpret(noRegion)).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
   });
 
-  it('fails closed on conflicting keys, malformed keys, and a saturated row scan', async () => {
+  it('fails closed on conflicting keys, malformed keys, a saturated row scan, and structure drift', async () => {
     const conflicting = await extractOf(loadFixture('menu-conflicting-keys.html'));
     expect(conflicting.duplicateKeyRows).toBe(1);
     expect(interpret(conflicting)).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
@@ -94,10 +108,18 @@ describe.skipIf(!browserAvailable)('Facebook consumer menu extraction', () => {
     expect(malformed.rows).toHaveLength(1);
     expect(interpret(malformed)).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
 
+    // A row whose text shape does not match the verified field contract (here: two timestamps
+    // where the contract allows the single abbr) is unattributable — the observation fails
+    // closed instead of flattening the row into a searchable value (#186 review).
+    const drifted = await extractOf(loadFixture('menu-structure-drift.html'));
+    expect(drifted.malformedRows).toBe(1);
+    expect(drifted.rows).toHaveLength(1);
+    expect(interpret(drifted)).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+
     // A region with more rows than the scan bound leaves rows unexamined: untrusted observation.
     const rows = Array.from({ length: CONSUMER_EXTRACT_LIMITS.maxRowsScan + 10 }, (_, index) => {
       const key = String(400000000000000 + index);
-      return `<div role="row"><a href="/messages/t/${key}/"><span>Row ${index}</span></a></div>`;
+      return `<div role="row"><a href="/messages/t/${key}/"><span>Row ${index}</span><span>Body ${index}</span><span>·</span><abbr>2h</abbr></a></div>`;
     }).join('');
     const saturated = await extractOf(`<!doctype html><html><body><div role="banner"><div role="button" aria-label="Messenger" style="width:40px;height:40px"></div></div><div role="grid" aria-label="Chats">${rows}</div><a href="/logout">Log out</a></body></html>`);
     expect(saturated.rowsScanSaturated).toBe(true);
