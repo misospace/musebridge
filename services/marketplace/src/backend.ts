@@ -223,31 +223,34 @@ export class FixtureBackend implements MarketplaceBackend, ConversationBackend {
   // Personal-inbox consumer discovery (#79). The fixture holds its whole synthetic list by
   // construction, so its menu window is complete by construction — the same reasoning behind the
   // fixture read coverage — and its `truncated` is exactly the rows the caller's limit left out.
-  listConsumerThreads(input: ReturnType<typeof consumerThreadsListInputSchema.parse>, _signal: AbortSignal): ConsumerThreadListPage {
-    const threads: ConsumerThread[] = FIXTURE_CONVERSATIONS.slice(0, input.limit).map(({ thread }) => ({
+  // The search matches over the FULL synthetic list; the limit only caps each tool's return.
+  private observedConsumerThreads(): ConsumerThread[] {
+    return FIXTURE_CONVERSATIONS.map(({ thread }) => ({
       thread_id: thread.thread_id,
       route: 'plain' as const,
       ...(thread.participants ? { participants: thread.participants } : {}),
       ...(thread.preview ? { preview: thread.preview } : {})
     }));
+  }
+
+  listConsumerThreads(input: ReturnType<typeof consumerThreadsListInputSchema.parse>, _signal: AbortSignal): ConsumerThreadListPage {
+    const observed = this.observedConsumerThreads();
     return {
-      threads,
-      truncated: FIXTURE_CONVERSATIONS.length > input.limit,
-      coverage: { threads_observed: FIXTURE_CONVERSATIONS.length, window: 'recent-load', complete: true }
+      threads: observed.slice(0, input.limit),
+      truncated: observed.length > input.limit,
+      coverage: { threads_observed: observed.length, window: 'recent-load', complete: true }
     };
   }
 
-  searchConsumerThreads(input: ReturnType<typeof consumerThreadsSearchInputSchema.parse>, signal: AbortSignal): ConsumerThreadSearchPage {
-    // The search examines the whole observed window, so the fixture's own cap — not the caller's
-    // match limit — bounds what the query runs over; the match limit only caps the return.
-    const observed = this.listConsumerThreads({ limit: CONSUMER_EXTRACT_MAX_THREADS }, signal);
-    const outcome = searchConsumerThreads({ threads: observed.threads, query: input.query });
+  searchConsumerThreads(input: ReturnType<typeof consumerThreadsSearchInputSchema.parse>, _signal: AbortSignal): ConsumerThreadSearchPage {
+    const observed = this.observedConsumerThreads();
+    const outcome = searchConsumerThreads({ threads: observed, query: input.query });
     const matches = outcome.matches.slice(0, input.limit);
     return {
       matches,
       truncated: outcome.matches.length > matches.length,
       coverage: {
-        threads_observed: observed.coverage.threads_observed,
+        threads_observed: observed.length,
         window: 'recent-load',
         complete: true,
         searchable_fields: outcome.searchableFields
@@ -255,10 +258,6 @@ export class FixtureBackend implements MarketplaceBackend, ConversationBackend {
     };
   }
 }
-
-// The menu source's extraction cap (#79): the window a search runs over, independent of any
-// caller's return limit.
-const CONSUMER_EXTRACT_MAX_THREADS = 20;
 
 export function canonicalHttpUrl(value: string): string {
   const url = new URL(value);

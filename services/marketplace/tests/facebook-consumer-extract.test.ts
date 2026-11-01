@@ -3,7 +3,6 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 import { extractConsumerMenuPage, CONSUMER_EXTRACT_LIMITS, type ExtractedConsumerMenuPage } from '../src/facebook-consumer-extract.js';
 import { classifyConsumerMenuPage, interpretConsumerMenuPage } from '../src/facebook-consumer-parse.js';
-import { consumerThreadsListInputSchema } from '../src/domain.js';
 
 const browserAvailable = existsSync(chromium.executablePath());
 if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
@@ -21,14 +20,12 @@ async function extractOf(html: string): Promise<ExtractedConsumerMenuPage> {
   return page.evaluate(extractConsumerMenuPage, { limits: CONSUMER_EXTRACT_LIMITS });
 }
 
-function interpret(extracted: ExtractedConsumerMenuPage, limit = 10) {
+function interpret(extracted: ExtractedConsumerMenuPage) {
   return interpretConsumerMenuPage({
     // setContent pages live at about:blank, so the helper pins the verified address the backend
     // would have navigated to; the containment tests below override it explicitly.
     page: { ...extracted, url: `${BASE}/`, pathname: '/' },
-    baseUrl: BASE,
-    limit: consumerThreadsListInputSchema.parse({ limit }).limit,
-    maxExtractedThreads: CONSUMER_EXTRACT_LIMITS.maxThreads
+    baseUrl: BASE
   });
 }
 
@@ -64,7 +61,9 @@ describe.skipIf(!browserAvailable)('Facebook consumer menu extraction', () => {
     const outcome = interpret(extracted);
     expect(outcome.kind).toBe('menu');
     if (outcome.kind !== 'menu') return;
-    expect(outcome.threadsObserved).toBe(3);
+    // The interpreter returns the FULL deduplicated window; the callers apply their own return
+    // limits, so a search can never silently omit a later observed row (#186 review).
+    expect(outcome.threads).toHaveLength(3);
     expect(outcome.threads.map(({ thread_id, route }) => ({ thread_id, route }))).toEqual([
       { thread_id: '111111111111111', route: 'plain' },
       { thread_id: '222222222222222', route: 'e2ee' },
@@ -72,7 +71,6 @@ describe.skipIf(!browserAvailable)('Facebook consumer menu extraction', () => {
     ]);
     // The row text is the provider-rendered text of the row, verbatim and bounded.
     expect(outcome.threads[0]?.preview).toBe('Synthetic AlphaIs the fixture bike available?2h');
-    expect(outcome.truncated).toBe(false);
   });
 
   it('recognizes an explicitly empty menu and never mistakes a changed layout for one', async () => {
@@ -121,9 +119,7 @@ describe.skipIf(!browserAvailable)('Facebook consumer menu extraction', () => {
     const extracted = await extractOf(loadFixture('menu-normal.html'));
     const navigated = interpretConsumerMenuPage({
       page: { ...extracted, url: 'https://www.facebook.com/messages/t/111111111111111/', pathname: '/messages/t/111111111111111/' },
-      baseUrl: BASE,
-      limit: 10,
-      maxExtractedThreads: CONSUMER_EXTRACT_LIMITS.maxThreads
+      baseUrl: BASE
     });
     expect(navigated).toMatchObject({
       kind: 'error',
@@ -133,9 +129,7 @@ describe.skipIf(!browserAvailable)('Facebook consumer menu extraction', () => {
 
     const elsewhere = interpretConsumerMenuPage({
       page: { ...extracted, url: 'https://www.facebook.com/other/', pathname: '/other/' },
-      baseUrl: BASE,
-      limit: 10,
-      maxExtractedThreads: CONSUMER_EXTRACT_LIMITS.maxThreads
+      baseUrl: BASE
     });
     expect(elsewhere).toMatchObject({
       kind: 'error',
@@ -144,21 +138,21 @@ describe.skipIf(!browserAvailable)('Facebook consumer menu extraction', () => {
     });
   });
 
-  it('honors the caller limit with cap-truthful truncation over the observed window', async () => {
+  it('returns the full observed window to the callers, who own the return limits', async () => {
     const extracted = await extractOf(loadFixture('menu-normal.html'));
-    const limited = interpret(extracted, 2);
-    expect(limited).toMatchObject({ kind: 'menu', truncated: true, threadsObserved: 3 });
-    if (limited.kind !== 'menu') return;
-    expect(limited.threads).toHaveLength(2);
+    const outcome = interpret(extracted);
+    expect(outcome.kind).toBe('menu');
+    if (outcome.kind !== 'menu') return;
+    // Three unique rows pass through whole even though a caller could have asked for fewer; the
+    // backend's limit tests assert the slicing and cap-truthful truncation on top of this.
+    expect(outcome.threads).toHaveLength(3);
   });
 
   it('rejects a menu reached at another origin', async () => {
     const extracted = await extractOf(loadFixture('menu-normal.html'));
     const outcome = interpretConsumerMenuPage({
       page: { ...extracted, url: 'https://www.example.com/' },
-      baseUrl: BASE,
-      limit: 10,
-      maxExtractedThreads: CONSUMER_EXTRACT_LIMITS.maxThreads
+      baseUrl: BASE
     });
     expect(outcome).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
   });

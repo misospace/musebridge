@@ -18,7 +18,7 @@ if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
 // The homepage shell mounts the menu variant only after a real click on the Messenger control,
 // exactly the runtime shape the backend must drive: navigation to the root, trusted click,
 // region-scoped extraction. Zero requests escape the loopback server.
-const homeShell = (variant: 'normal' | 'conflicting' | 'no-control' | 'auto-open'): string => {
+const homeShell = (variant: 'normal' | 'conflicting' | 'no-control' | 'auto-open' | 'wide'): string => {
   const control = variant === 'no-control'
     ? '<div style="width:40px;height:40px"></div>'
     : '<div role="button" aria-label="Messenger" style="width:40px;height:40px" id="messenger-menu"></div>';
@@ -37,7 +37,7 @@ const homeShell = (variant: 'normal' | 'conflicting' | 'no-control' | 'auto-open
 </body></html>`;
 };
 
-function menuMarkup(variant: 'normal' | 'conflicting' | 'no-control' | 'auto-open'): string {
+function menuMarkup(variant: 'normal' | 'conflicting' | 'no-control' | 'auto-open' | 'wide'): string {
   const row = (key: string, e2ee: boolean, name: string, text: string) =>
     `<div role="row"><a href="/messages/${e2ee ? 'e2ee/' : ''}t/${key}/"><span>${name}</span><span>${text}</span></a></div>`;
   if (variant === 'conflicting') {
@@ -45,12 +45,21 @@ function menuMarkup(variant: 'normal' | 'conflicting' | 'no-control' | 'auto-ope
     // whole observation must fail closed rather than pick a key.
     return `<div role="grid" aria-label="Chats"><div role="row"><a href="/messages/t/111111111111111/"><span>Synthetic Alpha</span><span>Is the fixture bike available?</span></a><a href="/messages/t/222222222222222/"><span>Synthetic Beta</span><span>Which key is mine?</span></a></div>${row('333333333333333', false, 'Synthetic Gamma', 'Pickup works.')}</div>`;
   }
+  if (variant === 'wide') {
+    // Thirty unique rows: wider than the list contract's return cap, so the search-window
+    // regression lives here — a query that only row 25 matches must be found, and the list must
+    // report cap-truthful truncation over all thirty observed threads.
+    const rows = Array.from({ length: 30 }, (_, index) =>
+      row(String(500000000000000 + index), false, `Wide Sender ${index}`, `Wide row number ${index} with marker${index}.`)
+    ).join('');
+    return `<div role="grid" aria-label="Chats">${rows}</div>`;
+  }
   return `<div role="grid" aria-label="Chats">${row('111111111111111', false, 'Synthetic Alpha', 'Is the fixture bike available?')}${row('222222222222222', true, 'Synthetic Beta', 'The E2EE route keeps its provenance.')}${row('333333333333333', false, 'Synthetic Gamma', 'Pickup works tomorrow.')}</div>`;
 }
 
 let server: Server;
 let origin: string;
-let variant: 'normal' | 'conflicting' | 'no-control' | 'auto-open' = 'normal';
+let variant: 'normal' | 'conflicting' | 'no-control' | 'auto-open' | 'wide' = 'normal';
 const requests: string[] = [];
 const managers: BrowserSessionManager[] = [];
 const profileDirs: string[] = [];
@@ -204,6 +213,36 @@ describe.skipIf(!browserAvailable)('Facebook consumer menu discovery', () => {
       'UPSTREAM_ERROR',
       'The Facebook Messenger menu could not be read as a verified conversation list.'
     );
+  });
+
+  it('reports cap-truthful truncation over a window wider than the return cap', async () => {
+    variant = 'wide';
+    const backend = createBackend();
+    const page = await backend.listConsumerThreads(listInput({ limit: 10 }), signal());
+    expect(page.threads).toHaveLength(10);
+    expect(page.truncated).toBe(true);
+    expect(page.coverage.threads_observed).toBe(30);
+  });
+
+  it('search examines every observed row, including matches beyond the list return cap', async () => {
+    // Regression for the #186 review: a search that reused the list's limit-sliced window would
+    // silently omit row 25 (beyond the 20-row cap) while threads_observed still counted thirty.
+    variant = 'wide';
+    const backend = createBackend();
+    const page = await backend.searchConsumerThreads(searchInput({ query: 'marker25' }), signal());
+    expect(page.matches).toHaveLength(1);
+    expect(page.matches[0]).toMatchObject({ thread_id: '500000000000025', matched_on: ['preview'] });
+    expect(page.truncated).toBe(false);
+    expect(page.coverage.threads_observed).toBe(30);
+  });
+
+  it('caps search matches at the caller limit with truthful truncation over the full window', async () => {
+    variant = 'wide';
+    const backend = createBackend();
+    const page = await backend.searchConsumerThreads(searchInput({ query: 'wide row', limit: 2 }), signal());
+    expect(page.matches).toHaveLength(2);
+    expect(page.truncated).toBe(true);
+    expect(page.coverage.threads_observed).toBe(30);
   });
 
   it('stays a diagnostics-only surface under probe-only mode', async () => {

@@ -109,5 +109,10 @@ describe('consumer discovery tools over the fixture backend', () => {
     // the Facebook backend would report the same shape with `complete: false`.
     expect((noMatch.coverage as { complete: boolean }).complete).toBe(true);
   });
+
+  it('rejects control characters in the query as malformed arguments', async () => {
+    await expect(callTool('consumer_threads_search', { query: 'bike\u0000stuff' })).rejects.toThrow();
+    await expect(callTool('consumer_threads_search', { query: 'bike\nstuff' })).rejects.toThrow();
+  });
 });
 

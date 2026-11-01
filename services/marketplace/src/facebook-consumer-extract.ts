@@ -2,15 +2,14 @@ import type { ExtractedMessengerSignals } from './facebook-messenger-extract.js'
 
 // Extraction bounds for the personal-inbox menu (#79). The menu is region-scoped, so the row
 // scan never walks the whole page; the bounds keep one malformed or pathological page from
-// producing an unbounded payload.
+// producing an unbounded payload. There is deliberately no row-count cap here: the search layer
+// must examine every observed row, and the scan bound is what makes "every observed row" finite.
 export const CONSUMER_EXTRACT_LIMITS = {
-  maxThreads: 20,
   maxRowsScan: 120,
   maxRowTextLength: 280
 } as const;
 
 export interface ConsumerExtractionLimits {
-  maxThreads: number;
   maxRowsScan: number;
   maxRowTextLength: number;
 }

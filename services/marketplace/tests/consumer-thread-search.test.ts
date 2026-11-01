@@ -8,9 +8,13 @@ const thread = (overrides: Partial<ConsumerThread> & { thread_id: string }): Con
 });
 
 describe('consumer thread search matching', () => {
-  it('normalizes with NFKC, case folding, and whitespace collapse', () => {
+  it('normalizes with NFKC, lowercasing, and whitespace collapse', () => {
     expect(normalizeConsumerText('  Is   the\tBIKE  available? ')).toBe('is the bike available?');
+    // NFKC decomposes compatibility ligatures, so the ﬁ ligature matches a plain "fi".
     expect(normalizeConsumerText('ﬁxture')).toBe('fixture');
+    // This is NFKC + lowercase, not full Unicode case folding: ß stays ß (the exact algorithm
+    // the tool contract documents).
+    expect(normalizeConsumerText('Straße')).toBe('straße');
   });
 
   it('matches previews case-insensitively and names the matched field', () => {

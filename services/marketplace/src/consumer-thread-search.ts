@@ -17,9 +17,11 @@ export interface ConsumerSearchOutcome<T extends ConsumerSearchableThread = Cons
 const SEARCHABLE_FIELDS: readonly ConsumerSearchField[] = ['participants', 'preview'];
 
 /**
- * The matching normalization: Unicode NFKC, case folding, and internal-whitespace collapse on
- * both the query and the candidate values. It is deliberately the only normalization — no regex,
- * no fuzzy matching, no stemming, and nothing is inferred from position, order, or timestamps.
+ * The matching normalization: Unicode NFKC compatibility normalization, lowercasing, and internal
+ * whitespace collapse on both the query and the candidate values. It is deliberately the only
+ * normalization — no regex, no fuzzy matching, no stemming, and nothing is inferred from
+ * position, order, or timestamps. This is not full Unicode case folding (a ß is not folded to
+ * "ss"); it is the exact algorithm the tool contract documents.
  */
 export function normalizeConsumerText(value: string): string {
   return value.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();

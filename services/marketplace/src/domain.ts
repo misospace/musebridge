@@ -648,7 +648,11 @@ export const consumerThreadsListOutputSchema = z.union([
 ]);
 
 export const consumerThreadsSearchInputSchema = z.object({
-  query: z.string().trim().min(1).max(MAX_QUERY_LENGTH).regex(/\S/),
+  // Strict query input: trimmed, bounded, non-blank, and free of control characters — the same
+  // character discipline as the outbound message contract, documented in the tool contract (#79).
+  query: z.string().trim().min(1).max(MAX_QUERY_LENGTH)
+    .regex(/^[^\u0000-\u001F\u007F]+$/, 'query must not contain control characters')
+    .regex(/\S/),
   limit: z.number().int().min(1).max(20).default(10)
 }).strict();
 

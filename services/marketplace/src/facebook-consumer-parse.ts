@@ -34,7 +34,12 @@ export function classifyConsumerMenuPage(page: ExtractedConsumerMenuPage): Consu
 }
 
 export type ConsumerMenuOutcome =
-  | { kind: 'menu'; threads: ConsumerThread[]; truncated: boolean; threadsObserved: number }
+  // `threads` is the FULL deduplicated, schema-validated window — never pre-sliced by a caller's
+  // return limit. Slicing is the caller's contract step (the list tool's `limit`), because the
+  // search layer must examine every observed row; an interpreter-side slice would make a search
+  // silently omit later observed matches while the coverage field still counted them (#186
+  // review). `truncated` and `threads_observed` are derived by each caller from this full window.
+  | { kind: 'menu'; threads: ConsumerThread[] }
   | { kind: 'empty' }
   | { kind: 'error'; code: ProviderErrorCode; message: string };
 
@@ -43,8 +48,6 @@ const CONSUMER_UNTRUSTED_MESSAGE = 'The Facebook Messenger menu could not be rea
 export function interpretConsumerMenuPage(input: {
   page: ExtractedConsumerMenuPage;
   baseUrl: string;
-  limit: number;
-  maxExtractedThreads: number;
 }): ConsumerMenuOutcome {
   const kind = classifyConsumerMenuPage(input.page);
   if (kind === 'captcha') return { kind: 'error', code: 'CAPTCHA_REQUIRED', message: 'Facebook requires a captcha challenge.' };
@@ -92,9 +95,8 @@ export function interpretConsumerMenuPage(input: {
     seen.add(row.threadId);
     return true;
   });
-  const threadsObserved = unique.length;
   const threads: ConsumerThread[] = [];
-  for (const row of unique.slice(0, input.limit)) {
+  for (const row of unique) {
     const candidate = {
       thread_id: row.threadId,
       route: row.route,
@@ -106,8 +108,5 @@ export function interpretConsumerMenuPage(input: {
     if (!parsed.success) return { kind: 'error', code: 'UPSTREAM_ERROR', message: CONSUMER_UNTRUSTED_MESSAGE };
     threads.push(parsed.data);
   }
-  // Cap truth: counted-but-unreturned keys are what make `truncated` honest (#151 rule). Window
-  // truth is `coverage.complete`, which the Facebook backend holds permanently `false` — the menu
-  // source exposes no pagination signal, so the window is never proven to be the whole inbox.
-  return { kind: 'menu', threads, truncated: threadsObserved > threads.length, threadsObserved };
+  return { kind: 'menu', threads };
 }

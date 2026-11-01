@@ -46,7 +46,8 @@ import {
 } from './facebook-consumer-extract.js';
 import {
   classifyConsumerMenuPage,
-  interpretConsumerMenuPage
+  interpretConsumerMenuPage,
+  type ConsumerMenuOutcome
 } from './facebook-consumer-parse.js';
 import { searchConsumerThreads } from './consumer-thread-search.js';
 import { assertFacebookOrigin, FacebookSessionProbe, isFacebookAuthClassCode, type FacebookProbeCode } from './facebook.js';
@@ -276,13 +277,11 @@ export class FacebookMessengerBackend implements ConversationBackend {
    * and a region-scoped extraction of the rendered conversation rows. The probe and reauth
    * landing paths are untouched — they stay on the Marketplace inbox — and the menu load opens no
    * conversation: a load that leaves the root pathname is contained as a typed error before any
-   * content is trusted. The source exposes no pagination signal, so `coverage.complete` is
-   * permanently `false` here: a bounded recent window, never a proven-complete listing.
+   * content is trusted. Returns the FULL deduplicated observed window; the list and search
+   * callers apply their own return limits over it, so a search never silently omits a later
+   * observed row while its coverage field still counts it (#186 review).
    */
-  async listConsumerThreads(
-    input: ReturnType<typeof consumerThreadsListInputSchema.parse>,
-    signal: AbortSignal
-  ): Promise<ConsumerThreadListPage> {
+  private async observeConsumerMenu(signal: AbortSignal): Promise<ConsumerMenuOutcome> {
     if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
     await this.ensureUsableSession(signal);
 
@@ -320,7 +319,7 @@ export class FacebookMessengerBackend implements ConversationBackend {
           await menuButton.click({ force: true, timeout: this.navigationTimeoutMs, signal: taskSignal });
         }
 
-        const extractOptions = { limits: { ...CONSUMER_EXTRACT_LIMITS, maxThreads: this.maxThreads } };
+        const extractOptions = { limits: CONSUMER_EXTRACT_LIMITS };
         // The click can trigger a same-document navigation (an unexpected conversation open), and
         // an in-flight navigation tears down the execution context an evaluate is about to use.
         // Polling treats that like any other not-yet-recognized page: the settle window stays in
@@ -359,50 +358,63 @@ export class FacebookMessengerBackend implements ConversationBackend {
       throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook Messenger menu could not be read.');
     }
 
-    const outcome = interpretConsumerMenuPage({
-      page: extracted,
-      baseUrl: this.probe.baseUrl,
-      limit: input.limit,
-      maxExtractedThreads: this.maxThreads
-    });
-    if (outcome.kind === 'error') {
-      this.recordObservedAuthFailure(outcome.code);
-      throw new MarketplaceProviderError(outcome.code, outcome.message);
-    }
+    const outcome = interpretConsumerMenuPage({ page: extracted, baseUrl: this.probe.baseUrl });
+    if (outcome.kind === 'error') this.recordObservedAuthFailure(outcome.code);
+    return outcome;
+  }
+
+  async listConsumerThreads(
+    input: ReturnType<typeof consumerThreadsListInputSchema.parse>,
+    signal: AbortSignal
+  ): Promise<ConsumerThreadListPage> {
+    const outcome = await this.observeConsumerMenu(signal);
+    if (outcome.kind === 'error') throw new MarketplaceProviderError(outcome.code, outcome.message);
     if (outcome.kind === 'empty') {
       // A window-scoped negative, not a definitive absence: this source can never prove the
       // whole inbox was covered, so the empty result carries `complete: false` (#79 contract).
       return { threads: [], truncated: false, coverage: { threads_observed: 0, window: CONSUMER_MENU_WINDOW, complete: false } };
     }
+    // Cap truth: counted-but-unreturned keys are what make `truncated` honest (#151 rule). Window
+    // truth is `coverage.complete`, held permanently `false` — the menu source exposes no
+    // pagination signal, so the window is never proven to be the whole inbox.
+    const threads = outcome.threads.slice(0, input.limit);
     return {
-      threads: outcome.threads,
-      truncated: outcome.truncated,
-      coverage: { threads_observed: outcome.threadsObserved, window: CONSUMER_MENU_WINDOW, complete: false }
+      threads,
+      truncated: outcome.threads.length > threads.length,
+      coverage: { threads_observed: outcome.threads.length, window: CONSUMER_MENU_WINDOW, complete: false }
     };
   }
 
   /**
    * Search over the verified menu observation (#79): the same single listing load, filtered in
-   * memory by the shared matcher. The search layer issues no additional search/query/pagination
-   * request and replays nothing; the query is never typed into the provider. The whole observed
-   * window is examined regardless of the caller's match limit — the limit only caps the return —
-   * so `truncated` means the window held more matches than were returned.
+   * memory by the shared matcher over the FULL observed window. The search layer issues no
+   * additional search/query/pagination request and replays nothing; the query is never typed
+   * into the provider. The caller's limit only caps the return, so `truncated` means the window
+   * held more matches than were returned — no observed row is ever silently omitted.
    */
   async searchConsumerThreads(
     input: ReturnType<typeof consumerThreadsSearchInputSchema.parse>,
     signal: AbortSignal
   ): Promise<ConsumerThreadSearchPage> {
-    const observed = await this.listConsumerThreads({ limit: CONSUMER_EXTRACT_LIMITS.maxThreads }, signal);
-    const outcome = searchConsumerThreads({ threads: observed.threads, query: input.query });
-    const matches = outcome.matches.slice(0, input.limit);
+    const outcome = await this.observeConsumerMenu(signal);
+    if (outcome.kind === 'error') throw new MarketplaceProviderError(outcome.code, outcome.message);
+    if (outcome.kind === 'empty') {
+      return {
+        matches: [],
+        truncated: false,
+        coverage: { threads_observed: 0, window: CONSUMER_MENU_WINDOW, complete: false, searchable_fields: [] }
+      };
+    }
+    const result = searchConsumerThreads({ threads: outcome.threads, query: input.query });
+    const matches = result.matches.slice(0, input.limit);
     return {
       matches,
-      truncated: outcome.matches.length > matches.length,
+      truncated: result.matches.length > matches.length,
       coverage: {
-        threads_observed: observed.coverage.threads_observed,
+        threads_observed: outcome.threads.length,
         window: CONSUMER_MENU_WINDOW,
         complete: false,
-        searchable_fields: outcome.searchableFields
+        searchable_fields: result.searchableFields
       }
     };
   }
