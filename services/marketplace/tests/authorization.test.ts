@@ -335,9 +335,14 @@ describe('registered tool action boundaries', () => {
       await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
       const tools = await client.listTools();
       const registeredNames = tools.tools.map(({ name }) => name).sort();
-      // Without a configured conversation surface the draft and send tools are not live, so the
-      // live listing is the declaration map minus both conversation-gated tools.
-      expect(registeredNames).toEqual(Object.keys(TOOL_DEFINITIONS).filter((name) => name !== 'messenger_send' && name !== 'messenger_prepare').sort());
+      // Without a configured conversation surface the draft, send, and consumer discovery tools
+      // are not live, so the live listing is the declaration map minus every conversation-gated
+      // tool (each of their entries requires a backend method this registration does not wire).
+      expect(registeredNames).toEqual(
+        Object.keys(TOOL_DEFINITIONS)
+          .filter((name) => !['messenger_send', 'messenger_prepare', 'consumer_threads_list', 'consumer_threads_search'].includes(name))
+          .sort()
+      );
     } finally {
       await Promise.allSettled([client.close(), server.close()]);
     }
