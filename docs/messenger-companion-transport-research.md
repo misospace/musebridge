@@ -143,7 +143,7 @@ The capability question is explicitly **not closed by this document**, and #188 
 
 Whether to adopt it is a bounded feasibility evaluation, opened as **#193**, which must answer at least:
 
-- Can `mautrix-meta`'s lower-level Messenger packages be consumed without running a Matrix bridge (shim size for the three `bridgev2`-leaking files; or a non-Matrix host for `MetaConnector`)?
+- Can `mautrix-meta`'s lower-level Messenger packages be consumed without running a Matrix bridge (shim size for the `bridgev2`-leaking files, re-enumerated at the pinned upstream SHA; or a non-Matrix host for `MetaConnector`)?
 - Which auth modes work today, especially native `messenger-lite`/`messenger-lite-android`?
 - What read/history/search capabilities can be exposed cleanly through bounded MCP tools with this repo's coverage-truthfulness contracts?
 - What local state and key material it persists, and whether that means a stateless design or a deliberate operator exception to the no-content-persistence rule.
