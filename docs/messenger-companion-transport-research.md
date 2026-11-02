@@ -59,12 +59,14 @@ Method note: #188 forbids inferring a provider API merely because Muse exposes a
  │            states; internal hatch paths incl. `/hatch/fb/messenger-cli/e2ee/pin-status`
  │            (binary-string evidence)
  ▼
- LAYER 4 — provider-facing Messenger transport: NO PUBLIC EVIDENCE. The unlock error surface
-           alone shows Meta-facing handshake behavior: `two_factor_required`,
+ LAYER 4 — Muse's provider-facing Messenger transport: NO PUBLIC EVIDENCE for Muse's own
+           implementation. (The layer class itself has an independent open-source
+           implementation — `mautrix-meta`, §5; what is private is Muse's.) The unlock
+           error surface shows Meta-facing handshake behavior: `two_factor_required`,
            `write_connect_failed`, "Messenger returned an incomplete unlock response",
            "Messenger returned an invalid unlock response", "Messenger could not decrypt…"
            (binary-string evidence). No endpoint, payload, key-handling, or sync-fetch
-           contract appears in any public source.
+           contract of Muse's appears in any public source.
 ```
 
 Layer ownership and the E2EE/device-state answer:
@@ -98,7 +100,7 @@ The first version of this section surveyed only fbchat-lineage wrappers and wron
 
 **What `mautrix-meta` does not give, and open feasibility questions** (bounded as issue #193):
 
-1. **Package boundary.** The low-level client `pkg/messagix` is Matrix-free for its transport/crypto/sync core (socket, e2ee, securehistory, table, syncManager), and the repo itself ships a non-Matrix driver (`cmd/lscli`). Three files leak `bridgev2` types (`messengerlite.go`, `loginerrors/errors.go`, `bloks/selenium.go` — login-step UX and error shapes only), so consuming it outside a bridge needs a small shim or a non-Matrix host for `pkg/connector`'s `MetaConnector`. Quantified in #193.
+1. **Package boundary.** The low-level client `pkg/messagix` is Matrix-free for its transport/crypto/sync core (socket, e2ee, securehistory, table, syncManager), and the repo itself ships a non-Matrix driver (`cmd/lscli`). A small set of files leaks `bridgev2` login-UX shapes (`LoginStep`/`RespError`): at the reviewed head `9c4954a7`, `grep -rl bridgev2 pkg/messagix` matches five files, of which four carry real type dependencies (`messengerlite.go`, `loginerrors/errors.go`, `bloks/selenium.go`, `bloks/selenium_platform.go`) and one matches only in a comment (`bloks/cmd/main.go`, itself a standalone debug command outside the library surface). The shim is accordingly small, but the set drifts with upstream — enumerate at your own pinned SHA (`grep -rl bridgev2 pkg/messagix`) rather than trusting this count. #193 quantifies the shim and also assesses a non-Matrix host for `pkg/connector`'s `MetaConnector`.
 2. **Native-login durability.** Whether native `messenger-lite` sessions survive checkpoint/2FA events and token invalidation in practice is a live-validation question, not answerable from source alone.
 3. **ToS/account risk.** Native login does **not** remove the Meta ToS §3.2(3) "automated means" exposure — it removes only the credential-export aggravator of the cookie path. The standing rejection of "unofficial protocol libraries" (`messenger-consumer-research.md` §2) covers this class and only the operator can change that boundary decision; the evaluation must weigh it explicitly rather than inherit it silently.
 4. **License.** AGPL-3.0 has different consequences for embedding/modifying inside Musebridge (license adoption; modified source must be published) versus running it as a separate unmodified service (aggregation) versus a modified separate service (AGPL §13 source offer). Musebridge currently carries no license field; the boundary must be decided before any code lands.
