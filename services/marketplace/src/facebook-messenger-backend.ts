@@ -50,6 +50,7 @@ import {
   type ConsumerMenuOutcome
 } from './facebook-consumer-parse.js';
 import { searchConsumerThreads } from './consumer-thread-search.js';
+import { mapBrowserOperationError } from './browser-error-mapping.js';
 import { assertFacebookOrigin, FacebookSessionProbe, isFacebookAuthClassCode, type FacebookProbeCode } from './facebook.js';
 import { FacebookCredentialLogin } from './facebook-login.js';
 import { FacebookLoginCircuitBreaker, type FacebookLoginAttemptPermit, type FacebookLoginScope } from './facebook-login-circuit-breaker.js';
@@ -239,16 +240,12 @@ export class FacebookMessengerBackend implements ConversationBackend {
       });
       extracted = result;
     } catch (error) {
-      if (signal.aborted) throw signal.reason ?? error;
-      if (error instanceof errors.TimeoutError) {
-        throw new MarketplaceProviderError('TIMEOUT', 'The Facebook Marketplace inbox page did not load in time.');
-      }
-      if (error instanceof MarketplaceProviderError) throw error;
-      if (error instanceof BrowserUnavailableError) {
-        throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
-      }
-      this.logger.error('Facebook Messenger inbox read failed:', error instanceof Error ? error.name : 'UnknownError');
-      throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook Marketplace inbox could not be read.');
+      mapBrowserOperationError(error, signal, {
+        timeoutMessage: 'The Facebook Marketplace inbox page did not load in time.',
+        fallbackMessage: 'The Facebook Marketplace inbox could not be read.',
+        logLabel: 'Facebook Messenger inbox read failed:',
+        logger: this.logger
+      });
     }
 
     const outcome = interpretMessengerInboxPage({
@@ -346,16 +343,12 @@ export class FacebookMessengerBackend implements ConversationBackend {
         return pageResult;
       });
     } catch (error) {
-      if (signal.aborted) throw signal.reason ?? error;
-      if (error instanceof errors.TimeoutError) {
-        throw new MarketplaceProviderError('TIMEOUT', 'The Facebook Messenger menu did not load in time.');
-      }
-      if (error instanceof MarketplaceProviderError) throw error;
-      if (error instanceof BrowserUnavailableError) {
-        throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
-      }
-      this.logger.error('Facebook Messenger menu read failed:', error instanceof Error ? error.name : 'UnknownError');
-      throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook Messenger menu could not be read.');
+      mapBrowserOperationError(error, signal, {
+        timeoutMessage: 'The Facebook Messenger menu did not load in time.',
+        fallbackMessage: 'The Facebook Messenger menu could not be read.',
+        logLabel: 'Facebook Messenger menu read failed:',
+        logger: this.logger
+      });
     }
 
     const outcome = interpretConsumerMenuPage({ page: extracted, baseUrl: this.probe.baseUrl });
@@ -462,16 +455,12 @@ export class FacebookMessengerBackend implements ConversationBackend {
         return result;
       });
     } catch (error) {
-      if (signal.aborted) throw signal.reason ?? error;
-      if (error instanceof errors.TimeoutError) {
-        throw new MarketplaceProviderError('TIMEOUT', 'The Facebook Messenger thread page did not load in time.');
-      }
-      if (error instanceof MarketplaceProviderError) throw error;
-      if (error instanceof BrowserUnavailableError) {
-        throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
-      }
-      this.logger.error('Facebook Messenger thread read failed:', error instanceof Error ? error.name : 'UnknownError');
-      throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook Messenger thread could not be read.');
+      mapBrowserOperationError(error, signal, {
+        timeoutMessage: 'The Facebook Messenger thread page did not load in time.',
+        fallbackMessage: 'The Facebook Messenger thread could not be read.',
+        logLabel: 'Facebook Messenger thread read failed:',
+        logger: this.logger
+      });
     }
 
     const outcome = interpretMessengerThreadPage({ page: extracted, baseUrl: this.probe.baseUrl, threadId: input.thread_id });
@@ -603,27 +592,16 @@ export class FacebookMessengerBackend implements ConversationBackend {
         if (taskSignal.aborted) throw taskSignal.reason ?? new Error('Browser operation aborted');
       });
     } catch (error) {
-      if (signal.aborted) throw signal.reason ?? error;
-      const submitMetadata = submitTriggered ? { submit_triggered: true } : undefined;
-      if (error instanceof errors.TimeoutError) {
-        // A timeout after the Enter press means the send itself did not complete, not that the
-        // page failed to load.
-        throw new MarketplaceProviderError(
-          'TIMEOUT',
-          submitTriggered ? 'The Messenger send did not complete in time.' : 'The Facebook Messenger thread page did not load in time.',
-          submitMetadata
-        );
-      }
-      if (error instanceof MarketplaceProviderError) {
-        throw submitTriggered
-          ? new MarketplaceProviderError(error.code, error.message, { ...error.metadata, submit_triggered: true })
-          : error;
-      }
-      if (error instanceof BrowserUnavailableError) {
-        throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The browser session is not available.', submitMetadata);
-      }
-      this.logger.error('Facebook Messenger send failed:', error instanceof Error ? error.name : 'UnknownError');
-      throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook Messenger message could not be sent.', submitMetadata);
+      // A timeout after the Enter press means the send itself did not complete, not that the page
+      // failed to load; `submit_triggered` rides the metadata so a dispatched submit is never
+      // reported as unsent.
+      mapBrowserOperationError(error, signal, {
+        timeoutMessage: submitTriggered ? 'The Messenger send did not complete in time.' : 'The Facebook Messenger thread page did not load in time.',
+        fallbackMessage: 'The Facebook Messenger message could not be sent.',
+        logLabel: 'Facebook Messenger send failed:',
+        logger: this.logger,
+        metadata: submitTriggered ? { submit_triggered: true } : undefined
+      });
     }
   }
 
@@ -632,12 +610,7 @@ export class FacebookMessengerBackend implements ConversationBackend {
     try {
       session = await this.probe.probeSession(signal);
     } catch (error) {
-      if (signal.aborted) throw signal.reason ?? error;
-      if (error instanceof BrowserUnavailableError) {
-        throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
-      }
-      if (error instanceof MarketplaceProviderError) throw error;
-      throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook session could not be verified.');
+      mapBrowserOperationError(error, signal, { fallbackMessage: 'The Facebook session could not be verified.' });
     }
 
     if (session.status === 'session_usable') this.loginGate.recordSuccess(LOGIN_SCOPE);
@@ -717,12 +690,7 @@ export class FacebookMessengerBackend implements ConversationBackend {
       if (session.status === 'session_usable') this.loginGate.recordSuccess(LOGIN_SCOPE);
       return session;
     } catch (error) {
-      if (signal.aborted) throw signal.reason ?? error;
-      if (error instanceof MarketplaceProviderError) throw error;
-      if (error instanceof BrowserUnavailableError) {
-        throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
-      }
-      throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook session could not be verified.');
+      mapBrowserOperationError(error, signal, { fallbackMessage: 'The Facebook session could not be verified.' });
     }
   }
 

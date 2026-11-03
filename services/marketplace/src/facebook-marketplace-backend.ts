@@ -1,6 +1,6 @@
-import { errors } from 'playwright';
 import { marketplaceSearchDiagnostic, marketplaceSearchParseDiagnostic } from './facebook-marketplace-diagnostics.js';
 import { BrowserSessionManager, BrowserUnavailableError, sleepUntilAbort } from './browser.js';
+import { mapBrowserOperationError } from './browser-error-mapping.js';
 import {
   fetchInputSchema,
   searchInputSchema,
@@ -181,16 +181,12 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
         return result;
       });
     } catch (error) {
-      if (signal.aborted) throw signal.reason ?? error;
-      if (error instanceof errors.TimeoutError) {
-        throw new ProviderError('TIMEOUT', 'The Facebook Marketplace search page did not load in time.');
-      }
-      if (error instanceof ProviderError) throw error;
-      if (error instanceof BrowserUnavailableError) {
-        throw new ProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
-      }
-      this.logger.error('Facebook Marketplace search failed:', error instanceof Error ? error.name : 'UnknownError');
-      throw new ProviderError('UPSTREAM_ERROR', 'The Facebook Marketplace search could not be completed.');
+      mapBrowserOperationError(error, signal, {
+        timeoutMessage: 'The Facebook Marketplace search page did not load in time.',
+        fallbackMessage: 'The Facebook Marketplace search could not be completed.',
+        logLabel: 'Facebook Marketplace search failed:',
+        logger: this.logger
+      });
     }
 
     const outcome = interpretMarketplacePage({
@@ -233,12 +229,7 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     try {
       session = await this.probe.probeSession(signal);
     } catch (error) {
-      if (signal.aborted) throw signal.reason ?? error;
-      if (error instanceof BrowserUnavailableError) {
-        throw new ProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
-      }
-      if (error instanceof ProviderError) throw error;
-      throw new ProviderError('UPSTREAM_ERROR', 'The Facebook session could not be verified.');
+      mapBrowserOperationError(error, signal, { fallbackMessage: 'The Facebook session could not be verified.' });
     }
 
     if (session.status === 'session_usable') this.loginGate.recordSuccess(LOGIN_SCOPE);
@@ -331,12 +322,7 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
       if (session.status === 'session_usable') this.loginGate.recordSuccess(LOGIN_SCOPE);
       return session;
     } catch (error) {
-      if (signal.aborted) throw signal.reason ?? error;
-      if (error instanceof ProviderError) throw error;
-      if (error instanceof BrowserUnavailableError) {
-        throw new ProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
-      }
-      throw new ProviderError('UPSTREAM_ERROR', 'The Facebook session could not be verified.');
+      mapBrowserOperationError(error, signal, { fallbackMessage: 'The Facebook session could not be verified.' });
     }
   }
 
@@ -438,16 +424,12 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
         return result;
       });
     } catch (error) {
-      if (signal.aborted) throw signal.reason ?? error;
-      if (error instanceof errors.TimeoutError) {
-        throw new ProviderError('TIMEOUT', 'The Facebook Marketplace listing page did not load in time.');
-      }
-      if (error instanceof ProviderError) throw error;
-      if (error instanceof BrowserUnavailableError) {
-        throw new ProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
-      }
-      this.logger.error('Facebook Marketplace fetch failed:', error instanceof Error ? error.name : 'UnknownError');
-      throw new ProviderError('UPSTREAM_ERROR', 'The Facebook Marketplace listing could not be fetched.');
+      mapBrowserOperationError(error, signal, {
+        timeoutMessage: 'The Facebook Marketplace listing page did not load in time.',
+        fallbackMessage: 'The Facebook Marketplace listing could not be fetched.',
+        logLabel: 'Facebook Marketplace fetch failed:',
+        logger: this.logger
+      });
     }
 
     const locationMarket = extracted.locationText?.trim()
