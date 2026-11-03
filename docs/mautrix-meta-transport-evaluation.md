@@ -119,7 +119,7 @@ The blocker was never engineering, and Sections 2 through 5 still show that: the
 - Synthetic-first tests over synthetic LightSpeed table fixtures with zero Facebook requests (any real-payload capture is a separate operator-approved step); typed challenge errors only, no automation; live validation only after separate operator approval.
 - The provider cannot start without both explicit provider selection and explicit risk acknowledgement; the browser provider must stay usable when the experimental provider is disabled or broken.
 
-**Reconsideration trigger:** met on 2026-11-02/03 (the operator recorded the bounded exception on #193 and opened #195). Re-open the decision if Meta sanctions a personal-account protocol that makes this transport unnecessary, or if the operator withdraws or narrows the exception.
+**Reconsideration trigger:** superseded on 2026-11-02 by the operator's bounded exception recorded on #193 and the opening of #195; the §2 row itself stands unamended as the default policy (see §9). Re-open the decision if Meta sanctions a personal-account protocol that makes this transport unnecessary, or if the operator withdraws or narrows the exception.
 
 ## 10. Verified versus assumed
 
