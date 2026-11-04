@@ -162,8 +162,12 @@ export function extractConsumerMenuPage(options: ExtractConsumerMenuOptions): Ex
   // The presence label is a static provider-rendered string ("Active now"-shaped, observed on 4
   // of 18 live rows) and the timestamp is the `abbr`'s own text; neither is an allowlisted search
   // field, so both are excluded from the returned fields rather than flattened into one
-  // searchable value. Any other element count, order, or tag shape is structure drift: the row is
-  // unattributable and its caller fails the whole observation closed. The shape contract must be
+  // searchable value. The separator is excluded by its structural position — it is the row's
+  // LAST field, immediately before the timestamp — and its shape (a single UTF-16 code unit that
+  // is neither a Unicode letter nor a number), never by "any single non-ASCII character": a
+  // one-character CJK participant or snippet is a field, not a separator (#197). Any other
+  // element count, order, or tag shape is structure drift: the row is unattributable and its
+  // caller fails the whole observation closed. The shape contract must be
   // kept in sync with `facebook-consumer-parse.ts` and the fixtures.
   const attributeRowFields = (row: Element): { participants: string[]; preview?: string } | undefined => {
     const own = (el: Element): string => [...el.childNodes]
@@ -180,11 +184,16 @@ export function extractConsumerMenuPage(options: ExtractConsumerMenuOptions): Ex
     const outside = [...scope.querySelectorAll('*')].filter(
       (el) => own(el).length > 0 && !(timestampEl && (el === timestampEl || timestampEl.contains(el)))
     );
-    const fields = outside.filter((el) => {
-      const text = own(el);
-      // The one-character separator between snippet and timestamp is not a field.
-      return !(text.length === 1 && !/[a-z0-9]/i.test(text));
-    });
+    // The verified separator is the row's LAST field, immediately before the timestamp: a single
+    // UTF-16 code unit that is neither a Unicode letter nor a number. Excluding it by structural
+    // position and shape — never by "any single non-ASCII character" — keeps a one-character CJK
+    // participant or snippet (and a single-code-unit emoji or punctuation snippet) in the
+    // searchable fields (#197), while letter- or number-shaped drift at the separator's position
+    // still fails the row closed instead of being silently swallowed.
+    const lastField = outside[outside.length - 1];
+    const separatorText = lastField ? own(lastField) : '';
+    const isSeparatorShape = separatorText.length === 1 && !/[\p{L}\p{N}]/u.test(separatorText);
+    const fields = isSeparatorShape ? outside.slice(0, -1) : outside;
     if (fields.length < 2 || fields.length > 3) return undefined;
     // The verified shapes: [name span, snippet span] or [presence div, name span, snippet span].
     if (fields.length === 3 && fields[0]?.tagName !== 'DIV') return undefined;

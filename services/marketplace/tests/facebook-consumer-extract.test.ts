@@ -87,6 +87,60 @@ describe.skipIf(!browserAvailable)('Facebook consumer menu extraction', () => {
     expect(outcome.threads[0]?.preview).toBe('Is the fixture bike available?');
   });
 
+  it('preserves one-character CJK, emoji, and punctuation fields while still excluding the separator (#197)', async () => {
+    // The separator is excluded by its structural position (the row's last field before the
+    // timestamp) and its shape, never by "any single non-ASCII character": a one-character CJK
+    // participant (`李`), snippet (`好`), or single-code-unit emoji/punctuation snippet is a
+    // searchable field, not a separator. The `·`-snippet row also proves the separator is still
+    // excluded — only its own trailing `·` is dropped, and the snippet `·` survives attribution.
+    const html = `<!doctype html><html><head><title>Synthetic Facebook</title></head><body>
+      <div role="banner"><div role="button" aria-label="Messenger" style="width:40px;height:40px"></div></div>
+      <div role="dialog" aria-label="Menu"><div aria-label="Chats" role="grid">
+        <div role="row"><div role="gridcell"><img alt=""></div><a href="/messages/t/444444444444444/"><span>李</span><span>Is the fixture bike available?</span><span>·</span><abbr>2h</abbr></a></div>
+        <div role="row"><div role="gridcell"><img alt=""></div><a href="/messages/t/555555555555555/"><span>Alice</span><span>好</span><span>·</span><abbr>3h</abbr></a></div>
+        <div role="row"><div role="gridcell"><img alt=""></div><a href="/messages/t/666666666666666/"><span>Alice</span><span>♥</span><span>·</span><abbr>4h</abbr></a></div>
+        <div role="row"><div role="gridcell"><img alt=""></div><a href="/messages/t/777777777777777/"><span>Alice</span><span>·</span><span>·</span><abbr>5h</abbr></a></div>
+      </div></div><a href="/logout">Log out</a></body></html>`;
+    const extracted = await extractOf(html);
+    expect(extracted.chatsRegionCount).toBe(1);
+    expect(extracted.rows).toHaveLength(4);
+    expect(extracted.malformedRows).toBe(0);
+    expect(extracted.duplicateKeyRows).toBe(0);
+    expect(extracted.rows[0]?.participants).toEqual(['李']);
+    expect(extracted.rows[0]?.preview).toBe('Is the fixture bike available?');
+    expect(extracted.rows[1]?.participants).toEqual(['Alice']);
+    expect(extracted.rows[1]?.preview).toBe('好');
+    expect(extracted.rows[2]?.preview).toBe('♥');
+    expect(extracted.rows[3]?.preview).toBe('·');
+    // None of the rows leaked the separator or the timestamp into the searchable fields.
+    for (const row of extracted.rows) {
+      expect(row.preview).not.toBe('2h');
+    }
+
+    const outcome = interpret(extracted);
+    expect(outcome.kind).toBe('menu');
+    if (outcome.kind !== 'menu') return;
+    expect(outcome.threads).toHaveLength(4);
+    expect(outcome.threads[0]).toMatchObject({ thread_id: '444444444444444', participants: ['李'] });
+    expect(outcome.threads[1]).toMatchObject({ thread_id: '555555555555555', preview: '好' });
+  });
+
+  it('fails closed when the separator position carries letter- or word-shaped text (#197)', async () => {
+    // A last field shaped like text (a Unicode letter or a multi-character word) is not the
+    // verified separator: the row is unattributable and fails closed, instead of the old
+    // behavior of silently swallowing any single non-ASCII character at any position.
+    const html = `<!doctype html><html><head><title>Synthetic Facebook</title></head><body>
+      <div role="banner"><div role="button" aria-label="Messenger" style="width:40px;height:40px"></div></div>
+      <div role="dialog" aria-label="Menu"><div aria-label="Chats" role="grid">
+        <div role="row"><div role="gridcell"><img alt=""></div><a href="/messages/t/888888888888888/"><span>Alice</span><span>hi</span><span>李</span><abbr>2h</abbr></a></div>
+        <div role="row"><div role="gridcell"><img alt=""></div><a href="/messages/t/999999999999999/"><span>Alice</span><span>hi</span><span>abc</span><abbr>3h</abbr></a></div>
+      </div></div><a href="/logout">Log out</a></body></html>`;
+    const extracted = await extractOf(html);
+    expect(extracted.rows).toHaveLength(0);
+    expect(extracted.malformedRows).toBe(2);
+    expect(interpret(extracted)).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+  });
+
   it('recognizes an explicitly empty menu and never mistakes a changed layout for one', async () => {
     const empty = await extractOf(loadFixture('menu-empty.html'));
     expect(classifyConsumerMenuPage(empty)).toBe('empty');
