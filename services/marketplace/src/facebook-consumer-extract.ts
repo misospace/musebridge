@@ -157,7 +157,7 @@ export function extractConsumerMenuPage(options: ExtractConsumerMenuOptions): Ex
   // the conversation link:
   //
   //   [presence label (a `div`, optional)] [participant label span] [snippet span]
-  //   [one-character separator span (excluded)] [timestamp inside the row's single `abbr` (excluded)]
+  //   [trailing separator span (excluded by position and shape)] [timestamp inside the row's single `abbr` (excluded)]
   //
   // The presence label is a static provider-rendered string ("Active now"-shaped, observed on 4
   // of 18 live rows) and the timestamp is the `abbr`'s own text; neither is an allowlisted search
@@ -184,12 +184,8 @@ export function extractConsumerMenuPage(options: ExtractConsumerMenuOptions): Ex
     const outside = [...scope.querySelectorAll('*')].filter(
       (el) => own(el).length > 0 && !(timestampEl && (el === timestampEl || timestampEl.contains(el)))
     );
-    // The verified separator is the row's LAST field, immediately before the timestamp: a single
-    // UTF-16 code unit that is neither a Unicode letter nor a number. Excluding it by structural
-    // position and shape — never by "any single non-ASCII character" — keeps a one-character CJK
-    // participant or snippet (and a single-code-unit emoji or punctuation snippet) in the
-    // searchable fields (#197), while letter- or number-shaped drift at the separator's position
-    // still fails the row closed instead of being silently swallowed.
+    // The rule above this point is stated in the contract comment: the separator is excluded by
+    // its structural position and shape, never by "any single non-ASCII character" (#197).
     const lastField = outside[outside.length - 1];
     const separatorText = lastField ? own(lastField) : '';
     const isSeparatorShape = separatorText.length === 1 && !/[\p{L}\p{N}]/u.test(separatorText);

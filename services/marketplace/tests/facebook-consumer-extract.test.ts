@@ -126,18 +126,19 @@ describe.skipIf(!browserAvailable)('Facebook consumer menu extraction', () => {
   });
 
   it('fails closed when the separator position carries letter- or word-shaped text (#197)', async () => {
-    // A last field shaped like text (a Unicode letter or a multi-character word) is not the
-    // verified separator: the row is unattributable and fails closed, instead of the old
-    // behavior of silently swallowing any single non-ASCII character at any position.
+    // A last field shaped like text (a Unicode letter, a multi-character word, or a two-code-unit
+    // emoji) is not the verified separator: the row is unattributable and fails closed, instead
+    // of the old behavior of silently swallowing any single non-ASCII character at any position.
     const html = `<!doctype html><html><head><title>Synthetic Facebook</title></head><body>
       <div role="banner"><div role="button" aria-label="Messenger" style="width:40px;height:40px"></div></div>
       <div role="dialog" aria-label="Menu"><div aria-label="Chats" role="grid">
         <div role="row"><div role="gridcell"><img alt=""></div><a href="/messages/t/888888888888888/"><span>Alice</span><span>hi</span><span>李</span><abbr>2h</abbr></a></div>
         <div role="row"><div role="gridcell"><img alt=""></div><a href="/messages/t/999999999999999/"><span>Alice</span><span>hi</span><span>abc</span><abbr>3h</abbr></a></div>
+        <div role="row"><div role="gridcell"><img alt=""></div><a href="/messages/t/101010101010101/"><span>Alice</span><span>hi</span><span>👍</span><abbr>4h</abbr></a></div>
       </div></div><a href="/logout">Log out</a></body></html>`;
     const extracted = await extractOf(html);
     expect(extracted.rows).toHaveLength(0);
-    expect(extracted.malformedRows).toBe(2);
+    expect(extracted.malformedRows).toBe(3);
     expect(interpret(extracted)).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
   });
 
