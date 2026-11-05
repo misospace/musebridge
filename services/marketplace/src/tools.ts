@@ -43,6 +43,8 @@ import {
   eventsFetchInputSchema,
   eventsSearchOutputSchema,
   eventsFetchOutputSchema,
+  threadsMentionsListInputSchema,
+  threadsMentionsListOutputSchema,
   threadsPostsListInputSchema,
   threadsRepliesListInputSchema,
   threadsPostsListOutputSchema,
@@ -262,6 +264,13 @@ export const TOOLS = [
     description: 'List the public reply tree for one verified Threads media (post) id via the official Threads Graph API. Read-only.',
     inputSchema: threadsRepliesListInputSchema,
     outputSchema: threadsRepliesListOutputSchema,
+    definition: { riskClass: 'read', scope: socialScope }
+  },
+  {
+    name: 'threads_mentions_list',
+    description: 'List public Threads posts by other profiles that mentioned the operator via the official Threads Graph API. Read-only; posts by private users are never returned, and before the mentions permission is approved only mentions by app testers appear.',
+    inputSchema: threadsMentionsListInputSchema,
+    outputSchema: threadsMentionsListOutputSchema,
     definition: { riskClass: 'read', scope: socialScope }
   }
 ] as const satisfies ReadonlyArray<ToolDeclaration>;
@@ -619,6 +628,16 @@ export function registerMarketplaceTools(
           output = result === null
             ? runtimeFailure('NOT_FOUND', 'No Threads media matched the supplied identifier.')
             : { ok: true, backend: threads.name, media_id: repliesInput.media_id, replies: result.replies, truncated: result.truncated };
+        } else if (name === 'threads_mentions_list') {
+          const threads = options.threads;
+          if (!threads) throw new ProviderError('UPSTREAM_ERROR', 'The Threads social surface is not configured on this deployment.');
+          const result = await runBackendOperation(
+            (signal) => threads.listMentions(parsed.data as z.infer<typeof threadsMentionsListInputSchema>, signal),
+            backendTimeoutMs,
+            extra.signal,
+            shutdownSignal
+          );
+          output = { ok: true, backend: threads.name, mentions: result.mentions, truncated: result.truncated };
         } else {
           const sessionAssessment = options.sessionAssessment;
           const marketplaceSessionAssessment = options.marketplaceSessionAssessment;

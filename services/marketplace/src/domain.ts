@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { PROVIDER_SESSION_ASSESSMENTS } from './browser.js';
+import { THREADS_MENTIONS_MIN_SINCE_UNIX, mentionsSinceUnixSeconds } from './threads.js';
 
-export const SCHEMA_VERSION = '1.9.0';
+export const SCHEMA_VERSION = '1.10.0';
 export const SERVICE_VERSION = '0.1.0'; // x-release-please-version
 export const MAX_QUERY_LENGTH = 256;
 export const MAX_LOCATION_LENGTH = 256;
@@ -374,8 +375,9 @@ export const eventsFetchOutputSchema = z.union([eventsFetchSuccessSchema, runtim
 
 // Cross-site Threads (Meta) social contract. Read-only sibling of `productOffer` and
 // `eventAvailability`: facts only, mirroring the documented endpoints
-// (`GET /{threads-user-id}/threads`, `GET /{media-id}/replies`). Own posts and reply
-// trees for verified media ids only — no DMs, no saved items, no keyword search,
+// (`GET /{threads-user-id}/threads`, `GET /{media-id}/replies`,
+// `GET /{threads-user-id}/mentions`). Own posts, reply trees for verified media ids, and
+// own mentions (#189) — no DMs, no saved items, no keyword search,
 // no external profile discovery, no publishing (#84/#46).
 //
 // `media_type` maps the API's documented enum one-to-one and falls through to `UNKNOWN`
@@ -523,6 +525,41 @@ export const threadsRepliesListSuccessSchema = z.object({
 
 export const threadsPostsListOutputSchema = z.union([threadsPostsListSuccessSchema, runtimeFailureSchema]);
 export const threadsRepliesListOutputSchema = z.union([threadsRepliesListSuccessSchema, runtimeFailureSchema]);
+
+// Mentions (#189): public posts by OTHER profiles that tagged the app-scoped operator.
+// A mention is a Threads media object — the same shape `GET /{threads-user-id}/mentions`
+// returns as the user-posts endpoints — so items reuse `threadsPostSchema` verbatim.
+// `threads_user_id` on a mention is the mentioning author's stable `owner.id`, not the
+// operator's. Input keeps the posts calendar-date contract for tool-argument consistency,
+// but `since` carries the mentions endpoint's documented lower bound: the endpoint documents
+// `since` as a Unix timestamp that must be >= 1688540400, so a date whose UTC-midnight
+// timestamp falls below that bound is rejected as InvalidParams here, before any request;
+// the client converts accepted dates to the endpoint's timestamp type.
+export const threadsMentionsListInputSchema = z.object({
+  limit: z.number().int().min(1).max(20).default(10),
+  since: threadsDateSchema.refine(
+    (value) => {
+      try {
+        mentionsSinceUnixSeconds(value);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    { message: `Must not be earlier than the mentions endpoint minimum timestamp ${THREADS_MENTIONS_MIN_SINCE_UNIX} (2023-07-05T07:00:00Z), i.e. 2023-07-06 or later as a UTC calendar date` }
+  ).optional()
+}).strict();
+
+export const threadsMentionsListSuccessSchema = z.object({
+  ok: z.literal(true),
+  backend: backendNameSchema,
+  mentions: z.array(threadsPostSchema).max(MAX_THREADS_REPLY_COUNT),
+  truncated: z.boolean()
+}).strict();
+
+export const threadsMentionsListOutputSchema = z.union([threadsMentionsListSuccessSchema, runtimeFailureSchema]);
+
+export type ThreadsMentionsListInput = z.infer<typeof threadsMentionsListInputSchema>;
 
 export const statusOutputSchema = statusSuccessSchema;
 export const threadsListOutputSchema = z.union([

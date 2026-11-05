@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ProviderError, type ThreadsBackend, type ThreadsPostPage, type ThreadsReplyPage } from './backend.js';
+import { ProviderError, type ThreadsBackend, type ThreadsMentionPage, type ThreadsPostPage, type ThreadsReplyPage } from './backend.js';
 import { MAX_THREADS_MEDIA_URLS, MAX_THREADS_REPLY_COUNT, isOfficialThreadsMediaUrl, threadsPostSchema, threadsReplySchema, type ThreadsPost, type ThreadsReply } from './domain.js';
 import { ThreadsClient, ThreadsHttpError, type ThreadsClientOptions } from './threads.js';
 import { runWithDeadline, validateTimeout } from './timeout.js';
@@ -63,6 +63,49 @@ export class ThreadsApiBackend implements ThreadsBackend {
           if (page === MAX_THREADS_PAGES - 1) truncated = true;
         }
         return { posts, truncated };
+      } catch (error) { throw mapError(error); }
+    });
+  }
+
+  async listMentions(input: Parameters<ThreadsBackend['listMentions']>[0], signal: AbortSignal): Promise<ThreadsMentionPage> {
+    return runWithDeadline(signal, this.requestTimeoutMs, 'Threads', async (requestSignal) => {
+      try {
+        const seen = new Set<string>();
+        const mentions: ThreadsPost[] = [];
+        let after: string | undefined;
+        let truncated = false;
+        for (let page = 0; page < MAX_THREADS_PAGES; page++) {
+          const payload = await this.client.listMentions({
+            limit: input.limit,
+            ...(input.since !== undefined ? { since: input.since } : {}),
+            ...(after !== undefined ? { after } : {})
+          }, requestSignal);
+          const data = requireDataArray(payload);
+          // Same fail-closed rule as posts: a non-array `data` is schema drift, never a
+          // silent empty page; `{data: []}` is the legitimate zero-result page.
+          if (data === null) throw new ProviderError('UPSTREAM_ERROR', 'The Threads mentions response was not recognized.');
+          const next = cursorAfter(payload);
+          let moreInPage = false;
+          for (let index = 0; index < data.length; index++) {
+            const mention = mapPost(data[index]);
+            if (!mention) throw new ProviderError('UPSTREAM_ERROR', 'The Threads mentions response was not recognized.');
+            if (seen.has(mention.id)) continue;
+            seen.add(mention.id);
+            mentions.push(mention);
+            if (mentions.length >= input.limit) { moreInPage = index < data.length - 1; break; }
+          }
+          if (mentions.length >= input.limit) {
+            truncated = moreInPage || next !== undefined;
+            break;
+          }
+          if (next === undefined) {
+            truncated = false;
+            break;
+          }
+          after = next;
+          if (page === MAX_THREADS_PAGES - 1) truncated = true;
+        }
+        return { mentions, truncated };
       } catch (error) { throw mapError(error); }
     });
   }

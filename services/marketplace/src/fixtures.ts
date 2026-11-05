@@ -1,5 +1,5 @@
-import { shoppingFetchInputSchema, shoppingSearchInputSchema, productOfferSchema, eventsFetchInputSchema, eventsSearchInputSchema, eventAvailabilitySchema, MAX_THREADS_REPLY_COUNT, threadsPostSchema, threadsReplySchema, threadsPostsListInputSchema, threadsRepliesListInputSchema, type ConversationMessage, type ConversationThread, type EventAvailability, type Listing, type ProductOffer, type ThreadsPost, type ThreadsReply } from './domain.js';
-import type { EventsBackend, ShoppingBackend, ThreadsBackend, ThreadsPostPage, ThreadsReplyPage } from './backend.js';
+import { shoppingFetchInputSchema, shoppingSearchInputSchema, productOfferSchema, eventsFetchInputSchema, eventsSearchInputSchema, eventAvailabilitySchema, MAX_THREADS_REPLY_COUNT, threadsPostSchema, threadsReplySchema, threadsMentionsListInputSchema, threadsPostsListInputSchema, threadsRepliesListInputSchema, type ConversationMessage, type ConversationThread, type EventAvailability, type Listing, type ProductOffer, type ThreadsPost, type ThreadsReply } from './domain.js';
+import type { EventsBackend, ShoppingBackend, ThreadsBackend, ThreadsMentionPage, ThreadsPostPage, ThreadsReplyPage } from './backend.js';
 import { canonicalHttpUrl } from './backend.js';
 
 export const FIXTURE_CONVERSATIONS: readonly {
@@ -358,6 +358,36 @@ export const FIXTURE_THREADS_REPLIES: readonly ThreadsReply[] = [
   }
 ].map((reply) => threadsReplySchema.parse(reply));
 
+// Mentions fixture (#189): posts by synthetic OTHER profiles that tagged the operator.
+// The author ids deliberately differ from the operator's `synth-owner-id-1001` so tests
+// can assert a mention's `threads_user_id` is the author, never the operator.
+export const FIXTURE_THREADS_MENTIONS: readonly ThreadsPost[] = [
+  {
+    provider: 'threads',
+    id: 'synth-mention-001',
+    threads_user_id: 'synth-owner-id-3001',
+    permalink: 'https://www.threads.net/@synth_friend_a/post/synth-mention-001',
+    text: 'Synthetic fixture mention: @synth_user should see this sun lamp thread.',
+    media_type: 'TEXT_POST',
+    media_urls: [],
+    reply_count: 1,
+    like_count: 3,
+    posted_at: '2025-04-03T12:00:00.000Z'
+  },
+  {
+    provider: 'threads',
+    id: 'synth-mention-002',
+    threads_user_id: 'synth-owner-id-3002',
+    permalink: 'https://www.threads.net/@synth_friend_b/post/synth-mention-002',
+    text: null,
+    media_type: 'IMAGE',
+    media_urls: ['https://www.threads.net/synth-mention-image-002.jpg'],
+    reply_count: null,
+    like_count: null,
+    posted_at: '2025-04-05T18:30:00.000Z'
+  }
+].map((mention) => threadsPostSchema.parse(mention));
+
 export class FixtureThreadsBackend implements ThreadsBackend {
   readonly name = 'fixture';
 
@@ -377,5 +407,16 @@ export class FixtureThreadsBackend implements ThreadsBackend {
     const matching = FIXTURE_THREADS_REPLIES.filter((reply) => reply.media_id === input.media_id);
     const replies = matching.slice(0, MAX_THREADS_REPLY_COUNT);
     return { replies, truncated: matching.length > replies.length };
+  }
+
+  listMentions(input: ReturnType<typeof threadsMentionsListInputSchema.parse>, _signal: AbortSignal): ThreadsMentionPage {
+    const since = input.since;
+    // Same calendar-date compare as listOwnPosts; mentions without a timestamp are
+    // excluded from a bounded query rather than assumed recent.
+    const matching = since === undefined
+      ? [...FIXTURE_THREADS_MENTIONS]
+      : FIXTURE_THREADS_MENTIONS.filter((mention) => mention.posted_at !== null && mention.posted_at.slice(0, 10) >= since);
+    const mentions = matching.slice(0, input.limit);
+    return { mentions, truncated: matching.length > mentions.length };
   }
 }

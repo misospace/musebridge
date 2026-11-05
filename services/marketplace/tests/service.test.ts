@@ -321,7 +321,7 @@ describe('fixture MCP service', () => {
     expect(client.getServerVersion()).toEqual({ name: 'marketplace', version: packageVersion });
     const tools = await client.listTools();
     expect(tools.tools.map(({ name }) => name)).toEqual([
-      'marketplace_search', 'marketplace_fetch', 'marketplace_status', 'shopping_search', 'shopping_fetch', 'events_search', 'events_fetch', 'messenger_threads_list', 'messenger_thread_read', 'messenger_prepare', 'messenger_send', 'consumer_threads_list', 'consumer_threads_search', 'threads_posts_list', 'threads_replies_list'
+      'marketplace_search', 'marketplace_fetch', 'marketplace_status', 'shopping_search', 'shopping_fetch', 'events_search', 'events_fetch', 'messenger_threads_list', 'messenger_thread_read', 'messenger_prepare', 'messenger_send', 'consumer_threads_list', 'consumer_threads_search', 'threads_posts_list', 'threads_replies_list', 'threads_mentions_list'
     ]);
     expect(tools.tools.map(({ description }) => description)).toEqual([
       'Search marketplace listings.',
@@ -338,7 +338,7 @@ describe('fixture MCP service', () => {
       'List recent personal Messenger conversations from the Facebook homepage header chats menu. Loads the Facebook homepage and opens the Messenger menu once; by design it never opens a conversation. If the load unexpectedly navigates into one, the call aborts and whether a read receipt was emitted in that case is unknown. The load may clear your own unread badge. Results cover only the observed recent menu window, not full history.',
       'Search recent personal Messenger conversations by matching a query in memory against provider-supplied participant labels and message snippets; the query is never typed into Facebook. One homepage load and menu open per call; by design it never opens a conversation — if the load unexpectedly navigates into one, the call aborts and whether a read receipt was emitted in that case is unknown. The load may clear your own unread badge. Results cover only the observed recent menu window: an empty result means no match in that window, not that a conversation does not exist.',
       'List the operator\'s own published Threads posts via the official Threads Graph API. Read-only; no DMs, no saved items, no keyword search, no external profile discovery.',
-      'List the public reply tree for one verified Threads media (post) id via the official Threads Graph API. Read-only.'
+      'List the public reply tree for one verified Threads media (post) id via the official Threads Graph API. Read-only.', 'List public Threads posts by other profiles that mentioned the operator via the official Threads Graph API. Read-only; posts by private users are never returned, and before the mentions permission is approved only mentions by app testers appear.'
     ]);
     for (const tool of tools.tools) {
       expect(tool.outputSchema).toBeDefined();
@@ -432,8 +432,9 @@ describe('fixture MCP service', () => {
       { name: 'consumer_threads_list', arguments: {} },
       { name: 'consumer_threads_search', arguments: { query: 'bike' } },
       { name: 'threads_posts_list', arguments: {} },
-      { name: 'threads_replies_list', arguments: { media_id: 'synth-thread-001' } }
-    ];
+    { name: 'threads_replies_list', arguments: { media_id: 'synth-thread-001' } },
+    { name: 'threads_mentions_list', arguments: {} }
+  ];
     const client = await connectClient();
     const advertised = await client.listTools();
     const coveredNames = advertised.tools.map(({ name }) => name).filter((name) => name !== 'messenger_send').sort();
@@ -858,6 +859,39 @@ describe('fixture MCP service', () => {
     expect(empty.replies).toEqual([]);
   });
 
+  it('round-trips fixture mentions with author ids distinct from the operator', async () => {
+    const client = await connectClient();
+    const result = structured(await client.callTool({ name: 'threads_mentions_list', arguments: {} }));
+    expect(result.backend).toBe('fixture');
+    expect(result.mentions.length).toBeGreaterThan(0);
+    expect(typeof result.truncated).toBe('boolean');
+    for (const mention of result.mentions) {
+      expect(mention.provider).toBe('threads');
+      // A mention is another profile's post: the author id is never the operator's own.
+      expect(mention.threads_user_id).not.toBe('synth-owner-id-1001');
+    }
+    const known = result.mentions.find((mention: { id: string }) => mention.id === 'synth-mention-001');
+    expect(known).toMatchObject({ id: 'synth-mention-001', threads_user_id: 'synth-owner-id-3001', media_type: 'TEXT_POST', reply_count: 1, like_count: 3 });
+    const limited = structured(await client.callTool({ name: 'threads_mentions_list', arguments: { limit: 1 } }));
+    expect(limited.mentions).toHaveLength(1);
+    expect(limited.truncated).toBe(true);
+    // Calendar-date `since` excludes older fixture mentions.
+    const bounded = structured(await client.callTool({ name: 'threads_mentions_list', arguments: { since: '2025-04-05' } }));
+    expect(bounded.mentions.map((mention: { id: string }) => mention.id)).toEqual(['synth-mention-002']);
+    expect(bounded.truncated).toBe(false);
+    // The mentions endpoint's documented `since` lower bound is enforced at the input
+    // boundary: the first satisfying UTC date is accepted, the day before is InvalidParams.
+    // Posts keep their own documented date form, so `2023-07-05` stays valid there.
+    const earliest = structured(await client.callTool({ name: 'threads_mentions_list', arguments: { since: '2023-07-06' } }));
+    expect(earliest.backend).toBe('fixture');
+    expect(earliest.mentions.length).toBeGreaterThan(0);
+    await expect(client.callTool({ name: 'threads_mentions_list', arguments: { since: '2023-07-05' } })).rejects.toMatchObject({
+      code: ErrorCode.InvalidParams
+    });
+    const postsEarliest = structured(await client.callTool({ name: 'threads_posts_list', arguments: { since: '2023-07-05' } }));
+    expect(postsEarliest.backend).toBe('fixture');
+  });
+
   it('serves read-only event availability through the fixture backend', async () => {
     const client = await connectClient();
     const search = structured(await client.callTool({ name: 'events_search', arguments: { query: 'synthetic' } }));
@@ -923,7 +957,7 @@ describe('fixture MCP service', () => {
     expect(result).toEqual({
       ok: true,
       service_version: packageVersion,
-      schema_version: '1.9.0',
+      schema_version: '1.10.0',
       backend: 'status-only',
       facebook_session: { status: 'session_unknown' },
       // Neither surface is served by a Facebook browser scope here: the marketplace backend is
@@ -1055,7 +1089,7 @@ describe('fixture MCP service', () => {
     expect(customSearch.backend).toBe('consumer-test');
     expect(customFetch.backend).toBe('consumer-test');
     expect(customStatus.backend).toBe('consumer-test');
-    expect(customStatus.schema_version).toBe('1.9.0');
+    expect(customStatus.schema_version).toBe('1.10.0');
     expect(customStatus.capabilities).toEqual([
       { surface: 'marketplace', provider: 'facebook', backend: 'consumer-test' },
       { surface: 'shopping', provider: 'ebay', backend: 'fixture' },
@@ -1190,7 +1224,13 @@ describe('fixture MCP service', () => {
       ['threads_replies_list', undefined],
       ['threads_replies_list', {}],
       ['threads_replies_list', { media_id: '' }],
-      ['threads_replies_list', { media_id: 'synth-thread-001', extra: true }]
+      ['threads_replies_list', { media_id: 'synth-thread-001', extra: true }],
+    ['threads_mentions_list', { limit: 0 }],
+    ['threads_mentions_list', { limit: 21 }],
+    ['threads_mentions_list', { limit: 1.5 }],
+    ['threads_mentions_list', { since: 'not-a-date' }],
+    ['threads_mentions_list', { since: '2025-02-30' }],
+    ['threads_mentions_list', { extra: true }]
     ];
     for (const [name, argumentsValue] of invalidArguments) {
       let response: { status: number; body: any };
@@ -1291,7 +1331,7 @@ describe('fixture MCP service', () => {
     ]);
     expect(structured(first).listings[0].id).toBe('fixture-chair-002');
     expect(structured(second).listing.state).toBe('sold');
-    expect(structured(third).schema_version).toBe('1.9.0');
+    expect(structured(third).schema_version).toBe('1.10.0');
   });
 
   it('bounds shutdown with both an in-flight backend call and a partial request body', async () => {

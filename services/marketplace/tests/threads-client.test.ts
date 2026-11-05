@@ -58,6 +58,57 @@ describe('ThreadsClient', () => {
     expect(new URL(seenUrl).searchParams.get('after')).toBeNull();
   });
 
+  it('requests mentions on the operator path with the posts field projection', async () => {
+    let seenUrl = '';
+    let seenHeaders: Headers | undefined;
+    const client = new ThreadsClient({ ...options, fetchImpl: async (input, init) => {
+      seenUrl = String(input);
+      seenHeaders = new Headers(init?.headers);
+      return ok({ data: [] });
+    } });
+    await client.listMentions({ limit: 7, since: '2025-04-01', after: 'mentions-cursor-1' });
+    const url = new URL(seenUrl);
+    expect(url.pathname).toBe('/synthetic-user-id/mentions');
+    expect(url.searchParams.get('limit')).toBe('7');
+    // Mentions documents `since` as a Unix timestamp (unlike the user-posts endpoints'
+    // date form), so the client converts the calendar date to UTC-midnight seconds.
+    expect(url.searchParams.get('since')).toBe('1743465600');
+    expect(url.searchParams.get('after')).toBe('mentions-cursor-1');
+    // Mentions return Threads media objects, so the projection matches the user-posts
+    // endpoints — including `owner`, because a mention's `threads_user_id` maps from the
+    // mentioning author's `owner.id`.
+    for (const field of ['id', 'media_type', 'permalink', 'text', 'timestamp', 'owner', 'reply_count', 'like_count']) {
+      expect(url.searchParams.get('fields')).toContain(field);
+    }
+    expect(seenHeaders?.get('authorization')).toBe('Bearer synthetic-token');
+  });
+
+  it('omits absent and empty optional params on mentions requests', async () => {
+    let seenUrl = '';
+    const client = new ThreadsClient({ ...options, fetchImpl: async (input) => { seenUrl = String(input); return ok({ data: [] }); } });
+    await client.listMentions({ limit: 5 });
+    expect(new URL(seenUrl).searchParams.get('since')).toBeNull();
+    expect(new URL(seenUrl).searchParams.get('after')).toBeNull();
+    await client.listMentions({ limit: 5, after: '' });
+    expect(new URL(seenUrl).searchParams.get('after')).toBeNull();
+  });
+
+  it('enforces the mentions since lower bound at the client boundary', async () => {
+    let seenUrl = '';
+    const client = new ThreadsClient({ ...options, fetchImpl: async (input) => { seenUrl = String(input); return ok({ data: [] }); } });
+    // First whole UTC date whose midnight satisfies `>= 1688540400`.
+    await client.listMentions({ limit: 5, since: '2023-07-06' });
+    expect(new URL(seenUrl).searchParams.get('since')).toBe('1688601600');
+    // 2023-07-05T00:00Z is below the documented bound: the client refuses before any request.
+    seenUrl = '';
+    await expect(client.listMentions({ limit: 5, since: '2023-07-05' })).rejects.toBeInstanceOf(TypeError);
+    expect(seenUrl).toBe('');
+    await expect(client.listMentions({ limit: 5, since: 'not-a-date' })).rejects.toBeInstanceOf(TypeError);
+    // Day-invalid strings roll over under Date.UTC; the round-trip guard rejects them too.
+    await expect(client.listMentions({ limit: 5, since: '2025-02-30' })).rejects.toBeInstanceOf(TypeError);
+    expect(seenUrl).toBe('');
+  });
+
   it('fetches a replies tree by media id with the documented fields list', async () => {
     let seenUrl = '';
     const client = new ThreadsClient({ ...options, fetchImpl: async (input) => { seenUrl = String(input); return ok({ data: [] }); } });

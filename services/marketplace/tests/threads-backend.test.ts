@@ -3,7 +3,7 @@ import { createServer, type Server, type ServerResponse } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ThreadsApiBackend } from '../src/threads-backend.js';
 import { ProviderError } from '../src/backend.js';
-import { threadsPostSchema, threadsReplySchema, threadsPostsListInputSchema, threadsRepliesListInputSchema } from '../src/domain.js';
+import { threadsMentionsListInputSchema, threadsPostSchema, threadsReplySchema, threadsPostsListInputSchema, threadsRepliesListInputSchema } from '../src/domain.js';
 
 const fixture = (name: string) => JSON.parse(readFileSync(new URL(`./fixtures/threads/${name}`, import.meta.url), 'utf8'));
 let server: Server;
@@ -36,6 +36,26 @@ const repliesPageTwo = {
   data: [
     { id: 'synth-reply-p1-002', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_friend/post/synth-reply-p1-002', text: 'Synthetic reply page one B.', timestamp: '2025-04-01T10:10:00.000Z', username: 'synth_friend' },
     { id: 'synth-reply-p2-003', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_friend/post/synth-reply-p2-003', text: 'Synthetic reply page two C.', timestamp: '2025-04-01T10:20:00.000Z', username: 'synth_friend' }
+  ]
+};
+
+const mentionsSuccess = {
+  data: [
+    { id: 'synth-mention-001', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_friend_a/post/synth-mention-001', text: 'Synthetic mention A: @synth_user was tagged here.', timestamp: '2025-04-03T12:00:00.000Z', owner: { id: 'synth-owner-id-3001', username: 'synth_friend_a' }, reply_count: 1, like_count: 3 },
+    { id: 'synth-mention-002', media_type: 'IMAGE', permalink: 'https://www.threads.net/@synth_friend_b/post/synth-mention-002', owner: { id: 'synth-owner-id-3002', username: 'synth_friend_b' }, media_url: 'https://scontent.xx.fbcdn.net/v/synth-mention-image-002.jpg' }
+  ]
+};
+const mentionsPageOne = {
+  data: [
+    { id: 'synth-mention-p1-001', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_friend_a/post/synth-mention-p1-001', text: 'Synthetic mention page one A.', timestamp: '2025-04-03T12:00:00.000Z', owner: { id: 'synth-owner-id-3001', username: 'synth_friend_a' } },
+    { id: 'synth-mention-p1-002', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_friend_a/post/synth-mention-p1-002', text: 'Synthetic mention page one B.', timestamp: '2025-04-03T12:10:00.000Z', owner: { id: 'synth-owner-id-3001', username: 'synth_friend_a' } }
+  ],
+  paging: { cursors: { after: 'mentions-cursor-2' } }
+};
+const mentionsPageTwo = {
+  data: [
+    { id: 'synth-mention-p1-002', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_friend_a/post/synth-mention-p1-002', text: 'Synthetic mention page one B.', timestamp: '2025-04-03T12:10:00.000Z', owner: { id: 'synth-owner-id-3001', username: 'synth_friend_a' } },
+    { id: 'synth-mention-p2-003', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_friend_b/post/synth-mention-p2-003', text: 'Synthetic mention page two C.', timestamp: '2025-04-03T12:20:00.000Z', owner: { id: 'synth-owner-id-3002', username: 'synth_friend_b' } }
   ]
 };
 
@@ -119,6 +139,29 @@ beforeAll(async () => {
       if (mode === 'not-found') { json(res, fixture('replies-404.json'), 404); return; }
       return json(res, fixture('replies-success.json'));
     }
+    if (pathname.endsWith('/mentions')) {
+      if (mode === 'mentions-empty') return json(res, fixture('posts-empty.json'));
+      if (mode === 'mentions-malformed') return json(res, fixture('posts-malformed.json'));
+      if (mode === 'mentions-malformed-item') return json(res, { data: [{}] });
+      if (mode === 'mentions-bad-paging') {
+        return json(res, {
+          data: [{ id: 'synth-mention-bad-001', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_friend_a/post/synth-mention-bad-001', text: 'Synthetic mention.', owner: { id: 'synth-owner-id-3001', username: 'synth_friend_a' } }],
+          paging: { next: 'not-a-url' }
+        });
+      }
+      if (mode === 'mentions-paging-container') {
+        return json(res, {
+          data: [{ id: 'synth-mention-pc-001', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_friend_a/post/synth-mention-pc-001', text: 'Synthetic mention.', owner: { id: 'synth-owner-id-3001', username: 'synth_friend_a' } }],
+          paging: pagingContainerValue
+        });
+      }
+      if (mode === 'mentions-pagination') {
+        const after = url.searchParams.get('after');
+        seenAfters.push(after);
+        return json(res, after === 'mentions-cursor-2' ? mentionsPageTwo : mentionsPageOne);
+      }
+      return json(res, mentionsSuccess);
+    }
     res.writeHead(404).end();
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -134,6 +177,7 @@ function backend(options: { requestTimeoutMs?: number } = {}) {
 const signal = () => new AbortController().signal;
 const postsInput = threadsPostsListInputSchema.parse({ limit: 10 });
 const repliesInput = threadsRepliesListInputSchema.parse({ media_id: 'synth-thread-001' });
+const mentionsInput = threadsMentionsListInputSchema.parse({ limit: 10 });
 
 describe('ThreadsApiBackend', () => {
   it('maps a full posts page into a valid ThreadsPost list', async () => {
@@ -591,6 +635,101 @@ describe('ThreadsApiBackend', () => {
     // Threads hosts, so the wider display allowlist never leaks into navigation targets.
     const leak = threadsPostSchema.safeParse({ ...base, permalink: 'https://scontent.xx.fbcdn.net/v/synth-image.jpg' });
     expect(leak.success).toBe(false);
+  });
+
+  it('maps a full mentions page and keeps the author id, never the operator', async () => {
+    mode = 'normal';
+    const { mentions, truncated } = await backend().listMentions(mentionsInput, signal());
+    expect(truncated).toBe(false);
+    expect(mentions).toHaveLength(2);
+    for (const mention of mentions) threadsPostSchema.parse(mention);
+    expect(mentions[0]).toMatchObject({
+      provider: 'threads',
+      id: 'synth-mention-001',
+      threads_user_id: 'synth-owner-id-3001',
+      permalink: 'https://www.threads.net/@synth_friend_a/post/synth-mention-001',
+      text: 'Synthetic mention A: @synth_user was tagged here.',
+      media_type: 'TEXT_POST',
+      reply_count: 1,
+      like_count: 3,
+      posted_at: '2025-04-03T12:00:00.000Z'
+    });
+    // Captionless image mention: text stays null, CDN media URL kept, counts stay null.
+    expect(mentions[1]).toMatchObject({
+      id: 'synth-mention-002',
+      threads_user_id: 'synth-owner-id-3002',
+      text: null,
+      media_type: 'IMAGE',
+      media_urls: ['https://scontent.xx.fbcdn.net/v/synth-mention-image-002.jpg'],
+      reply_count: null,
+      like_count: null
+    });
+  });
+
+  it('returns an empty mentions page for the documented zero-result shape', async () => {
+    mode = 'mentions-empty';
+    await expect(backend().listMentions(mentionsInput, signal())).resolves.toEqual({ mentions: [], truncated: false });
+  });
+
+  it('rejects a mentions response without an array data field as schema drift', async () => {
+    mode = 'mentions-malformed';
+    await expect(backend().listMentions(mentionsInput, signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The Threads mentions response was not recognized.'
+    });
+  });
+
+  it('rejects a malformed item inside an array mentions data as schema drift', async () => {
+    mode = 'mentions-malformed-item';
+    await expect(backend().listMentions(mentionsInput, signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The Threads mentions response was not recognized.'
+    });
+  });
+
+  it('rejects an unresolvable mentions paging cursor as schema drift', async () => {
+    mode = 'mentions-bad-paging';
+    await expect(backend().listMentions(mentionsInput, signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The Threads response paging cursor was not recognized.'
+    });
+  });
+
+  it('rejects a mentions page whose paging container is an array as schema drift', async () => {
+    mode = 'mentions-paging-container';
+    pagingContainerValue = ['mentions-cursor-2'];
+    await expect(backend().listMentions(mentionsInput, signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The Threads response paging container was not recognized.'
+    });
+  });
+
+  it('follows the mentions paging cursor, dedupes repeated ids, and preserves order', async () => {
+    mode = 'mentions-pagination';
+    seenAfters.length = 0;
+    const { mentions, truncated } = await backend().listMentions(mentionsInput, signal());
+    expect(mentions.map((mention) => mention.id)).toEqual(['synth-mention-p1-001', 'synth-mention-p1-002', 'synth-mention-p2-003']);
+    expect(truncated).toBe(false);
+    expect(seenAfters).toEqual([null, 'mentions-cursor-2']);
+  });
+
+  it('marks mentions truncated when the limit is reached mid-page with more pages available', async () => {
+    mode = 'mentions-pagination';
+    seenAfters.length = 0;
+    const { mentions, truncated } = await backend().listMentions(threadsMentionsListInputSchema.parse({ limit: 1 }), signal());
+    expect(mentions.map((mention) => mention.id)).toEqual(['synth-mention-p1-001']);
+    expect(truncated).toBe(true);
+    expect(seenAfters).toEqual([null]);
+  });
+
+  it('marks a mentions page exhausted at the exact limit as complete, not truncated', async () => {
+    // mentionsSuccess holds exactly two items with no paging cursor: hitting the
+    // limit on the final item of an exhausted page is completeness, not truncation.
+    mode = 'normal';
+    const exact = await backend().listMentions(threadsMentionsListInputSchema.parse({ limit: 2 }), signal());
+    expect(exact.mentions).toHaveLength(2);
+    expect(exact.truncated).toBe(false);
+  });
+
+  it('maps 401 on a mentions request to AUTH_EXPIRED', async () => {
+    mode = 'unauthorized';
+    await expect(backend().listMentions(mentionsInput, signal())).rejects.toMatchObject({ code: 'AUTH_EXPIRED' });
   });
 });
 
