@@ -58,6 +58,39 @@ describe('ThreadsClient', () => {
     expect(new URL(seenUrl).searchParams.get('after')).toBeNull();
   });
 
+  it('requests mentions on the operator path with the posts field projection', async () => {
+    let seenUrl = '';
+    let seenHeaders: Headers | undefined;
+    const client = new ThreadsClient({ ...options, fetchImpl: async (input, init) => {
+      seenUrl = String(input);
+      seenHeaders = new Headers(init?.headers);
+      return ok({ data: [] });
+    } });
+    await client.listMentions({ limit: 7, since: '2025-04-01', after: 'mentions-cursor-1' });
+    const url = new URL(seenUrl);
+    expect(url.pathname).toBe('/synthetic-user-id/mentions');
+    expect(url.searchParams.get('limit')).toBe('7');
+    expect(url.searchParams.get('since')).toBe('2025-04-01');
+    expect(url.searchParams.get('after')).toBe('mentions-cursor-1');
+    // Mentions return Threads media objects, so the projection matches the user-posts
+    // endpoints — including `owner`, because a mention's `threads_user_id` maps from the
+    // mentioning author's `owner.id`.
+    for (const field of ['id', 'media_type', 'permalink', 'text', 'timestamp', 'owner', 'reply_count', 'like_count']) {
+      expect(url.searchParams.get('fields')).toContain(field);
+    }
+    expect(seenHeaders?.get('authorization')).toBe('Bearer synthetic-token');
+  });
+
+  it('omits absent and empty optional params on mentions requests', async () => {
+    let seenUrl = '';
+    const client = new ThreadsClient({ ...options, fetchImpl: async (input) => { seenUrl = String(input); return ok({ data: [] }); } });
+    await client.listMentions({ limit: 5 });
+    expect(new URL(seenUrl).searchParams.get('since')).toBeNull();
+    expect(new URL(seenUrl).searchParams.get('after')).toBeNull();
+    await client.listMentions({ limit: 5, after: '' });
+    expect(new URL(seenUrl).searchParams.get('after')).toBeNull();
+  });
+
   it('fetches a replies tree by media id with the documented fields list', async () => {
     let seenUrl = '';
     const client = new ThreadsClient({ ...options, fetchImpl: async (input) => { seenUrl = String(input); return ok({ data: [] }); } });

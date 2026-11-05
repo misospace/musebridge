@@ -10,6 +10,7 @@ import {
   shoppingSearchInputSchema,
   eventsFetchInputSchema,
   eventsSearchInputSchema,
+  threadsMentionsListInputSchema,
   threadsPostsListInputSchema,
   threadsRepliesListInputSchema,
   providerErrorMetadataSchema,
@@ -114,10 +115,20 @@ export interface ThreadsReplyPage {
   truncated: boolean;
 }
 
+// Mentions (#189): public posts by other profiles that tagged the app-scoped operator,
+// read over `GET /{threads-user-id}/mentions` (`threads_basic` + `threads_manage_mentions`).
+// Items are Threads media objects, so the page carries `ThreadsPost`-shaped entries whose
+// `threads_user_id` is the mentioning author.
+export interface ThreadsMentionPage {
+  mentions: ThreadsPost[];
+  truncated: boolean;
+}
+
 export interface ThreadsBackend {
   readonly name: string;
   listOwnPosts(input: ReturnType<typeof threadsPostsListInputSchema.parse>, signal: AbortSignal): Promise<ThreadsPostPage> | ThreadsPostPage;
   listReplies(input: ReturnType<typeof threadsRepliesListInputSchema.parse>, signal: AbortSignal): Promise<ThreadsReplyPage | null> | ThreadsReplyPage | null;
+  listMentions(input: ReturnType<typeof threadsMentionsListInputSchema.parse>, signal: AbortSignal): Promise<ThreadsMentionPage> | ThreadsMentionPage;
 }
 
 export class ProviderError extends Error {

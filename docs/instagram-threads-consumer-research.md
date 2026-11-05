@@ -197,3 +197,34 @@ Connectors and community:
 
 17. Composio Instagram toolkit docs — https://docs.composio.dev/toolkits/instagram (official API with Business Login; professional accounts only)
 18. instagrapi best-practices — https://github.com/subzeroid/instagrapi (community evidence for personal-account automation risk; `ASSUMED`, no primary Meta statistic)
+
+## Addendum: current-reference verification (#189, 2026-11-05)
+
+Issue #189 expands official Threads read coverage beyond own posts and replies. Meta blocked direct fetches; the pages below were read through a text-render proxy on 2026-11-05. The Threads overview page self-reports "Updated: Jul 2, 2026" and the changelog runs through 2026-08-18. This addendum resolves open-assumption item 7 and re-checks item 5 at the documentation level. Live response shapes stay gated to the operator live-validation checklist in `services/marketplace/README.md`; nothing here was tested against the live API.
+
+### Verified surfaces and scopes (VERIFIED against the pages below)
+
+| Surface | Endpoint | Permissions | Current status in the docs | Decision for #189 |
+|---|---|---|---|---|
+| Own mentions | `GET /{threads-user-id}/mentions` | `threads_basic` + `threads_manage_mentions` | Live since 2024-12-09. Before the permission is approved for advanced access, only mentions made by app testers are returned. Posts by private users are never returned. `since` must be ≥ 1688540400. Fields are the retrieve-posts field list. | **Shipped in this wave** as `threads_mentions_list`, fixture-first. |
+| Profile metadata (app-scoped user) | `GET /{threads-user-id}?fields=id,username,name,threads_profile_picture_url,threads_biography,is_verified` | `threads_basic` only | Live; returns only the app-scoped user. | Documented follow-up (candidate 1: grounding for later reads). Not built here. |
+| Keyword / topic-tag search | `GET /keyword_search` (`q`, `search_type`, `search_mode`, `media_type`, `author_username`) | `threads_basic` + `threads_keyword_search` | Scope name now VERIFIED (item 7 resolved). Without approval the search covers only the authenticated user's own posts; public search needs the approval. 2,200 queries per user per rolling 24h across all apps. | Excluded. The connector contract keeps "no keyword search," and public coverage needs an approval the operator has not recorded. |
+| External profile discovery | `GET /profile_lookup?username=` | `threads_basic` + `threads_profile_discovery` | Scope name now VERIFIED (item 7 resolved). Under standard access only official Meta accounts (`@meta`, `@threads`, `@instagram`, `@facebook`) can be looked up. Target profile needs ≥ 100 followers (lowered from 1,000 on 2025-11-20). 1,000 requests per user per rolling 24h. | Excluded. The connector contract keeps "no external profile discovery," and the standard-access allowlist has no useful value. |
+| Insights (own content) | `GET /{threads-media-id}/insights` (`views`, `likes`, `replies`, `reposts`, `quotes`, `shares`); `GET /{threads-user-id}/threads_insights` (adds `clicks`, `followers_count`, `follower_demographics`) | `threads_basic` + `threads_manage_insights` | Live for the operator's own content. `followers_count` / `follower_demographics` opened to profiles without a linked Instagram account on 2026-01-30. `views` and `shares` are flagged "in development" by Meta. | Documented follow-up (candidate 4). Not built here: keep this wave to one new read surface. |
+
+### Other verified points
+
+- **Graph host.** `graph.threads.com` and `graph.threads.net` are both valid entry points (changelog, 2025-06-06). The connector's pinned `https://graph.threads.net` destination stays correct; no destination change was made.
+- **Mentions scope list.** The OAuth scope picker on the Get Access Tokens page lists `threads_basic`, `threads_content_publish`, `threads_read_replies`, `threads_manage_replies`, `threads_manage_insights`; `threads_manage_mentions` is documented on the Mentions page itself. An operator following only the picker will miss it, so the README operator setup and live-validation checklist name it.
+- **Webhooks exist** for replies and mentions (2025-07-15). Out of scope: Musebridge pulls on demand and runs no webhook receiver.
+- **Explicit exclusions stand.** No Threads DM endpoint exists; there is no public DM API to build against. Saved items have no endpoint. Publishing and reply management stay write-class and outside this read-only connector. No browser automation and no Instagram fallback.
+
+### Addendum sources (read 2026-11-05)
+
+19. Threads API overview — https://developers.facebook.com/documentation/threads/overview
+20. Threads mentions — https://developers.facebook.com/documentation/threads/threads-mentions
+21. Threads profiles and profile discovery — https://developers.facebook.com/documentation/threads/threads-profiles
+22. Threads keyword and topic-tag search — https://developers.facebook.com/documentation/threads/keyword-search
+23. Threads insights — https://developers.facebook.com/documentation/threads/insights
+24. Threads get access tokens (scope list) — https://developers.facebook.com/documentation/threads/get-started/get-access-tokens-and-permissions
+25. Threads changelog — https://developers.facebook.com/documentation/threads/changelog

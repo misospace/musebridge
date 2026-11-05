@@ -14,6 +14,12 @@ export interface ThreadsPostsListOptions {
   after?: string;
 }
 
+export interface ThreadsMentionsListOptions {
+  limit: number;
+  since?: string;
+  after?: string;
+}
+
 export class ThreadsHttpError extends Error {
   constructor(readonly status: number, readonly retryAfter?: number) {
     super(`Threads API returned HTTP ${status}`);
@@ -61,6 +67,25 @@ export class ThreadsClient {
       params.set('after', options.after);
     }
     return this.apiRequest(`/${encodeURIComponent(this.threadsUserId)}/threads?${params}`, signal);
+  }
+
+  async listMentions(options: ThreadsMentionsListOptions, signal?: AbortSignal): Promise<unknown> {
+    const params = new URLSearchParams();
+    // Same media-object projection as the user-posts endpoints: the mentions reference
+    // documents the retrieve-posts field list, and `owner` is requested because a
+    // mention's `threads_user_id` maps from `owner.id` (the mentioning author).
+    params.set('fields', 'id,media_type,media_url,permalink,text,thumbnail_url,timestamp,username,owner,shortcode,is_quote_post,quoted_post,reposted_post,reply_count,like_count');
+    params.set('limit', String(options.limit));
+    if (options.since !== undefined) {
+      // Calendar-date `since` is forwarded verbatim, exactly as on listOwnPosts: the
+      // mentions endpoint parses the same date/time shape and applies the same lower-bound
+      // inclusive semantics server-side.
+      params.set('since', options.since);
+    }
+    if (options.after !== undefined && options.after !== '') {
+      params.set('after', options.after);
+    }
+    return this.apiRequest(`/${encodeURIComponent(this.threadsUserId)}/mentions?${params}`, signal);
   }
 
   async listReplies(input: { mediaId: string; after?: string }, signal?: AbortSignal): Promise<unknown> {
