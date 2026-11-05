@@ -104,6 +104,8 @@ describe('ThreadsClient', () => {
     await expect(client.listMentions({ limit: 5, since: '2023-07-05' })).rejects.toBeInstanceOf(TypeError);
     expect(seenUrl).toBe('');
     await expect(client.listMentions({ limit: 5, since: 'not-a-date' })).rejects.toBeInstanceOf(TypeError);
+    // Day-invalid strings roll over under Date.UTC; the round-trip guard rejects them too.
+    await expect(client.listMentions({ limit: 5, since: '2025-02-30' })).rejects.toBeInstanceOf(TypeError);
     expect(seenUrl).toBe('');
   });
 

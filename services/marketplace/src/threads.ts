@@ -132,9 +132,18 @@ async function responseError(response: Response): Promise<ThreadsHttpError> {
 // what a directly-constructed client call hits instead, so no request goes out below the
 // bound (the endpoint would reject it) and no malformed date reaches the query string.
 export function mentionsSinceUnixSeconds(since: string): number {
-  const parsed = /^\d{4}-\d{2}-\d{2}$/.test(since) ? Date.parse(`${since}T00:00:00Z`) : Number.NaN;
-  if (!Number.isFinite(parsed)) throw new TypeError('since must be a valid YYYY-MM-DD date');
-  const seconds = Math.floor(parsed / 1000);
+  const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(since);
+  const year = parts ? Number(parts[1]) : Number.NaN;
+  const month = parts ? Number(parts[2]) : Number.NaN;
+  const day = parts ? Number(parts[3]) : Number.NaN;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  // Calendar round-trip (same check as the input schema): `Date.UTC` rolls day-invalid
+  // strings like `2025-02-30` over to March and yields Invalid Date for a missing match,
+  // so require the components to survive.
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    throw new TypeError('since must be a valid YYYY-MM-DD date');
+  }
+  const seconds = Math.floor(date.getTime() / 1000);
   if (seconds < THREADS_MENTIONS_MIN_SINCE_UNIX) {
     throw new TypeError(`since must not be earlier than the mentions endpoint minimum timestamp ${THREADS_MENTIONS_MIN_SINCE_UNIX}`);
   }
