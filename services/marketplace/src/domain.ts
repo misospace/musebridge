@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { PROVIDER_SESSION_ASSESSMENTS } from './browser.js';
+import { THREADS_MENTIONS_MIN_SINCE_UNIX, mentionsSinceUnixSeconds } from './threads.js';
 
 export const SCHEMA_VERSION = '1.10.0';
 export const SERVICE_VERSION = '0.1.0'; // x-release-please-version
@@ -529,11 +530,24 @@ export const threadsRepliesListOutputSchema = z.union([threadsRepliesListSuccess
 // A mention is a Threads media object — the same shape `GET /{threads-user-id}/mentions`
 // returns as the user-posts endpoints — so items reuse `threadsPostSchema` verbatim.
 // `threads_user_id` on a mention is the mentioning author's stable `owner.id`, not the
-// operator's. Input mirrors `threadsPostsListInputSchema` because the endpoint documents
-// the same `since` lower bound and cursor pagination as the user-posts endpoints.
+// operator's. Input keeps the posts calendar-date contract for tool-argument consistency,
+// but `since` carries the mentions endpoint's documented lower bound: the endpoint documents
+// `since` as a Unix timestamp that must be >= 1688540400, so a date whose UTC-midnight
+// timestamp falls below that bound is rejected as InvalidParams here, before any request;
+// the client converts accepted dates to the endpoint's timestamp type.
 export const threadsMentionsListInputSchema = z.object({
   limit: z.number().int().min(1).max(20).default(10),
-  since: threadsDateSchema.optional()
+  since: threadsDateSchema.refine(
+    (value) => {
+      try {
+        mentionsSinceUnixSeconds(value);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    { message: `Must not be earlier than the mentions endpoint minimum timestamp ${THREADS_MENTIONS_MIN_SINCE_UNIX} (2023-07-05T07:00:00Z), i.e. 2023-07-06 or later as a UTC calendar date` }
+  ).optional()
 }).strict();
 
 export const threadsMentionsListSuccessSchema = z.object({

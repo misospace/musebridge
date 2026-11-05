@@ -879,6 +879,17 @@ describe('fixture MCP service', () => {
     const bounded = structured(await client.callTool({ name: 'threads_mentions_list', arguments: { since: '2025-04-05' } }));
     expect(bounded.mentions.map((mention: { id: string }) => mention.id)).toEqual(['synth-mention-002']);
     expect(bounded.truncated).toBe(false);
+    // The mentions endpoint's documented `since` lower bound is enforced at the input
+    // boundary: the first satisfying UTC date is accepted, the day before is InvalidParams.
+    // Posts keep their own documented date form, so `2023-07-05` stays valid there.
+    const earliest = structured(await client.callTool({ name: 'threads_mentions_list', arguments: { since: '2023-07-06' } }));
+    expect(earliest.backend).toBe('fixture');
+    expect(earliest.mentions.length).toBeGreaterThan(0);
+    await expect(client.callTool({ name: 'threads_mentions_list', arguments: { since: '2023-07-05' } })).rejects.toMatchObject({
+      code: ErrorCode.InvalidParams
+    });
+    const postsEarliest = structured(await client.callTool({ name: 'threads_posts_list', arguments: { since: '2023-07-05' } }));
+    expect(postsEarliest.backend).toBe('fixture');
   });
 
   it('serves read-only event availability through the fixture backend', async () => {

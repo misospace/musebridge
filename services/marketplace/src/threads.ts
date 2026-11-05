@@ -20,6 +20,11 @@ export interface ThreadsMentionsListOptions {
   after?: string;
 }
 
+// The mentions endpoint documents `since` as a timestamp that must be >= 1688540400
+// (2023-07-05T07:00:00Z, the Threads launch floor). The user-posts endpoints document the
+// `since=YYYY-MM-DD` date form instead, so only mentions converts the calendar date.
+export const THREADS_MENTIONS_MIN_SINCE_UNIX = 1_688_540_400;
+
 export class ThreadsHttpError extends Error {
   constructor(readonly status: number, readonly retryAfter?: number) {
     super(`Threads API returned HTTP ${status}`);
@@ -77,10 +82,12 @@ export class ThreadsClient {
     params.set('fields', 'id,media_type,media_url,permalink,text,thumbnail_url,timestamp,username,owner,shortcode,is_quote_post,quoted_post,reposted_post,reply_count,like_count');
     params.set('limit', String(options.limit));
     if (options.since !== undefined) {
-      // Calendar-date `since` is forwarded verbatim, exactly as on listOwnPosts: the
-      // mentions endpoint parses the same date/time shape and applies the same lower-bound
-      // inclusive semantics server-side.
-      params.set('since', options.since);
+      // The mentions endpoint documents `since` as a Unix timestamp with a documented lower
+      // bound (THREADS_MENTIONS_MIN_SINCE_UNIX), unlike the user-posts endpoints whose docs
+      // show the `since=YYYY-MM-DD` date form. Convert the validated calendar date to its
+      // UTC-midnight seconds — the same lower-bound-inclusive semantics a date carries —
+      // instead of forwarding a shape the endpoint does not document.
+      params.set('since', String(mentionsSinceUnixSeconds(options.since)));
     }
     if (options.after !== undefined && options.after !== '') {
       params.set('after', options.after);
@@ -117,4 +124,19 @@ async function responseError(response: Response): Promise<ThreadsHttpError> {
   // Normalization (blank/negative/nonnumeric/out-of-range → no hint, fraction truncated) is
   // shared with the other provider clients in retry-after.ts.
   return new ThreadsHttpError(response.status, normalizeRetryAfterHeader(response.headers.get('retry-after')));
+}
+
+// Converts a validated `YYYY-MM-DD` calendar date to the Unix-seconds value the mentions
+// endpoint expects, enforcing the documented lower bound. The input schema rejects
+// out-of-range dates as InvalidParams before a request is ever assembled; this guard is
+// what a directly-constructed client call hits instead, so no request goes out below the
+// bound (the endpoint would reject it) and no malformed date reaches the query string.
+export function mentionsSinceUnixSeconds(since: string): number {
+  const parsed = /^\d{4}-\d{2}-\d{2}$/.test(since) ? Date.parse(`${since}T00:00:00Z`) : Number.NaN;
+  if (!Number.isFinite(parsed)) throw new TypeError('since must be a valid YYYY-MM-DD date');
+  const seconds = Math.floor(parsed / 1000);
+  if (seconds < THREADS_MENTIONS_MIN_SINCE_UNIX) {
+    throw new TypeError(`since must not be earlier than the mentions endpoint minimum timestamp ${THREADS_MENTIONS_MIN_SINCE_UNIX}`);
+  }
+  return seconds;
 }

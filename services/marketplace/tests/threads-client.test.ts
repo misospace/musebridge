@@ -70,7 +70,9 @@ describe('ThreadsClient', () => {
     const url = new URL(seenUrl);
     expect(url.pathname).toBe('/synthetic-user-id/mentions');
     expect(url.searchParams.get('limit')).toBe('7');
-    expect(url.searchParams.get('since')).toBe('2025-04-01');
+    // Mentions documents `since` as a Unix timestamp (unlike the user-posts endpoints'
+    // date form), so the client converts the calendar date to UTC-midnight seconds.
+    expect(url.searchParams.get('since')).toBe('1743465600');
     expect(url.searchParams.get('after')).toBe('mentions-cursor-1');
     // Mentions return Threads media objects, so the projection matches the user-posts
     // endpoints — including `owner`, because a mention's `threads_user_id` maps from the
@@ -89,6 +91,20 @@ describe('ThreadsClient', () => {
     expect(new URL(seenUrl).searchParams.get('after')).toBeNull();
     await client.listMentions({ limit: 5, after: '' });
     expect(new URL(seenUrl).searchParams.get('after')).toBeNull();
+  });
+
+  it('enforces the mentions since lower bound at the client boundary', async () => {
+    let seenUrl = '';
+    const client = new ThreadsClient({ ...options, fetchImpl: async (input) => { seenUrl = String(input); return ok({ data: [] }); } });
+    // First whole UTC date whose midnight satisfies `>= 1688540400`.
+    await client.listMentions({ limit: 5, since: '2023-07-06' });
+    expect(new URL(seenUrl).searchParams.get('since')).toBe('1688601600');
+    // 2023-07-05T00:00Z is below the documented bound: the client refuses before any request.
+    seenUrl = '';
+    await expect(client.listMentions({ limit: 5, since: '2023-07-05' })).rejects.toBeInstanceOf(TypeError);
+    expect(seenUrl).toBe('');
+    await expect(client.listMentions({ limit: 5, since: 'not-a-date' })).rejects.toBeInstanceOf(TypeError);
+    expect(seenUrl).toBe('');
   });
 
   it('fetches a replies tree by media id with the documented fields list', async () => {
