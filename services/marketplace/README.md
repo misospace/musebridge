@@ -74,7 +74,7 @@ URL hosts are policed in two layers. A post or reply `permalink` is a navigation
 
 **Operator setup**
 
-1. Keep the default `fixture` backend and provide `THREADS_ACCESS_TOKEN` and `THREADS_USER_ID` as environment variables (both required; the token needs the permissions your reads require).
+1. Keep the default `fixture` backend and provide `THREADS_ACCESS_TOKEN` and `THREADS_USER_ID` as environment variables (both required; the token needs `threads_basic`, plus `threads_read_replies` for reply trees and `threads_manage_mentions` for mentions).
 2. Confirm the current Meta reference out-of-band: check the endpoint paths, permission names, and response shapes this connector documents against Meta's current Threads API reference.
 3. Set `THREADS_BACKEND=threads` and `THREADS_LIVE_VALIDATED=1` to activate the live backend, then run the single authorized live read in the checklist below.
 

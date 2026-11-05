@@ -34,7 +34,7 @@ Today's five surfaces:
 | `shopping` | `ebay` | `ShoppingBackend` | `shopping_search`, `shopping_fetch` | API token, no browser |
 | `messenger` | `facebook` | `ConversationBackend` | `messenger_threads_list`, `messenger_thread_read`, `messenger_prepare`, `messenger_send` | Separate browser session scope |
 | `events` | `ticketmaster` | `EventsBackend` | `events_search`, `events_fetch` | API token, no browser |
-| `social` | `threads` | `ThreadsBackend` | `threads_posts_list`, `threads_replies_list` | API token, no browser |
+| `social` | `threads` | `ThreadsBackend` | `threads_posts_list`, `threads_replies_list`, `threads_mentions_list` | API token, no browser |
 
 Backends are selected by kind and expose a bounded `name` (`fixture`, `facebook`, `ebay`, `ticketmaster`, or `threads`). The backend interface is the only thing core dispatch knows about a provider; the domain contract is the only shape a provider must fill.
 
@@ -157,7 +157,7 @@ Rules:
 
 **Consumer compatibility checklist**
 
-- [ ] Tool names unchanged (`marketplace_search`, `marketplace_fetch`, `marketplace_status`, `shopping_search`, `shopping_fetch`, `events_search`, `events_fetch`, `messenger_threads_list`, `messenger_thread_read`, `messenger_prepare`, `messenger_send`, `threads_posts_list`, `threads_replies_list`).
+- [ ] Tool names unchanged (`marketplace_search`, `marketplace_fetch`, `marketplace_status`, `shopping_search`, `shopping_fetch`, `events_search`, `events_fetch`, `messenger_threads_list`, `messenger_thread_read`, `messenger_prepare`, `messenger_send`, `threads_posts_list`, `threads_replies_list`; `threads_mentions_list` was added additively for #189).
 - [ ] MCP server identity still `marketplace`.
 - [ ] `SCHEMA_VERSION` bumped only for additive output changes; existing fields keep their names and types.
 - [ ] New status fields are additive; `capabilities` entries are added, not reshaped.

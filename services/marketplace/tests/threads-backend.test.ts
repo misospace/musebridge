@@ -718,6 +718,15 @@ describe('ThreadsApiBackend', () => {
     expect(seenAfters).toEqual([null]);
   });
 
+  it('marks a mentions page exhausted at the exact limit as complete, not truncated', async () => {
+    // mentionsSuccess holds exactly two items with no paging cursor: hitting the
+    // limit on the final item of an exhausted page is completeness, not truncation.
+    mode = 'normal';
+    const exact = await backend().listMentions(threadsMentionsListInputSchema.parse({ limit: 2 }), signal());
+    expect(exact.mentions).toHaveLength(2);
+    expect(exact.truncated).toBe(false);
+  });
+
   it('maps 401 on a mentions request to AUTH_EXPIRED', async () => {
     mode = 'unauthorized';
     await expect(backend().listMentions(mentionsInput, signal())).rejects.toMatchObject({ code: 'AUTH_EXPIRED' });
