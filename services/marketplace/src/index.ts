@@ -1,11 +1,24 @@
 import { facebookMarketsFilePath, loadFacebookMarkets } from './market-config.js';
 import { createMarketplaceService, installShutdownHandlers, listen } from './service.js';
 
-export { FixtureBackend, ProviderError, SurfaceDisabledError, type ConversationBackend, type EventsBackend, type MarketplaceBackend, type ShoppingBackend, type ThreadsBackend, type ThreadsMentionPage } from './backend.js';
+export { FixtureBackend, ProviderError, SurfaceDisabledError, type ConversationBackend, type ConversationBackfillPage, type EventsBackend, type MautrixMetaBackend, type MarketplaceBackend, type ShoppingBackend, type ThreadsBackend, type ThreadsMentionPage } from './backend.js';
 export { TicketmasterClient, TicketmasterHttpError, type TicketmasterClientOptions } from './ticketmaster.js';
 export { TicketmasterEventsBackend } from './ticketmaster-backend.js';
 export { ThreadsClient, ThreadsHttpError, type ThreadsClientOptions, type ThreadsMentionsListOptions, type ThreadsPostsListOptions } from './threads.js';
 export { ThreadsApiBackend } from './threads-backend.js';
+export {
+  MAUTRIX_META_ERROR_CODES,
+  MautrixMetaClient,
+  MautrixMetaHttpError,
+  isMetaOwnedHost,
+  metaThreadBackfillResponseSchema,
+  metaThreadListResponseSchema,
+  metaThreadTailResponseSchema,
+  resolveMetaTransportBaseUrl,
+  type MautrixMetaClientOptions,
+  type MautrixMetaErrorCode
+} from './mautrix-meta.js';
+export { MautrixMetaApiBackend, type MautrixMetaApiBackendOptions } from './mautrix-meta-backend.js';
 export { FacebookMarketplaceBackend, type FacebookMarketplaceBackendOptions } from './facebook-marketplace-backend.js';
 export {
   BROWSER_SESSION_STATUSES,
@@ -72,7 +85,7 @@ export {
   type MarketplaceSearchOutcome,
   type ParseMarketplaceInput
 } from './facebook-marketplace-parse.js';
-export { createMarketplaceService, installShutdownHandlers, listen, parseBackendKind, parseEventsBackendKind, parseMessengerEnabled, parseShoppingBackendKind, parseThreadsBackendKind, type MarketplaceService, type ServiceOptions } from './service.js';
+export { createMarketplaceService, installShutdownHandlers, listen, parseBackendKind, parseEventsBackendKind, parseMessengerEnabled, parseMessengerTransport, parseMautrixMetaRiskAck, parseShoppingBackendKind, parseThreadsBackendKind, type MarketplaceService, type ServiceOptions } from './service.js';
 export {
   ReauthManager,
   ProcessReauthRuntime,

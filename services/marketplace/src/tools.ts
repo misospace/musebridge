@@ -2,7 +2,7 @@ import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { ProviderError, SurfaceDisabledError, renderDeliveredMessage, type ConversationBackend, type EventsBackend, type MarketplaceBackend, type ShoppingBackend, type ThreadsBackend } from './backend.js';
+import { ProviderError, SurfaceDisabledError, renderDeliveredMessage, type ConversationBackend, type EventsBackend, type MautrixMetaBackend, type MarketplaceBackend, type ShoppingBackend, type ThreadsBackend } from './backend.js';
 import type { ProviderSessionAssessment } from './browser.js';
 import {
   authorizeAction,
@@ -19,6 +19,8 @@ import {
   threadsListOutputSchema,
   threadReadInputSchema,
   threadReadOutputSchema,
+  threadBackfillInputSchema,
+  threadBackfillOutputSchema,
   threadSendInputSchema,
   sendOutputSchema,
   threadPrepareInputSchema,
@@ -57,6 +59,10 @@ import {
 
 const marketplaceScope = { provider: 'facebook', account: 'default', surface: 'marketplace' } as const;
 const messengerScope = { provider: 'facebook', account: 'default', surface: 'messenger' } as const;
+// The experimental mautrix-meta transport keeps its own surface (#195): its tools are registered
+// only through a backend wired on the MautrixMetaBackend boundary, so a browser-scope wiring can
+// never advertise them and the experimental path stays distinguishable in every action scope.
+const messengerMetaScope = { provider: 'facebook', account: 'default', surface: 'messenger_meta' } as const;
 const shoppingScope = { provider: 'ebay', account: 'default', surface: 'shopping' } as const;
 const eventsScope = { provider: 'ticketmaster', account: 'default', surface: 'events' } as const;
 const socialScope = { provider: 'threads', account: 'default', surface: 'social' } as const;
@@ -72,16 +78,33 @@ type ConversationBackendMethod = {
 }[keyof ConversationBackend];
 
 /**
+ * The `mautrix-meta` backend methods a tool may require. Same mapped-type rule as
+ * `ConversationBackendMethod`: naming a method that does not exist on the read-only boundary is
+ * a compile error, and the boundary declares no write method at all, so a write-class tool
+ * cannot declare a requirement here without first widening the boundary type in review.
+ */
+type MautrixMetaBackendMethod = {
+  [K in keyof MautrixMetaBackend]: NonNullable<MautrixMetaBackend[K]> extends (...args: never[]) => unknown ? K : never;
+}[keyof MautrixMetaBackend];
+
+/**
  * A backend capability a tool needs before it may be registered. The requirement rides on the
  * tool entry itself, so a gated tool cannot be forgotten by a separate gate list. Today the
- * capability is a conversation backend method — the only surface that is gated per method — so a
- * requirement naming another surface's method is a compile error rather than a tool that silently
- * never registers.
+ * capability is a conversation backend method or a `mautrix-meta` boundary method — the only
+ * surfaces that are gated per method — so a requirement naming another surface's method is a
+ * compile error rather than a tool that silently never registers.
  */
-interface ToolRequirement {
-  /** The conversation backend method that must exist for the tool to be usable. */
-  readonly method: ConversationBackendMethod;
-}
+type ToolRequirement =
+  | {
+    /** The conversation backend method that must exist for the tool to be usable. */
+    readonly method: ConversationBackendMethod;
+    readonly metaMethod?: never;
+  }
+  | {
+    /** The `mautrix-meta` boundary method that must exist for the tool to be usable (#195). */
+    readonly metaMethod: MautrixMetaBackendMethod;
+    readonly method?: never;
+  };
 
 /** The shape every TOOLS entry declares. */
 interface ToolDeclaration {
@@ -253,6 +276,30 @@ export const TOOLS = [
     definition: { riskClass: 'read', scope: messengerScope }
   },
   {
+    name: 'messenger_meta_threads_list',
+    description: 'List recent personal Messenger threads over the experimental, opt-in mautrix-meta transport. Read-only; the transport starts only behind explicit provider selection and explicit Meta account-risk acknowledgement. Results cover only the bounded recent window.',
+    inputSchema: threadsListInputSchema,
+    outputSchema: threadsListOutputSchema,
+    requires: { metaMethod: 'listThreads' },
+    definition: { riskClass: 'read', scope: messengerMetaScope }
+  },
+  {
+    name: 'messenger_meta_thread_read',
+    description: 'Read the newest-end message window of one Messenger thread over the experimental, opt-in mautrix-meta transport. Read-only; the returned coverage states whether older messages exist outside the window.',
+    inputSchema: threadReadInputSchema,
+    outputSchema: threadReadOutputSchema,
+    requires: { metaMethod: 'readThread' },
+    definition: { riskClass: 'read', scope: messengerMetaScope }
+  },
+  {
+    name: 'messenger_meta_thread_backfill',
+    description: 'Page older Messenger messages before a timestamp over the experimental, opt-in mautrix-meta transport. Read-only; the result is a bounded older window with truthful coverage, never a complete history, and coverage.has_more_before says whether the provider proved its range exhausted.',
+    inputSchema: threadBackfillInputSchema,
+    outputSchema: threadBackfillOutputSchema,
+    requires: { metaMethod: 'backfillThread' },
+    definition: { riskClass: 'read', scope: messengerMetaScope }
+  },
+  {
     name: 'threads_posts_list',
     description: 'List the operator\'s own published Threads posts via the official Threads Graph API. Read-only; no DMs, no saved items, no keyword search, no external profile discovery.',
     inputSchema: threadsPostsListInputSchema,
@@ -318,6 +365,10 @@ export interface MarketplaceToolOptions {
   approvalGrant?: (request: ActionRequest) => unknown;
   authorizer?: ActionAuthorizer;
   conversations?: ConversationBackend;
+  /** Backend wired over the read-only experimental `mautrix-meta` provider boundary (#195). Present only behind the explicit-selection + risk-acknowledgement gate; it registers the `messenger_meta_*` tools and nothing else. */
+  metaConversations?: MautrixMetaBackend;
+  /** The Messenger conversation transport this deployment selected; reported by `marketplace_status` when set. */
+  messengerTransport?: 'browser' | 'mautrix-meta';
   shopping?: ShoppingBackend;
   events?: EventsBackend;
   threads?: ThreadsBackend;
@@ -561,6 +612,47 @@ export function registerMarketplaceTools(
             shutdownSignal
           );
           output = { ok: true, backend: backendName, matches: page.matches, truncated: page.truncated, coverage: page.coverage };
+        } else if (name === 'messenger_meta_threads_list') {
+          const meta = options.metaConversations;
+          if (!meta) throw new ProviderError('UPSTREAM_ERROR', 'The mautrix-meta Messenger transport is not configured on this deployment.');
+          const listing = await runBackendOperation(
+            (signal) => meta.listThreads(parsed.data as z.infer<typeof threadsListInputSchema>, signal),
+            backendTimeoutMs,
+            extra.signal,
+            shutdownSignal
+          );
+          output = { ok: true, backend: meta.name, threads: listing.threads, truncated: listing.truncated };
+        } else if (name === 'messenger_meta_thread_read') {
+          const meta = options.metaConversations;
+          if (!meta) throw new ProviderError('UPSTREAM_ERROR', 'The mautrix-meta Messenger transport is not configured on this deployment.');
+          const thread = await runBackendOperation(
+            (signal) => meta.readThread(parsed.data as z.infer<typeof threadReadInputSchema>, signal),
+            backendTimeoutMs,
+            extra.signal,
+            shutdownSignal
+          );
+          output = thread === null
+            ? runtimeFailure('NOT_FOUND', 'No conversation thread matched the supplied identifier.')
+            : {
+              ok: true,
+              backend: meta.name,
+              thread_id: thread.thread_id,
+              messages: thread.messages,
+              ...(thread.coverage ? { coverage: thread.coverage } : {})
+            };
+        } else if (name === 'messenger_meta_thread_backfill') {
+          const meta = options.metaConversations;
+          if (!meta) throw new ProviderError('UPSTREAM_ERROR', 'The mautrix-meta Messenger transport is not configured on this deployment.');
+          const backfillInput = parsed.data as z.infer<typeof threadBackfillInputSchema>;
+          const page = await runBackendOperation(
+            (signal) => meta.backfillThread(backfillInput, signal),
+            backendTimeoutMs,
+            extra.signal,
+            shutdownSignal
+          );
+          output = page === null
+            ? runtimeFailure('NOT_FOUND', 'No conversation thread matched the supplied identifier.')
+            : { ok: true, backend: meta.name, thread_id: backfillInput.thread_id, messages: page.messages, coverage: page.coverage };
         } else if (name === 'shopping_search') {
           const shopping = options.shopping;
           if (!shopping) throw new ProviderError('UPSTREAM_ERROR', 'The shopping surface is not configured on this deployment.');
@@ -650,6 +742,7 @@ export function registerMarketplaceTools(
             shopping_backend: options.shopping?.name,
             events_backend: options.events?.name,
             threads_backend: options.threads?.name,
+            ...(options.messengerTransport !== undefined ? { messenger_transport: options.messengerTransport } : {}),
             ...(sessionAssessment ? { facebook_session: { status: sessionAssessment() } } : {}),
             ...(marketplaceSessionAssessment ? { marketplace_session: { status: marketplaceSessionAssessment() } } : {}),
             ...(messengerSessionAssessment ? { messenger_session: { status: messengerSessionAssessment() } } : {}),
@@ -657,6 +750,7 @@ export function registerMarketplaceTools(
               { surface: marketplaceScope.surface, provider: marketplaceScope.provider, backend: backendName },
               { surface: shoppingScope.surface, provider: shoppingScope.provider, backend: options.shopping?.name ?? null },
               { surface: messengerScope.surface, provider: messengerScope.provider, backend: options.conversations?.name ?? null },
+              { surface: messengerMetaScope.surface, provider: messengerMetaScope.provider, backend: options.metaConversations?.name ?? null },
               { surface: eventsScope.surface, provider: eventsScope.provider, backend: options.events?.name ?? null },
               { surface: socialScope.surface, provider: socialScope.provider, backend: options.threads?.name ?? null }
             ]
@@ -690,15 +784,18 @@ export function registerMarketplaceTools(
 }
 
 /**
- * A tool is available when the wired conversation backend provides the capability its entry
- * declares. An entry without a requirement is always available; an entry with one is registered
- * only while the named conversation backend method exists, so a read-only backend is never
- * advertised as able to draft or send.
+ * A tool is available when the wired backend provides the capability its entry declares. An entry
+ * without a requirement is always available; an entry with one is registered only while the named
+ * method exists on the boundary its requirement names — the conversation backend for `method`,
+ * the `mautrix-meta` boundary for `metaMethod` — so a read-only backend is never advertised as
+ * able to draft or send, and the experimental tools appear only while a `mautrix-meta` backend is
+ * actually wired.
  */
 function hasRequiredCapability(tool: ToolEntry, options: MarketplaceToolOptions): boolean {
   if (!('requires' in tool)) return true;
-  const { method } = tool.requires;
-  return typeof options.conversations?.[method] === 'function';
+  const { requires } = tool;
+  if ('metaMethod' in requires) return typeof options.metaConversations?.[requires.metaMethod] === 'function';
+  return typeof options.conversations?.[requires.method] === 'function';
 }
 
 function toMcpObjectSchema(schema: z.ZodType, io: 'input' | 'output', toolName?: ToolName): Record<string, unknown> {

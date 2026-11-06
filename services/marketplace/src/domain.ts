@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { PROVIDER_SESSION_ASSESSMENTS } from './browser.js';
 import { THREADS_MENTIONS_MIN_SINCE_UNIX, mentionsSinceUnixSeconds } from './threads.js';
 
-export const SCHEMA_VERSION = '1.10.0';
+export const SCHEMA_VERSION = '1.11.0';
 export const SERVICE_VERSION = '0.1.0'; // x-release-please-version
 export const MAX_QUERY_LENGTH = 256;
 export const MAX_LOCATION_LENGTH = 256;
@@ -286,7 +286,7 @@ export const surfaceSessionSchema = z.object({
 }).strict();
 
 export const capabilitySchema = z.object({
-  surface: z.enum(['marketplace', 'shopping', 'messenger', 'events', 'social']),
+  surface: z.enum(['marketplace', 'shopping', 'messenger', 'messenger_meta', 'events', 'social']),
   provider: z.enum(['facebook', 'ebay', 'ticketmaster', 'threads']),
   backend: backendNameSchema.nullable()
 }).strict();
@@ -305,6 +305,8 @@ export const statusSuccessSchema = z.object({
   shopping_backend: backendNameSchema.optional(),
   events_backend: backendNameSchema.optional(),
   threads_backend: backendNameSchema.optional(),
+  /** Which Messenger conversation transport this deployment selected (#195). Absent on pre-1.11 hosts; `browser` is the default, `mautrix-meta` only ever appears behind the explicit selection + risk-acknowledgement gate. */
+  messenger_transport: z.enum(['browser', 'mautrix-meta']).optional(),
   capabilities: z.array(capabilitySchema).min(1)
 }).strict();
 
@@ -588,6 +590,47 @@ export const threadReadOutputSchema = z.union([
   }).strict(),
   runtimeFailureSchema
 ]);
+
+// Backfill window (#195). The experimental mautrix-meta transport's only history capability is
+// paging older messages behind the tail window, so the contract is the paging itself: `before` is
+// an exclusive upper bound (messages strictly older than it) and the result is a bounded window
+// with truthful coverage, never an implied-complete history. `scanned_rows` counts the provider
+// rows the read examined. `has_more_before` is the provider's own range disclosure (the pinned
+// mautrix-meta paging exposes exactly this signal): true means older messages are known to exist
+// before the returned window, false only when the provider proved that range exhausted.
+// `truncated` is the window truth for the caller (#151 rule): true when the provider range held
+// more rows than the returned window kept — always true when `has_more_before` is true — false
+// only when the range is exhausted and the cap left nothing out. Messages are chronological
+// oldest-to-newest, the same order `messenger_thread_read` returns.
+export const MAX_BACKFILL_MESSAGE_COUNT = 50;
+
+export const threadBackfillInputSchema = z.object({
+  thread_id: conversationThreadIdSchema,
+  before: isoDateTimeSchema,
+  limit: z.number().int().min(1).max(MAX_BACKFILL_MESSAGE_COUNT).default(25)
+}).strict();
+
+export type ThreadBackfillInput = z.infer<typeof threadBackfillInputSchema>;
+
+export const conversationBackfillCoverageSchema = z.object({
+  window: z.literal('backfill'),
+  before: isoDateTimeSchema,
+  scanned_rows: z.number().int().nonnegative(),
+  has_more_before: z.boolean(),
+  truncated: z.boolean()
+}).strict();
+
+export type ConversationBackfillCoverage = z.infer<typeof conversationBackfillCoverageSchema>;
+
+export const threadBackfillSuccessSchema = z.object({
+  ok: z.literal(true),
+  backend: backendNameSchema,
+  thread_id: conversationThreadIdSchema,
+  messages: z.array(conversationMessageSchema).max(MAX_BACKFILL_MESSAGE_COUNT),
+  coverage: conversationBackfillCoverageSchema
+}).strict();
+
+export const threadBackfillOutputSchema = z.union([threadBackfillSuccessSchema, runtimeFailureSchema]);
 
 // 'sent' means delivered or reconciled-confirmed; 'unknown' means the outcome was never
 // confirmed after a timeout. Unconfirmed sends are reported as unknown, not as failure

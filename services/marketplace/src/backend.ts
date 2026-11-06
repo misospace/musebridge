@@ -4,6 +4,7 @@ import {
   threadsListInputSchema,
   threadReadInputSchema,
   threadSendInputSchema,
+  threadBackfillInputSchema,
   consumerThreadsListInputSchema,
   consumerThreadsSearchInputSchema,
   shoppingFetchInputSchema,
@@ -20,6 +21,7 @@ import {
   type ConsumerThread,
   type ConsumerThreadMatch,
   type ConsumerMenuCoverage,
+  type ConversationBackfillCoverage,
   type Listing,
   type ConversationMessage,
   type ConversationThread,
@@ -30,6 +32,7 @@ import {
   type ProviderErrorCode,
   type ProviderErrorMetadata,
   type ThreadSendInput,
+  type ThreadBackfillInput,
   type ThreadsPost,
   type ThreadsReply
 } from './domain.js';
@@ -129,6 +132,43 @@ export interface ThreadsBackend {
   listOwnPosts(input: ReturnType<typeof threadsPostsListInputSchema.parse>, signal: AbortSignal): Promise<ThreadsPostPage> | ThreadsPostPage;
   listReplies(input: ReturnType<typeof threadsRepliesListInputSchema.parse>, signal: AbortSignal): Promise<ThreadsReplyPage | null> | ThreadsReplyPage | null;
   listMentions(input: ReturnType<typeof threadsMentionsListInputSchema.parse>, signal: AbortSignal): Promise<ThreadsMentionPage> | ThreadsMentionPage;
+}
+
+// The experimental `mautrix-meta` Messenger transport (#195). Deliberately a *separate*
+// interface from `ConversationBackend`, not an extension of it: the transport's whole
+// point is that it carries no write capability, so a type that shares `ConversationBackend`
+// would inherit `prepareDraft`/`sendThread` and invite someone to implement them. The
+// tools for this surface declare their requirement against `MautrixMetaBackend` methods
+// only, and no write-class tool declares one, so no write can ever be wired through this
+// boundary without a new declaration the reviewer would see.
+//
+// The interface is the provider boundary Musebridge speaks: an isolated, separately
+// deployed AGPL service (see `docs/mautrix-meta-transport-evaluation.md` §7 option 3),
+// never in-process AGPL code. Musebridge persists nothing here — message rows are
+// returned in memory, bounded, and never indexed to disk.
+export interface ConversationBackfillPage {
+  messages: ConversationMessage[];
+  coverage: ConversationBackfillCoverage;
+}
+
+export interface MautrixMetaBackend {
+  readonly name: string;
+  // The bounded inbox-window listing, same coverage rule as the browser conversation
+  // listing: `truncated` true means more threads are known or plausibly exist beyond the
+  // returned window; false only when the provider set behind this listing was exhausted.
+  listThreads(input: ReturnType<typeof threadsListInputSchema.parse>, signal: AbortSignal): Promise<ConversationThreadListPage> | ConversationThreadListPage;
+  // The newest-end window of one thread. `coverage.window` is 'tail' with the same meaning
+  // as the browser read (#146): the newest end is established by the rows' own timestamps,
+  // never by ordering alone. Null means the thread does not exist; a read that cannot
+  // establish its window fails closed with a typed ProviderError instead.
+  readThread(input: ReturnType<typeof threadReadInputSchema.parse>, signal: AbortSignal): Promise<ConversationThreadMessages | null> | ConversationThreadMessages | null;
+  // One older-message window behind the tail (#195 backfill). Truthful coverage is the
+  // contract: `has_more_before` is the provider's own range signal, `truncated` is the
+  // window truth for the caller, and a range the provider could not prove exhausted is
+  // never reported complete. Null means the thread does not exist (the tool's NOT_FOUND);
+  // an empty page with `has_more_before: false` means the thread exists and nothing older
+  // than the bound was found — never a fabricated exhaustion for an absent thread.
+  backfillThread(input: ReturnType<typeof threadBackfillInputSchema.parse>, signal: AbortSignal): Promise<ConversationBackfillPage | null> | ConversationBackfillPage | null;
 }
 
 export class ProviderError extends Error {

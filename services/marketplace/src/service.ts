@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { FixtureBackend, type ConversationBackend, type EventsBackend, type MarketplaceBackend, type ShoppingBackend, type ThreadsBackend } from './backend.js';
+import { FixtureBackend, type ConversationBackend, type EventsBackend, type MautrixMetaBackend, type MarketplaceBackend, type ShoppingBackend, type ThreadsBackend } from './backend.js';
 import { FixtureEventsBackend, FixtureShoppingBackend, FixtureThreadsBackend } from './fixtures.js';
 import { EbayClient } from './ebay.js';
 import { EbayShoppingBackend } from './ebay-backend.js';
@@ -13,6 +13,8 @@ import { ThreadsClient } from './threads.js';
 import { ThreadsApiBackend } from './threads-backend.js';
 import { FacebookMarketplaceBackend } from './facebook-marketplace-backend.js';
 import { FacebookMessengerBackend } from './facebook-messenger-backend.js';
+import { MautrixMetaClient } from './mautrix-meta.js';
+import { MautrixMetaApiBackend } from './mautrix-meta-backend.js';
 import { FacebookLoginCircuitBreaker } from './facebook-login-circuit-breaker.js';
 import type { FacebookMarket } from './facebook-marketplace-url.js';
 import { backendNameSchema, SERVICE_VERSION } from './domain.js';
@@ -87,6 +89,18 @@ export interface ServiceOptions {
   messengerReauthTargetUrl?: string;
   messengerReauthAdminPort?: number;
   messengerReauthViewerPort?: number;
+  /**
+   * Messenger conversation transport selection (#195). Defaults to `'browser'`, the shipped
+   * browser-backed path; `process.env.MESSENGER_TRANSPORT` is the environment form.
+   * `'mautrix-meta'` selects the experimental, disabled-by-default transport and is refused
+   * unless the operator has also explicitly acknowledged the Meta account-risk boundary
+   * (the `mautrixMetaRiskAcknowledged` seam or `MAUTRIX_META_RISK_ACK=1`).
+   */
+  messengerTransport?: 'browser' | 'mautrix-meta';
+  /** Explicit operator acknowledgement that the `mautrix-meta` transport presents Meta with an unofficial client carrying account risk; the experimental transport refuses to start without it (or `MAUTRIX_META_RISK_ACK=1`). */
+  mautrixMetaRiskAcknowledged?: boolean;
+  /** Internal dependency/test seam for the read-only `mautrix-meta` provider boundary. When omitted and the transport is selected, the service constructs the HTTP backend over `MAUTRIX_META_BASE_URL`. Supplying it requires `messengerTransport: 'mautrix-meta'`. */
+  metaConversations?: MautrixMetaBackend;
   /** Per-call host seam for approval grants; receives the validated action request (including the payload digest) so a host can correlate it with its own approval records. Grants must come from the host, never from tool arguments; this service does not issue grants. */
   approvalGrant?: (request: ActionRequest) => unknown;
   /**
@@ -129,6 +143,8 @@ export interface MarketplaceService {
   readonly shopping: ShoppingBackend;
   readonly events: EventsBackend;
   readonly threads: ThreadsBackend;
+  /** Present only when the experimental mautrix-meta transport passed its two-part gate (#195). */
+  readonly metaConversations?: MautrixMetaBackend;
   close(): Promise<void>;
   address(): ReturnType<HttpServer['address']>;
 }
@@ -184,6 +200,28 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
   const threads = options.threads ?? (threadsBackendKind === 'threads'
     ? liveThreadsBackend()
     : new FixtureThreadsBackend());
+  // The experimental mautrix-meta Messenger transport (#195), installed only through a
+  // two-part gate, checked in order, mirroring the live-Threads gate: (1) explicit provider
+  // selection — `MESSENGER_TRANSPORT=mautrix-meta` or the seam; unset keeps the browser
+  // transport exactly as shipped and starts nothing here; (2) explicit operator
+  // acknowledgement of the Meta account-risk boundary — `MAUTRIX_META_RISK_ACK=1` or the
+  // seam, whose absence is a typed `RangeError` naming the variable. The acknowledgement is
+  // parsed on the experimental path only; a browser deployment never touches it. The gate
+  // value is checked before the base URL so a half-configured deployment reports the missing
+  // acknowledgement first.
+  const messengerTransport = options.messengerTransport ?? parseMessengerTransport(process.env.MESSENGER_TRANSPORT);
+  if (options.metaConversations !== undefined && messengerTransport !== 'mautrix-meta') {
+    throw new TypeError('metaConversations requires messengerTransport "mautrix-meta"');
+  }
+  let metaConversations: MautrixMetaBackend | undefined;
+  if (messengerTransport === 'mautrix-meta') {
+    const mautrixMetaRiskAcknowledged = options.mautrixMetaRiskAcknowledged ?? parseMautrixMetaRiskAck(process.env.MAUTRIX_META_RISK_ACK);
+    if (!mautrixMetaRiskAcknowledged) {
+      throw new RangeError('MAUTRIX_META_RISK_ACK=1 is required to select the experimental mautrix-meta Messenger transport; it presents Meta with an unofficial client carrying account risk (docs/mautrix-meta-transport-evaluation.md §6). Enable it only with deliberate operator acknowledgement.');
+    }
+    metaConversations = options.metaConversations
+      ?? new MautrixMetaApiBackend({ client: new MautrixMetaClient({ baseUrl: requiredEnv('MAUTRIX_META_BASE_URL') }) });
+  }
   const loginWaitMs = options.facebookLoginWaitMs ?? parseLoginWaitMs(process.env.FACEBOOK_LOGIN_WAIT_SECONDS);
   if (!Number.isSafeInteger(loginWaitMs) || loginWaitMs <= 0) {
     throw new RangeError('facebookLoginWaitMs must be a positive safe integer');
@@ -221,6 +259,14 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     // first conversation call. Canonical on-disk identity (real path, including symlinks and
     // not-yet-created directories) is what must differ, not the configured spelling.
     throw new Error('The messenger scope must not share the marketplace browser profile directory; set MESSENGER_PROFILE_DIR (or messengerProfileDir) to a distinct path.');
+  }
+  // One Messenger transport per account (#195): when the experimental mautrix-meta transport is
+  // selected, the browser messenger scope must not also start. Two concurrent Messenger clients
+  // on one account multiply request volume against the same session — the exact risk the
+  // acknowledgement is scoped to — and the fallback story stays simple: unset
+  // MESSENGER_TRANSPORT and restart to return to the browser path.
+  if (metaConversations !== undefined && messengerBrowser !== undefined) {
+    throw new RangeError('MESSENGER_TRANSPORT=mautrix-meta cannot run alongside the browser messenger scope (MARKETPLACE_MESSENGER=1 with the Facebook backend); choose one Messenger transport.');
   }
   const messengerProbe = messengerBrowser === undefined
     ? undefined
@@ -476,6 +522,8 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
           ? 'disabled'
           : toProviderSessionAssessment(messengerBrowser.getInfo()),
         conversations,
+        metaConversations,
+        messengerTransport,
         shopping,
         events,
         threads,
@@ -554,6 +602,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     shopping,
     events,
     threads,
+    ...(metaConversations !== undefined ? { metaConversations } : {}),
     address: () => httpServer.address(),
     close
   };
@@ -606,7 +655,31 @@ export function parseThreadsLiveValidated(value: string | undefined): boolean {
   throw new RangeError('THREADS_LIVE_VALIDATED must be "0" or "1"');
 }
 
-function requiredEnv(name: 'EBAY_CLIENT_ID' | 'EBAY_CLIENT_SECRET' | 'TICKETMASTER_API_KEY' | 'THREADS_ACCESS_TOKEN' | 'THREADS_USER_ID'): string {
+/**
+ * Messenger conversation transport selection (#195). Unset or `browser` keeps the shipped
+ * browser-backed path — the default — and starts nothing for the experimental transport;
+ * `mautrix-meta` is the explicit opt-in and still refuses to start without the separate
+ * risk acknowledgement parsed by `parseMautrixMetaRiskAck`.
+ */
+export function parseMessengerTransport(value: string | undefined): 'browser' | 'mautrix-meta' {
+  if (value === undefined || value === 'browser') return 'browser';
+  if (value === 'mautrix-meta') return 'mautrix-meta';
+  throw new RangeError('MESSENGER_TRANSPORT must be either "browser" or "mautrix-meta"');
+}
+
+/**
+ * The explicit operator acknowledgement gate for the experimental mautrix-meta transport
+ * (#195). Only the literal `1` acknowledges; unset and `0` are not acknowledgements. The
+ * acknowledgement means: this transport presents Meta with an unofficial client carrying
+ * account risk, per docs/mautrix-meta-transport-evaluation.md §6.
+ */
+export function parseMautrixMetaRiskAck(value: string | undefined): boolean {
+  if (value === undefined || value === '0') return false;
+  if (value === '1') return true;
+  throw new RangeError('MAUTRIX_META_RISK_ACK must be "0" or "1"');
+}
+
+function requiredEnv(name: 'EBAY_CLIENT_ID' | 'EBAY_CLIENT_SECRET' | 'TICKETMASTER_API_KEY' | 'THREADS_ACCESS_TOKEN' | 'THREADS_USER_ID' | 'MAUTRIX_META_BASE_URL'): string {
   const value = process.env[name];
   // Whitespace-only is treated as absent: otherwise a blank `THREADS_ACCESS_TOKEN`/`THREADS_USER_ID`
   // would pass here and fail later as a `TypeError` in the client, violating the typed-startup
@@ -616,7 +689,9 @@ function requiredEnv(name: 'EBAY_CLIENT_ID' | 'EBAY_CLIENT_SECRET' | 'TICKETMAST
       ? 'EVENTS_BACKEND=ticketmaster'
       : name === 'THREADS_ACCESS_TOKEN' || name === 'THREADS_USER_ID'
         ? 'THREADS_BACKEND=threads'
-        : 'SHOPPING_BACKEND=ebay';
+        : name === 'MAUTRIX_META_BASE_URL'
+          ? 'MESSENGER_TRANSPORT=mautrix-meta'
+          : 'SHOPPING_BACKEND=ebay';
     throw new RangeError(`${name} is required when ${when}`);
   }
   return value;

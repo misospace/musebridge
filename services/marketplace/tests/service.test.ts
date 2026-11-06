@@ -404,6 +404,9 @@ describe('fixture MCP service', () => {
       { surface: 'marketplace', provider: 'facebook', backend: 'fixture' },
       { surface: 'shopping', provider: 'ebay', backend: 'fixture' },
       { surface: 'messenger', provider: 'facebook', backend: 'fixture' },
+      // The experimental mautrix-meta boundary is never wired by default (#195): the capability
+      // is reported with a null backend, distinct from an absent row.
+      { surface: 'messenger_meta', provider: 'facebook', backend: null },
       { surface: 'events', provider: 'ticketmaster', backend: 'fixture' },
       { surface: 'social', provider: 'threads', backend: 'fixture' }
     ]);
@@ -957,7 +960,7 @@ describe('fixture MCP service', () => {
     expect(result).toEqual({
       ok: true,
       service_version: packageVersion,
-      schema_version: '1.10.0',
+      schema_version: '1.11.0',
       backend: 'status-only',
       facebook_session: { status: 'session_unknown' },
       // Neither surface is served by a Facebook browser scope here: the marketplace backend is
@@ -965,6 +968,9 @@ describe('fixture MCP service', () => {
       // field's unassessed 'session_unknown' (#147).
       marketplace_session: { status: 'disabled' },
       messenger_session: { status: 'disabled' },
+      // The selected Messenger transport is always reported (#195); this deployment never opts
+      // into the experimental one.
+      messenger_transport: 'browser',
       shopping_backend: 'fixture',
       events_backend: 'fixture',
       threads_backend: 'fixture',
@@ -972,6 +978,7 @@ describe('fixture MCP service', () => {
         { surface: 'marketplace', provider: 'facebook', backend: 'status-only' },
         { surface: 'shopping', provider: 'ebay', backend: 'fixture' },
         { surface: 'messenger', provider: 'facebook', backend: null },
+        { surface: 'messenger_meta', provider: 'facebook', backend: null },
         { surface: 'events', provider: 'ticketmaster', backend: 'fixture' },
         { surface: 'social', provider: 'threads', backend: 'fixture' }
       ]
@@ -1089,11 +1096,12 @@ describe('fixture MCP service', () => {
     expect(customSearch.backend).toBe('consumer-test');
     expect(customFetch.backend).toBe('consumer-test');
     expect(customStatus.backend).toBe('consumer-test');
-    expect(customStatus.schema_version).toBe('1.10.0');
+    expect(customStatus.schema_version).toBe('1.11.0');
     expect(customStatus.capabilities).toEqual([
       { surface: 'marketplace', provider: 'facebook', backend: 'consumer-test' },
       { surface: 'shopping', provider: 'ebay', backend: 'fixture' },
       { surface: 'messenger', provider: 'facebook', backend: null },
+      { surface: 'messenger_meta', provider: 'facebook', backend: null },
       { surface: 'events', provider: 'ticketmaster', backend: 'fixture' },
       { surface: 'social', provider: 'threads', backend: 'fixture' }
     ]);
@@ -1331,7 +1339,7 @@ describe('fixture MCP service', () => {
     ]);
     expect(structured(first).listings[0].id).toBe('fixture-chair-002');
     expect(structured(second).listing.state).toBe('sold');
-    expect(structured(third).schema_version).toBe('1.10.0');
+    expect(structured(third).schema_version).toBe('1.11.0');
   });
 
   it('bounds shutdown with both an in-flight backend call and a partial request body', async () => {

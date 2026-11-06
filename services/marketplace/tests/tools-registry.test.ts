@@ -3,14 +3,47 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { DenyAllAuthorizer } from '../src/authorization.js';
-import { FixtureBackend, type ConversationBackend } from '../src/backend.js';
+import { FixtureBackend, type ConversationBackend, type MautrixMetaBackend } from '../src/backend.js';
 import { TOOLS, registerMarketplaceTools, type MarketplaceToolOptions, type ToolEntry } from '../src/tools.js';
 
-/** A tool whose entry declares the capability it needs. */
-type GatedTool = Extract<ToolEntry, { readonly requires: { readonly method: string } }>;
+/** A tool whose entry declares the capability it needs (conversation method or meta boundary method). */
+type GatedTool = Extract<ToolEntry, { readonly requires: unknown }>;
 
 /** The tools whose own entry declares a capability requirement. */
 const gatedTools = TOOLS.filter((tool): tool is GatedTool => 'requires' in tool);
+
+/** Which wired backend a gated entry reads its capability from, and which method. */
+function capabilityGate(tool: GatedTool): { surface: 'conversations' | 'meta'; method: string } {
+  return 'metaMethod' in tool.requires
+    ? { surface: 'meta', method: tool.requires.metaMethod }
+    : { surface: 'conversations', method: tool.requires.method };
+}
+
+/** A minimal synthetic `mautrix-meta` boundary for registration-gate tests (no write methods exist on the type). */
+function fakeMautrixMetaBackend(): MautrixMetaBackend {
+  return {
+    name: 'fixture-mautrix-meta',
+    async listThreads() {
+      return { threads: [], truncated: false };
+    },
+    async readThread() {
+      return null;
+    },
+    async backfillThread(input) {
+      return {
+        messages: [],
+        coverage: { window: 'backfill', before: input.before, scanned_rows: 0, has_more_before: false, truncated: false }
+      };
+    }
+  };
+}
+
+/** A meta backend that serves everything except the named method. */
+function mautrixMetaWithout(method: string): MautrixMetaBackend {
+  const backend = fakeMautrixMetaBackend();
+  Object.defineProperty(backend, method, { value: undefined, configurable: true });
+  return backend;
+}
 
 async function listToolNames(options: MarketplaceToolOptions): Promise<string[]> {
   const server = new Server({ name: 'tools-registry-test', version: '1.0.0' }, { capabilities: { tools: {} } });
@@ -50,36 +83,58 @@ function conversationBackendWithout(method: string): ConversationBackend {
 describe('tool registry declaration', () => {
   it('declares the capability requirement of each gated tool on the tool entry itself', () => {
     // The gate reads the requirement off the entry, so the gated set is the declared set: a tool
-    // that needs a backend capability cannot be registered without saying which one.
+    // that needs a backend capability cannot be registered without saying which one. The three
+    // messenger_meta_* entries (#195) declare their requirement against the read-only
+    // mautrix-meta boundary, never against a conversation-backend method.
     expect(gatedTools.map(({ name }) => name).sort()).toEqual([
       'consumer_threads_list',
       'consumer_threads_search',
+      'messenger_meta_thread_backfill',
+      'messenger_meta_thread_read',
+      'messenger_meta_threads_list',
       'messenger_prepare',
       'messenger_send'
     ]);
     const conversations = new FixtureBackend();
+    const meta = fakeMautrixMetaBackend();
     for (const tool of gatedTools) {
-      expect(typeof Reflect.get(conversations, tool.requires.method)).toBe('function');
+      const gate = capabilityGate(tool);
+      const backend = gate.surface === 'meta' ? meta : conversations;
+      expect(typeof Reflect.get(backend, gate.method)).toBe('function');
     }
   });
 
   it('registers a gated tool only when the wired backend provides the declared capability', async () => {
     const declaredNames = TOOLS.map(({ name }) => name).sort();
     for (const tool of gatedTools) {
-      // The backend serves everything except the declared method, so exactly that one tool is
-      // withheld: the gate neither over-filters the other tools nor advertises the gated one.
-      const withoutCapability = await listToolNames({
-        conversations: conversationBackendWithout(tool.requires.method),
-        authorizer: new DenyAllAuthorizer()
-      });
+      // The wired backend serving everything except the declared method withholds exactly that
+      // one tool: the gate neither over-filters the other tools nor advertises the gated one.
+      const gate = capabilityGate(tool);
+      const withoutCapability = await listToolNames(
+        gate.surface === 'meta'
+          ? { conversations: new FixtureBackend(), metaConversations: mautrixMetaWithout(gate.method), authorizer: new DenyAllAuthorizer() }
+          : { conversations: conversationBackendWithout(gate.method), metaConversations: fakeMautrixMetaBackend(), authorizer: new DenyAllAuthorizer() }
+      );
       expect(withoutCapability.sort()).toEqual(declaredNames.filter((name) => name !== tool.name));
 
       const withCapability = await listToolNames({
         conversations: new FixtureBackend(),
+        metaConversations: fakeMautrixMetaBackend(),
         authorizer: new DenyAllAuthorizer()
       });
       expect(withCapability.sort()).toEqual(declaredNames);
     }
+  });
+
+  it('registers the mautrix-meta tools only while a meta backend is wired at all (#195)', async () => {
+    const metaNames = ['messenger_meta_threads_list', 'messenger_meta_thread_read', 'messenger_meta_thread_backfill'];
+    // No meta wiring: none of the three appear, and the rest of the registry is untouched.
+    const withoutMeta = await listToolNames({ conversations: new FixtureBackend(), authorizer: new DenyAllAuthorizer() });
+    for (const name of metaNames) expect(withoutMeta).not.toContain(name);
+    expect(withoutMeta.sort()).toEqual(TOOLS.map(({ name }) => name).filter((name) => !metaNames.includes(name)).sort());
+    // Wired: all three appear.
+    const withMeta = await listToolNames({ conversations: new FixtureBackend(), metaConversations: fakeMautrixMetaBackend(), authorizer: new DenyAllAuthorizer() });
+    for (const name of metaNames) expect(withMeta).toContain(name);
   });
 });
 
