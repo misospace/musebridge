@@ -89,6 +89,9 @@ describe.skipIf(!browserAvailable)('Facebook consumer menu extraction', () => {
 
   it('recognizes an explicitly empty menu and never mistakes a changed layout for one', async () => {
     const empty = await extractOf(loadFixture('menu-empty.html'));
+    // The empty-state marker renders inside the verified Chats region, so the region's own
+    // visible evidence certifies the emptiness (#198).
+    expect(empty.hasEmptyStateMarker).toBe(true);
     expect(classifyConsumerMenuPage(empty)).toBe('empty');
     expect(interpret(empty).kind).toBe('empty');
 
@@ -96,6 +99,22 @@ describe.skipIf(!browserAvailable)('Facebook consumer menu extraction', () => {
     expect(noRegion.chatsRegionCount).toBe(0);
     expect(classifyConsumerMenuPage(noRegion)).toBe('unknown');
     expect(interpret(noRegion)).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+  });
+
+  it('scopes empty-state evidence to the Chats region, so unrelated or hidden text never certifies an empty menu', async () => {
+    // An empty-but-unmarked region with empty-state wording elsewhere on the page: the region
+    // itself carries no verified empty state, so the page stays unknown/upstream error rather
+    // than a successful zero-thread observation (#198 regression).
+    const outside = await extractOf(loadFixture('menu-empty-marker-outside.html'));
+    expect(outside.hasEmptyStateMarker).toBe(false);
+    expect(classifyConsumerMenuPage(outside)).toBe('unknown');
+    expect(interpret(outside)).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+
+    // A hidden empty-state template inside the region is not visible evidence either.
+    const hidden = await extractOf(loadFixture('menu-empty-hidden-marker.html'));
+    expect(hidden.hasEmptyStateMarker).toBe(false);
+    expect(classifyConsumerMenuPage(hidden)).toBe('unknown');
+    expect(interpret(hidden)).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
   });
 
   it('fails closed on conflicting keys, malformed keys, a saturated row scan, and structure drift', async () => {
