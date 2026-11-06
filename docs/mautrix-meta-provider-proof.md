@@ -42,17 +42,37 @@ All requests are `GET` with `Accept: application/json`; there is no write route 
 
 | Route | Response |
 | --- | --- |
-| `GET /v1/threads?limit=N` | `{ threads: ConversationThread[], truncated: boolean }` |
-| `GET /v1/threads/{thread_id}/messages` | `{ messages: ConversationMessage[], coverage: { window: 'tail', scanned_rows, truncated } }` |
-| `GET /v1/threads/{thread_id}/messages?before=<unix-ms>&limit=N` | `{ messages: ConversationMessage[], coverage: { window: 'backfill', scanned_rows, has_more_before } }` |
+| `GET /v1/threads?limit=N` | `{ threads: ConversationThread[], truncated: boolean }`, newest thread first |
+| `GET /v1/threads/{thread_id}/messages` | `{ messages: ConversationMessage[], coverage: { window: 'tail', scanned_rows, truncated } }`, oldest message first |
+| `GET /v1/threads/{thread_id}/messages?before=<unix-ms>&limit=N` | `{ messages: ConversationMessage[], coverage: { window: 'backfill', scanned_rows, has_more_before } }`, oldest message first |
 
 Failures carry a typed body `{ "error": { "code", "message", "retry_after"? } }` with `code` from: `login_required`, `auth_expired`, `session_invalid`, `challenge_required`, `checkpoint_required`, `captcha_required`, `rate_limited`, `thread_not_found`, `upstream_error`. Musebridge maps each to the repo's `ProviderError` with **static text** (provider body text never reaches tool output or logs): `login_required`→`LOGIN_REQUIRED`, `auth_expired`→`AUTH_EXPIRED`, `session_invalid`→`SESSION_INVALID`, the challenge family→`CAPTCHA_REQUIRED` with `action_required: 'manual_resolution_in_official_app'`, `rate_limited`→`RATE_LIMITED` (+`retry_after`, from the body or a normalized `Retry-After` header even when the body is unclassifiable), `thread_not_found` at HTTP 404→absence (`NOT_FOUND`) — the same label on any other status is a provider failure, not an absence — everything else→`UPSTREAM_ERROR`. An unclassifiable body falls back by status (401/403/429). A success body that fails wire validation is drift: typed `UPSTREAM_ERROR`, never an empty success. Requests use `redirect: 'manual'`: a transport that answers with a redirect is a failure, and Musebridge never follows a reply toward Meta or any other host.
 
 Coverage truthfulness (issue rule "preserve explicit coverage/backfill semantics rather than implying complete history"):
 
 - `before` is exclusive and echoes back from the request — the wire cannot forge it; the provider never composes `truncated`.
-- `has_more_before` is the provider's own range disclosure (the pinned paging exposes exactly this signal). The caller-facing `truncated` is composed as `has_more_before || rows dropped by the cap`, so an unexhausted range is never reported as a complete window, and `false` appears only on a proven-exhausted range that the cap left untouched.
+- `before` crosses the wire as Unix milliseconds, and the millisecond is the paging unit on both sides of the boundary. The tool input contract therefore refuses a bound with a finer fraction, because the wire would round it and the echoed bound would no longer be the bound the window was cut at.
+- `has_more_before` is the provider's own range disclosure (the pinned paging exposes exactly this signal) composed with the window the caller receives. It is true when the provider says the range holds more, and it is also true when the cap dropped rows, because the dropped rows are older messages that sit before the returned window. The caller-facing `truncated` is composed as `has_more_before || rows dropped by the cap`, so an unexhausted range is never reported as a complete window, and `false` appears only on a proven-exhausted range that the cap left untouched.
 - `thread_not_found` yields `NOT_FOUND`; it is never reported as an empty-but-complete window.
+
+### The window the caller receives
+
+The transport may page wider than the caller asked for. Musebridge composes the caller-facing window from the transport's page, so the window always fits the public bound and a wide page never fails output validation.
+
+- The listing keeps the newest `limit` threads, at most 20. The transport lists threads newest first, so the dropped threads are the older ones. `truncated` is true when the transport said so or when the composition dropped rows.
+- The tail read keeps the newest 50 messages. The rows are chronological, so the dropped messages are the older ones. `coverage.truncated` is true when the transport said so or when the composition dropped rows.
+- The backfill read keeps the newest `limit` messages, at most 50. The dropped messages are the older ones. `has_more_before` and `truncated` are true when the composition dropped rows.
+
+### The proof behind the coverage
+
+Every coverage claim on this boundary is proven by the message rows' own timestamps. The client checks the transport's page before the page becomes a window.
+
+- Every message row carries `sent_at`. A row without an instant of its own cannot be placed in a window.
+- The rows are chronological, oldest first. The newest end of a tail window is the newest row's own instant, so an out-of-order page cannot say which row is the newest.
+- Every backfill row is strictly older than the requested bound. The bound is exclusive, so a row at the bound lies outside the window. The comparison happens at the millisecond, the unit the bound crosses the wire on.
+- A tail window holds at least one row. A window with no rows has no newest end.
+
+A page that breaks one of these rules is a typed `UPSTREAM_ERROR` with the static text "The mautrix-meta transport returned a window that does not satisfy the pinned coverage contract." It is never an empty success, and it never reports `truncated: false` for a window the transport did not prove.
 
 Destination rules: `MAUTRIX_META_BASE_URL` must be an http(s) URL with no userinfo, query, or fragment; **Meta-owned hosts (`facebook.com`, `messenger.com`, `meta.com` and their subdomains) are refused** so a misconfiguration cannot turn Musebridge into a direct unofficial-API client (lookalike suffixes like `facebook.com.evil.example` are unrelated hosts and stay valid). Non-loopback destinations must use https. Loopback is the normal sidecar shape.
 
@@ -83,6 +103,7 @@ No test contacts the network; every transport response in tests is a synthetic f
 | Cannot start without both selection and acknowledgement (in order) | `tests/mautrix-meta-gate.test.ts` gate suite incl. gate-order case |
 | Native-login/session/E2EE state contract documented | this document §5 |
 | Read-only thread/history/backfill over synthetic fixtures with truthful coverage | `tests/mautrix-meta-client.test.ts`, `tests/mautrix-meta-backend.test.ts` (has_more_before, cap-drop truncation, exclusive `before`, exhaustion), `tests/messenger-meta-tools.test.ts` |
+| The caller-facing window fits the public bound and its coverage is proven by the rows' own timestamps | `tests/mautrix-meta-backend.test.ts` (oversized listing and tail bounded, truncation reported, contract violation mapped to a typed failure), `tests/mautrix-meta-client.test.ts` (undated row, out-of-order rows, row at the exclusive bound, empty tail), `tests/messenger-meta-tools.test.ts` (bounded tool output, typed failure instead of an internal error) |
 | No Messenger write tools through this provider | `tests/messenger-meta-tools.test.ts` (risk classes + scope; send/prepare stay gated on `ConversationBackend`), `tests/mautrix-meta-backend.test.ts` (no write methods present), registry gate in `tests/tools-registry.test.ts` |
 | Message content not persisted by Musebridge | no persistence code path exists: client/backend/fixture modules contain no filesystem or storage writes; `mautrix-meta.ts` §"Boundary rules" comment carries the invariant |
 | Authenticated boundary: a destination that leaves the host needs the service credential, and the credential stays on the fixed destination | `tests/mautrix-meta-client.test.ts` (credential refusal, `Bearer` header, no header without a credential), `tests/mautrix-meta-gate.test.ts` (startup refusal without the credential, startup with it) |

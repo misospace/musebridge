@@ -2,7 +2,8 @@ import { z } from 'zod';
 import {
   conversationMessageSchema,
   conversationReadCoverageSchema,
-  conversationThreadSchema
+  conversationThreadSchema,
+  type ConversationMessage
 } from './domain.js';
 import { normalizeRetryAfterHeader } from './retry-after.js';
 
@@ -69,6 +70,12 @@ const metaErrorBodySchema = z.object({
 // established (#146). The backfill wire coverage carries only the provider's own signals —
 // `has_more_before` plus a scanned-row count; `before` is echoed from the request and
 // `truncated` is composed by the backend, so the wire cannot forge either.
+//
+// The row caps below are the transport's own page bounds, not the caller-facing window: the
+// transport may page wider than a caller asked for, and the backend composes the window the
+// caller receives out of the page (see `mautrix-meta-backend.ts`). The transport's page order
+// is part of the pinned contract — threads newest-first, messages chronological
+// oldest-to-newest — because the composition drops the oldest rows and keeps the newest.
 export const metaThreadListResponseSchema = z.object({
   threads: z.array(conversationThreadSchema).max(100),
   truncated: z.boolean()
@@ -91,6 +98,65 @@ export const metaThreadBackfillResponseSchema = z.object({
 export type MetaThreadListResponse = z.infer<typeof metaThreadListResponseSchema>;
 export type MetaThreadTailResponse = z.infer<typeof metaThreadTailResponseSchema>;
 export type MetaThreadBackfillResponse = z.infer<typeof metaThreadBackfillResponseSchema>;
+
+/**
+ * The transport answered, but its answer cannot support the coverage claim Musebridge makes.
+ *
+ * Every coverage claim on this boundary is proven by the message rows' own timestamps: the
+ * tail window's newest end is the newest row's instant, and the backfill window's exclusive
+ * bound is checked against every row. A page that breaks that proof — a row without a
+ * timestamp, rows out of chronological order, a row at or after the requested bound, or a
+ * tail window with no rows at all (no rows, no newest end) — is not a window. It fails closed
+ * as a typed upstream failure instead of becoming a window that claims more than it can
+ * prove. The message is this service's own static text: no provider row ever reaches it.
+ */
+export class MautrixMetaContractError extends Error {
+  constructor() {
+    super('mautrix-meta transport response violates the pinned coverage contract');
+    this.name = 'MautrixMetaContractError';
+  }
+}
+
+/**
+ * The instant a row carries, or `undefined` when the row carries none. The wire schema types
+ * `sent_at` as an optional ISO 8601 instant, so a present value always parses.
+ */
+function rowInstant(row: ConversationMessage): number | undefined {
+  if (row.sent_at === undefined) return undefined;
+  const instant = Date.parse(row.sent_at);
+  return Number.isFinite(instant) ? instant : undefined;
+}
+
+/**
+ * Every row must carry its own instant, and the rows must be chronological (oldest first).
+ * The newest end of a window is the newest row's instant, so an undated page cannot place a
+ * row in the window at all, and an out-of-order page cannot say which row is the newest.
+ */
+function assertDatedChronologicalRows(rows: readonly ConversationMessage[]): void {
+  let previous = Number.NEGATIVE_INFINITY;
+  for (const row of rows) {
+    const instant = rowInstant(row);
+    if (instant === undefined) throw new MautrixMetaContractError();
+    if (instant < previous) throw new MautrixMetaContractError();
+    previous = instant;
+  }
+}
+
+/**
+ * Every backfill row must be strictly older than the requested bound: the bound is exclusive,
+ * so a row at the bound or newer is outside the window the caller asked for and the returned
+ * window would no longer be the window the coverage describes.
+ *
+ * The comparison is made at the millisecond, because that is the unit the bound crosses the
+ * wire on and the unit the transport pages on. A row that shares the bound's millisecond is a
+ * row at the bound for this contract, so the transport must not return it.
+ */
+function assertStrictlyOlderThan(rows: readonly ConversationMessage[], beforeUnixMs: number): void {
+  for (const row of rows) {
+    const instant = rowInstant(row);
+    if (instant === undefined || instant >= beforeUnixMs) throw new MautrixMetaContractError();
+  }
+}
 
 /**
  * Hosts the client refuses as transport destinations, by exact host or dotted subdomain:
@@ -233,17 +299,28 @@ export class MautrixMetaClient {
 
   /** GET /v1/threads/{threadId}/messages — the newest-end (tail) window of one thread. */
   async readThreadTail(threadId: string, signal?: AbortSignal): Promise<MetaThreadTailResponse> {
-    return metaThreadTailResponseSchema.parse(await this.apiRequest(`/v1/threads/${encodeURIComponent(threadId)}/messages`, signal));
+    const parsed = metaThreadTailResponseSchema.parse(await this.apiRequest(`/v1/threads/${encodeURIComponent(threadId)}/messages`, signal));
+    // The tail window's newest end is proven by the rows' own timestamps, and a window with
+    // no rows has no newest end at all. Both are contract violations, not windows.
+    assertDatedChronologicalRows(parsed.messages);
+    if (parsed.messages.length === 0) throw new MautrixMetaContractError();
+    return parsed;
   }
 
   /**
    * GET /v1/threads/{threadId}/messages?before=<unix-ms>&limit=N — one older-message window.
    * `before` crosses the wire as Unix milliseconds (the LightSpeed paging unit the transport
-   * pages on); the tool-facing contract stays ISO 8601.
+   * pages on); the tool-facing contract stays ISO 8601. The millisecond is the unit on both
+   * sides of this boundary, so the bound is a whole millisecond (the tool input contract
+   * refuses a finer fraction) and the exclusive comparison happens at that resolution.
    */
   async backfillThread(threadId: string, beforeUnixMs: number, limit: number, signal?: AbortSignal): Promise<MetaThreadBackfillResponse> {
     const params = new URLSearchParams({ before: String(beforeUnixMs), limit: String(limit) });
-    return metaThreadBackfillResponseSchema.parse(await this.apiRequest(`/v1/threads/${encodeURIComponent(threadId)}/messages?${params}`, signal));
+    const parsed = metaThreadBackfillResponseSchema.parse(await this.apiRequest(`/v1/threads/${encodeURIComponent(threadId)}/messages?${params}`, signal));
+    // The bound is exclusive, so every row of the window has to be strictly older than it.
+    assertDatedChronologicalRows(parsed.messages);
+    assertStrictlyOlderThan(parsed.messages, beforeUnixMs);
+    return parsed;
   }
 
   private async apiRequest(path: string, signal?: AbortSignal): Promise<unknown> {

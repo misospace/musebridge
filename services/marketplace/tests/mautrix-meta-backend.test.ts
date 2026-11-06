@@ -32,6 +32,13 @@ describe('MautrixMetaApiBackend', () => {
     expect(page.truncated).toBe(true);
   });
 
+  it('reports a complete listing when the page fits and the transport says nothing was left out', async () => {
+    const backend = backendWith(async () => ok({ threads: threadRows, truncated: false }));
+    const page = await backend.listThreads({ limit: 10 }, signal);
+    expect(page.threads).toEqual(threadRows);
+    expect(page.truncated).toBe(false);
+  });
+
   it('returns a tail read with its coverage intact', async () => {
     const backend = backendWith(async () => ok({ messages: tailMessages, coverage: { window: 'tail', scanned_rows: 2, truncated: true } }));
     const read = await backend.readThread({ thread_id: 'synth-meta-thread-001' }, signal);
@@ -40,6 +47,12 @@ describe('MautrixMetaApiBackend', () => {
       messages: tailMessages,
       coverage: { window: 'tail', scanned_rows: 2, truncated: true }
     });
+  });
+
+  it('reports a complete tail when the page fits and the transport says nothing was left out', async () => {
+    const backend = backendWith(async () => ok({ messages: tailMessages, coverage: { window: 'tail', scanned_rows: 2, truncated: false } }));
+    const read = await backend.readThread({ thread_id: 'synth-meta-thread-001' }, signal);
+    expect(read?.coverage).toEqual({ window: 'tail', scanned_rows: 2, truncated: false });
   });
 
   it('maps a 404 thread_not_found to null', async () => {
@@ -102,10 +115,52 @@ describe('MautrixMetaApiBackend', () => {
     const backend = backendWith(async () => ok({ messages: olderPageRows, coverage: { window: 'backfill', scanned_rows: 3, has_more_before: false } }));
     const page = await backend.backfillThread({ thread_id: 'synth-meta-thread-001', before: '2025-11-01T00:00:00.000Z', limit: 2 }, signal);
     // The oldest row (row one) is the end farthest from the requested bound: it is the one
-    // the cap drops, and the provider's own `has_more_before: false` stays untouched.
+    // the cap drops. The dropped row is an older message that sits before the returned
+    // window, so `has_more_before` is true even though the provider's own range disclosure
+    // said false, and the window is not complete.
     expect(page?.messages).toEqual([olderPageRows[1], olderPageRows[2]]);
-    expect(page?.coverage.has_more_before).toBe(false);
+    expect(page?.coverage.has_more_before).toBe(true);
     expect(page?.coverage.truncated).toBe(true);
+  });
+
+  it('bounds an oversized backfill page to the caller window and keeps the newest rows', async () => {
+    // The transport may page wider than the caller asked for. The window the caller receives
+    // stays inside the public bound, keeps the newest rows of the page, and says the window
+    // is not complete.
+    const many = Array.from({ length: 60 }, (_, index) => ({
+      sender: 'other' as const,
+      text: `Synthetic backfill row ${index}.`,
+      sent_at: new Date(Date.parse('2025-10-31T00:00:00.000Z') + index * 60_000).toISOString()
+    }));
+    const backend = backendWith(async () => ok({ messages: many, coverage: { window: 'backfill', scanned_rows: many.length, has_more_before: false } }));
+    const page = await backend.backfillThread({ thread_id: 'synth-meta-thread-001', before: '2025-11-01T00:00:00.000Z', limit: 25 }, signal);
+    expect(page?.messages).toHaveLength(25);
+    expect(page?.messages[24]?.sent_at).toBe(many[59]?.sent_at);
+    expect(page?.coverage.has_more_before).toBe(true);
+    expect(page?.coverage.truncated).toBe(true);
+  });
+
+  it('reports a complete window when the page fits and the provider proved the range exhausted', async () => {
+    const backend = backendWith(async () => ok({ messages: olderPageRows, coverage: { window: 'backfill', scanned_rows: 3, has_more_before: false } }));
+    const page = await backend.backfillThread({ thread_id: 'synth-meta-thread-001', before: '2025-11-01T00:00:00.000Z', limit: 25 }, signal);
+    expect(page?.messages).toEqual(olderPageRows);
+    expect(page?.coverage.has_more_before).toBe(false);
+    expect(page?.coverage.truncated).toBe(false);
+  });
+
+  it('maps a backfill coverage-contract violation to a typed upstream failure', async () => {
+    // A row at the exclusive bound is outside the requested window, so the page cannot
+    // support the coverage claim and the read fails closed.
+    const backend = backendWith(async () => ok({
+      messages: [{ sender: 'other', text: 'Synthetic row at the bound.', sent_at: '2025-11-01T00:00:00.000Z' }],
+      coverage: { window: 'backfill', scanned_rows: 1, has_more_before: false }
+    }));
+    const failure = await backend.backfillThread({ thread_id: 'synth-meta-thread-001', before: '2025-11-01T00:00:00.000Z', limit: 25 }, signal).catch((reason: unknown) => reason);
+    expect(failure).toBeInstanceOf(ProviderError);
+    if (failure instanceof ProviderError) {
+      expect(failure.code).toBe('UPSTREAM_ERROR');
+      expect(failure.message).toBe('The mautrix-meta transport returned a window that does not satisfy the pinned coverage contract.');
+    }
   });
 
   it('does not truncate a page that is exactly the limit', async () => {
@@ -119,6 +174,57 @@ describe('MautrixMetaApiBackend', () => {
   it('maps a 404 thread_not_found backfill to null', async () => {
     const backend = backendWith(async () => ok({ error: { code: 'thread_not_found', message: 'Synthetic absence notice.' } }, 404));
     await expect(backend.backfillThread({ thread_id: 'synth-meta-missing', before: '2025-11-01T00:00:00.000Z', limit: 25 }, signal)).resolves.toBeNull();
+  });
+
+  // The transport's page is wider than the window the caller receives. The composition is
+  // what keeps the public output bounds: an oversized page becomes a bounded window with
+  // honest truncation, never a row count the public contract cannot carry.
+  it('bounds an oversized listing to the requested window and reports the loss', async () => {
+    const many = Array.from({ length: 30 }, (_, index) => ({ thread_id: `synth-meta-thread-${index}`, preview: `Synthetic preview ${index}.` }));
+    const backend = backendWith(async () => ok({ threads: many, truncated: false }));
+    const page = await backend.listThreads({ limit: 10 }, signal);
+    // The transport lists newest-first, so the window keeps the newest rows and the dropped
+    // ones are the older threads: more threads exist beyond the window, so `truncated` is true.
+    expect(page.threads).toHaveLength(10);
+    expect(page.threads[0]?.thread_id).toBe('synth-meta-thread-0');
+    expect(page.threads[9]?.thread_id).toBe('synth-meta-thread-9');
+    expect(page.truncated).toBe(true);
+  });
+
+  it('keeps a listing inside the public bound even when a caller asks for more than it', async () => {
+    const many = Array.from({ length: 30 }, (_, index) => ({ thread_id: `synth-meta-thread-${index}`, preview: `Synthetic preview ${index}.` }));
+    const backend = backendWith(async () => ok({ threads: many, truncated: false }));
+    const page = await backend.listThreads({ limit: 50 }, signal);
+    expect(page.threads).toHaveLength(20);
+    expect(page.truncated).toBe(true);
+  });
+
+  it('bounds an oversized tail to the public message bound and reports the loss', async () => {
+    const many = Array.from({ length: 120 }, (_, index) => ({
+      sender: 'other' as const,
+      text: `Synthetic tail row ${index}.`,
+      sent_at: new Date(Date.parse('2025-03-01T10:00:00.000Z') + index * 60_000).toISOString()
+    }));
+    const backend = backendWith(async () => ok({ messages: many, coverage: { window: 'tail', scanned_rows: many.length, truncated: false } }));
+    const read = await backend.readThread({ thread_id: 'synth-meta-thread-001' }, signal);
+    // The window is anchored at the newest end and the rows are chronological, so the kept
+    // rows are the newest ones and the dropped ones are the older messages outside it.
+    expect(read?.messages).toHaveLength(50);
+    expect(read?.messages[49]?.sent_at).toBe(many[119]?.sent_at);
+    expect(read?.coverage?.truncated).toBe(true);
+    expect(read?.coverage?.scanned_rows).toBe(120);
+  });
+
+  it('maps a coverage-contract violation to a typed upstream failure', async () => {
+    // An undated row cannot prove the newest end, so the read fails closed instead of
+    // returning a window whose `truncated: false` was never proven.
+    const backend = backendWith(async () => ok({ messages: [{ sender: 'other', text: 'Synthetic undated row.' }], coverage: { window: 'tail', scanned_rows: 1, truncated: false } }));
+    const failure = await backend.readThread({ thread_id: 'synth-meta-thread-001' }, signal).catch((reason: unknown) => reason);
+    expect(failure).toBeInstanceOf(ProviderError);
+    if (failure instanceof ProviderError) {
+      expect(failure.code).toBe('UPSTREAM_ERROR');
+      expect(failure.message).toBe('The mautrix-meta transport returned a window that does not satisfy the pinned coverage contract.');
+    }
   });
 
   // The static per-code failure text: a validated code picks exactly one of the repo's own

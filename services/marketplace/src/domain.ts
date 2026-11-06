@@ -17,6 +17,14 @@ export const MAX_THREADS_MEDIA_URLS = 6;
 // the two cannot drift. Internal: only the predicate is exported for the mapper.
 const MAX_THREADS_MEDIA_URL_LENGTH = 2048;
 export const MAX_THREADS_REPLY_COUNT = 20;
+// The public window bounds of the conversation read surfaces. A provider page may be larger
+// than the window Musebridge returns, but the returned window never exceeds these bounds:
+// the provider backends compose the caller-facing window against exactly these numbers, so a
+// provider page can never turn into an output-validation failure. The mautrix-meta transport
+// (#195) composes its window against the same two constants, so its page bound and the public
+// window stay in step.
+export const MAX_THREAD_LIST_COUNT = 20;
+export const MAX_THREAD_READ_MESSAGE_COUNT = 50;
 
 export const PROVIDER_ERROR_CODES = [
   'AUTH_EXPIRED',
@@ -568,7 +576,7 @@ export const threadsListOutputSchema = z.union([
   z.object({
     ok: z.literal(true),
     backend: backendNameSchema,
-    threads: z.array(conversationThreadSchema).max(20),
+    threads: z.array(conversationThreadSchema).max(MAX_THREAD_LIST_COUNT),
     // Listing coverage (#151). `truncated: true` means more threads exist (or may exist) beyond
     // this bounded recent window — the verified cursor chain carried more ids than the cap or
     // limit returned, or the bounded DOM fallback could not see past its own collection bound.
@@ -585,7 +593,7 @@ export const threadReadOutputSchema = z.union([
     ok: z.literal(true),
     backend: backendNameSchema,
     thread_id: conversationThreadIdSchema,
-    messages: z.array(conversationMessageSchema).max(50),
+    messages: z.array(conversationMessageSchema).max(MAX_THREAD_READ_MESSAGE_COUNT),
     coverage: conversationReadCoverageSchema.optional()
   }).strict(),
   runtimeFailureSchema
@@ -596,17 +604,33 @@ export const threadReadOutputSchema = z.union([
 // an exclusive upper bound (messages strictly older than it) and the result is a bounded window
 // with truthful coverage, never an implied-complete history. `scanned_rows` counts the provider
 // rows the read examined. `has_more_before` is the provider's own range disclosure (the pinned
-// mautrix-meta paging exposes exactly this signal): true means older messages are known to exist
-// before the returned window, false only when the provider proved that range exhausted.
+// mautrix-meta paging exposes exactly this signal) composed with the window the caller
+// receives: true means older messages are known to exist before the returned window, so it is
+// also true when the cap dropped rows, because the dropped rows are older messages that sit
+// before that window. False only when the provider proved the range exhausted and the cap left
+// nothing out.
 // `truncated` is the window truth for the caller (#151 rule): true when the provider range held
 // more rows than the returned window kept — always true when `has_more_before` is true — false
 // only when the range is exhausted and the cap left nothing out. Messages are chronological
 // oldest-to-newest, the same order `messenger_thread_read` returns.
 export const MAX_BACKFILL_MESSAGE_COUNT = 50;
 
+/**
+ * Reports whether an ISO 8601 instant names a whole millisecond. The backfill bound crosses
+ * the wire as Unix milliseconds, which is the unit the transport pages on, so a bound with a
+ * finer fraction would be rounded by the wire and the echoed bound would no longer be the
+ * bound the window was cut at. Such a bound is refused instead of being rounded silently.
+ */
+function isMillisecondInstant(value: string): boolean {
+  const fraction = /\.(\d+)/.exec(value)?.[1] ?? '';
+  return fraction.length <= 3;
+}
+
 export const threadBackfillInputSchema = z.object({
   thread_id: conversationThreadIdSchema,
-  before: isoDateTimeSchema,
+  before: isoDateTimeSchema.refine(isMillisecondInstant, {
+    message: 'before must be a whole-millisecond ISO 8601 instant'
+  }),
   limit: z.number().int().min(1).max(MAX_BACKFILL_MESSAGE_COUNT).default(25)
 }).strict();
 

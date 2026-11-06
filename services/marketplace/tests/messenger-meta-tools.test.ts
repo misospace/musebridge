@@ -174,7 +174,10 @@ describe('messenger_meta tool dispatch over the fake backend', () => {
       { thread_id: 'synth-meta-t1' },
       { thread_id: 'synth-meta-t1', before, limit: 51 },
       { thread_id: 'synth-meta-t1', before, limit: 0 },
-      { thread_id: 'synth-meta-t1', before, limit: 10, surprise: true }
+      { thread_id: 'synth-meta-t1', before, limit: 10, surprise: true },
+      // The bound crosses the wire as Unix milliseconds, so a bound with a finer fraction
+      // would be rounded by the wire and would no longer be the bound the window is cut at.
+      { thread_id: 'synth-meta-t1', before: '2025-10-01T10:00:00.0005Z', limit: 10 }
     ];
     for (const args of invalidCases) {
       let rejected: unknown;
@@ -222,6 +225,46 @@ describe('messenger_meta tool dispatch over the fake backend', () => {
       code: 'CAPTCHA_REQUIRED',
       message: 'A synthetic Meta challenge is present.',
       action_required: 'manual_resolution_in_official_app'
+    });
+  });
+});
+
+describe('messenger_meta tool output over the real transport backend', () => {
+  const baseUrl = 'http://127.0.0.1:9000';
+  const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
+  const backendWith = (fetchImpl: typeof fetch) => new MautrixMetaApiBackend({ client: new MautrixMetaClient({ baseUrl, fetchImpl }) });
+
+  it('returns a bounded listing with honest truncation when the transport pages wider than the caller asked for', async () => {
+    const many = Array.from({ length: 30 }, (_, index) => ({ thread_id: `synth-meta-t${index}`, preview: `Synthetic preview ${index}.` }));
+    const backend = backendWith(async () => ok({ threads: many, truncated: false }));
+    const output = await callTool(metaOptions(backend), 'messenger_meta_threads_list', { limit: 10 });
+    // The transport's page is wider than the caller's window; the window the caller receives
+    // stays inside the public bound and says that more threads exist beyond it.
+    expect(output.ok).toBe(true);
+    expect((output.threads as unknown[]).length).toBe(10);
+    expect(output.truncated).toBe(true);
+  });
+
+  it('returns a bounded tail with honest truncation when the transport pages wider than the public bound', async () => {
+    const many = Array.from({ length: 120 }, (_, index) => ({
+      sender: 'other',
+      text: `Synthetic tail row ${index}.`,
+      sent_at: new Date(Date.parse('2025-03-01T10:00:00.000Z') + index * 60_000).toISOString()
+    }));
+    const backend = backendWith(async () => ok({ messages: many, coverage: { window: 'tail', scanned_rows: many.length, truncated: false } }));
+    const output = await callTool(metaOptions(backend), 'messenger_meta_thread_read', { thread_id: 'synth-meta-t1' });
+    expect(output.ok).toBe(true);
+    expect((output.messages as unknown[]).length).toBe(50);
+    expect(output.coverage).toMatchObject({ window: 'tail', truncated: true });
+  });
+
+  it('reports a typed failure, not an internal error, when the transport breaks the coverage contract', async () => {
+    const backend = backendWith(async () => ok({ messages: [{ sender: 'other', text: 'Synthetic undated row.' }], coverage: { window: 'tail', scanned_rows: 1, truncated: false } }));
+    const output = await callTool(metaOptions(backend), 'messenger_meta_thread_read', { thread_id: 'synth-meta-t1' });
+    expect(output.ok).toBe(false);
+    expect(output.error).toMatchObject({
+      code: 'UPSTREAM_ERROR',
+      message: 'The mautrix-meta transport returned a window that does not satisfy the pinned coverage contract.'
     });
   });
 });

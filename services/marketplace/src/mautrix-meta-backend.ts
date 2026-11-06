@@ -4,14 +4,18 @@ import type {
   ConversationThreadListPage,
   MautrixMetaBackend
 } from './backend.js';
-import type {
-  ConversationThreadMessages,
-  ThreadBackfillInput,
-  ThreadReadInput,
-  ThreadsListInput
+import {
+  MAX_BACKFILL_MESSAGE_COUNT,
+  MAX_THREAD_LIST_COUNT,
+  MAX_THREAD_READ_MESSAGE_COUNT,
+  type ConversationThreadMessages,
+  type ThreadBackfillInput,
+  type ThreadReadInput,
+  type ThreadsListInput
 } from './domain.js';
 import {
   MautrixMetaClient,
+  MautrixMetaContractError,
   MautrixMetaHttpError,
   type MautrixMetaErrorCode
 } from './mautrix-meta.js';
@@ -88,19 +92,47 @@ export class MautrixMetaApiBackend implements MautrixMetaBackend {
     this.client = options.client;
   }
 
+  /**
+   * The bounded recent thread window. The transport may page wider than the caller asked for
+   * (its page bound is larger than the public listing bound), so the window the caller
+   * receives is composed here: the transport lists newest-first, so the rows that fall outside
+   * are the older ones, and dropping them is what makes `truncated` true — more threads exist
+   * beyond the window the caller received.
+   */
   async listThreads(input: ThreadsListInput, signal: AbortSignal): Promise<ConversationThreadListPage> {
     try {
       const page = await this.client.listThreads(input.limit, signal);
-      return { threads: page.threads, truncated: page.truncated };
+      const window = Math.min(input.limit, MAX_THREAD_LIST_COUNT);
+      const dropped = Math.max(page.threads.length - window, 0);
+      const threads = dropped > 0 ? page.threads.slice(0, window) : page.threads;
+      return { threads, truncated: page.truncated || dropped > 0 };
     } catch (error) {
       throw toProviderFailure(error);
     }
   }
 
+  /**
+   * The newest-end (tail) window. The rows are chronological and the window is anchored at the
+   * newest end, so the rows that fall outside the public bound are the oldest ones: dropping
+   * them keeps the newest end intact and makes `truncated` true — older messages exist outside
+   * the window the caller received.
+   */
   async readThread(input: ThreadReadInput, signal: AbortSignal): Promise<ConversationThreadMessages | null> {
     try {
       const tail = await this.client.readThreadTail(input.thread_id, signal);
-      return { thread_id: input.thread_id, messages: tail.messages, coverage: tail.coverage };
+      const dropped = Math.max(tail.messages.length - MAX_THREAD_READ_MESSAGE_COUNT, 0);
+      const messages = dropped > 0
+        ? tail.messages.slice(tail.messages.length - MAX_THREAD_READ_MESSAGE_COUNT)
+        : tail.messages;
+      return {
+        thread_id: input.thread_id,
+        messages,
+        coverage: {
+          window: tail.coverage.window,
+          scanned_rows: tail.coverage.scanned_rows,
+          truncated: tail.coverage.truncated || dropped > 0
+        }
+      };
     } catch (error) {
       if (isThreadNotFound(error)) return null;
       throw toProviderFailure(error);
@@ -111,8 +143,10 @@ export class MautrixMetaApiBackend implements MautrixMetaBackend {
    * One older window. The wire keeps provider-authored coverage only (`scanned_rows`,
    * `has_more_before`); this method composes the caller-facing window truth: if the
    * provider page carried more rows than the caller's cap kept, the oldest rows (the end
-   * farthest from the requested bound) are dropped and `truncated` becomes true even when
-   * the provider range itself was exhausted. `has_more_before: true` always implies
+   * farthest from the requested bound) are dropped and `truncated` becomes true even when the
+   * provider range itself was exhausted. The dropped rows are older messages that sit before
+   * the returned window, so `has_more_before` is true whenever the cap dropped rows, exactly
+   * as the fixture backend reports it. `has_more_before: true` always implies
    * `truncated: true` — an unexhausted range is never reported as a complete window.
    */
   async backfillThread(input: ThreadBackfillInput, signal: AbortSignal): Promise<ConversationBackfillPage | null> {
@@ -124,7 +158,8 @@ export class MautrixMetaApiBackend implements MautrixMetaBackend {
     }
     try {
       const page = await this.client.backfillThread(input.thread_id, beforeUnixMs, input.limit, signal);
-      const droppedByCap = Math.max(page.messages.length - input.limit, 0);
+      const window = Math.min(input.limit, MAX_BACKFILL_MESSAGE_COUNT);
+      const droppedByCap = Math.max(page.messages.length - window, 0);
       const messages = droppedByCap > 0 ? page.messages.slice(droppedByCap) : page.messages;
       return {
         messages,
@@ -132,7 +167,7 @@ export class MautrixMetaApiBackend implements MautrixMetaBackend {
           window: 'backfill',
           before: input.before,
           scanned_rows: page.coverage.scanned_rows,
-          has_more_before: page.coverage.has_more_before,
+          has_more_before: page.coverage.has_more_before || droppedByCap > 0,
           truncated: page.coverage.has_more_before || droppedByCap > 0
         }
       };
@@ -160,6 +195,13 @@ function isThreadNotFound(error: unknown): boolean {
  */
 function toProviderFailure(error: unknown): unknown {
   if (error instanceof ProviderError) return error;
+  if (error instanceof MautrixMetaContractError) {
+    // The transport answered, but its answer cannot support the coverage claim: an undated
+    // row, rows out of order, a row at or after the requested bound, or a tail window with
+    // no rows. It is a typed upstream failure, never a window that claims more than it can
+    // prove, and never an empty success.
+    return new ProviderError('UPSTREAM_ERROR', 'The mautrix-meta transport returned a window that does not satisfy the pinned coverage contract.');
+  }
   if (error instanceof MautrixMetaHttpError) {
     // A 404 thread_not_found never reaches this branch (the callers map it to absence).
     // Reaching here with that label — from a listing route or a non-404 status — is a

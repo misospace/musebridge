@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import {
   MautrixMetaClient,
+  MautrixMetaContractError,
   MautrixMetaHttpError,
   isLoopbackTransportHost,
   isValidMautrixMetaServiceToken,
@@ -304,5 +305,93 @@ describe('MautrixMetaClient', () => {
     expect(reads).toBe(1);
     await client.listThreads(5);
     expect(seen[0]?.get('authorization')).toBe('Bearer synth-service-token');
+  });
+});
+
+// The coverage contract (#195): every coverage claim this boundary makes is proven by the
+// message rows' own timestamps. A page that cannot carry that proof is a typed failure, not
+// a window — never a `truncated: false` claim the transport never proved.
+describe('MautrixMetaClient coverage contract', () => {
+  const clientFor = (body: unknown) => new MautrixMetaClient({ baseUrl, fetchImpl: async () => ok(body) });
+  const tailCoverage = { window: 'tail', scanned_rows: 2, truncated: false };
+  const backfillCoverage = { window: 'backfill', scanned_rows: 2, has_more_before: false };
+  const boundIso = '2025-11-01T00:00:00.000Z';
+  const boundMs = Date.parse(boundIso);
+
+  it('refuses a tail window whose rows carry no timestamps', async () => {
+    // The newest end of a tail window is the newest row's own instant. An undated row cannot
+    // be placed in the window at all, so the answer is a failure and not an empty window.
+    const client = clientFor({
+      messages: [{ sender: 'other', text: 'Synthetic undated row.' }],
+      coverage: { window: 'tail', scanned_rows: 1, truncated: false }
+    });
+    await expect(client.readThreadTail('t1')).rejects.toBeInstanceOf(MautrixMetaContractError);
+  });
+
+  it('refuses a tail window whose rows are not chronological', async () => {
+    // Out-of-order rows cannot say which row is the newest, so the newest end is unproven.
+    const client = clientFor({
+      messages: [
+        { sender: 'other', text: 'Synthetic newer row.', sent_at: '2025-03-01T10:05:00.000Z' },
+        { sender: 'other', text: 'Synthetic older row.', sent_at: '2025-03-01T10:00:00.000Z' }
+      ],
+      coverage: tailCoverage
+    });
+    await expect(client.readThreadTail('t1')).rejects.toBeInstanceOf(MautrixMetaContractError);
+  });
+
+  it('refuses an empty tail window: no rows means no newest end', async () => {
+    const client = clientFor({ messages: [], coverage: { window: 'tail', scanned_rows: 0, truncated: false } });
+    await expect(client.readThreadTail('t1')).rejects.toBeInstanceOf(MautrixMetaContractError);
+  });
+
+  it('refuses a backfill row that is not strictly older than the exclusive bound', async () => {
+    // The bound is exclusive: a row at the bound is outside the requested window, and so is a
+    // row newer than it. Either would make the returned window a different window than the
+    // coverage describes.
+    for (const sentAt of [boundIso, '2025-11-01T00:00:00.001Z']) {
+      const client = clientFor({
+        messages: [{ sender: 'other', text: 'Synthetic out-of-window row.', sent_at: sentAt }],
+        coverage: backfillCoverage
+      });
+      await expect(client.backfillThread('t1', boundMs, 25)).rejects.toBeInstanceOf(MautrixMetaContractError);
+    }
+  });
+
+  it('refuses a backfill row without a timestamp', async () => {
+    const client = clientFor({
+      messages: [{ sender: 'other', text: 'Synthetic undated row.' }],
+      coverage: backfillCoverage
+    });
+    await expect(client.backfillThread('t1', boundMs, 25)).rejects.toBeInstanceOf(MautrixMetaContractError);
+  });
+
+  it('refuses a backfill page whose rows are not chronological', async () => {
+    const client = clientFor({
+      messages: [
+        { sender: 'other', text: 'Synthetic newer row.', sent_at: '2025-10-31T09:05:00.000Z' },
+        { sender: 'other', text: 'Synthetic older row.', sent_at: '2025-10-31T09:00:00.000Z' }
+      ],
+      coverage: backfillCoverage
+    });
+    await expect(client.backfillThread('t1', boundMs, 25)).rejects.toBeInstanceOf(MautrixMetaContractError);
+  });
+
+  it('accepts a chronological, dated page inside the requested bound', async () => {
+    const client = clientFor({
+      messages: [
+        { sender: 'other', text: 'Synthetic older row.', sent_at: '2025-10-31T09:00:00.000Z' },
+        { sender: 'other', text: 'Synthetic newer row.', sent_at: '2025-10-31T09:05:00.000Z' }
+      ],
+      coverage: backfillCoverage
+    });
+    await expect(client.backfillThread('t1', boundMs, 25)).resolves.toMatchObject({ coverage: { has_more_before: false } });
+  });
+
+  it('accepts an empty backfill page: an exhausted range with no older row is a complete window', async () => {
+    // The tail needs at least one row because a window with no rows has no newest end. An
+    // empty backfill window is the other case: the range holds no older row at all.
+    const client = clientFor({ messages: [], coverage: { window: 'backfill', scanned_rows: 0, has_more_before: false } });
+    await expect(client.backfillThread('t1', boundMs, 25)).resolves.toMatchObject({ messages: [], coverage: { has_more_before: false } });
   });
 });
