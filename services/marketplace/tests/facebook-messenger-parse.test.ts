@@ -3,8 +3,11 @@ import {
   classifyMessengerInboxPage,
   classifyMessengerThreadPage,
   interpretMessengerInboxPage,
-  interpretMessengerThreadPage
+  interpretMessengerThreadPage,
+  MESSENGER_INBOX_PAGINATION_UNVERIFIED
 } from '../src/facebook-messenger-parse.js';
+import { MessengerInboxGraphQLCollector } from '../src/facebook-messenger-inbox-graphql.js';
+import type { MessengerInboxGraphQLObservation } from '../src/facebook-messenger-inbox-graphql.js';
 import { MESSENGER_EXTRACT_LIMITS } from '../src/facebook-messenger-extract.js';
 import type { ExtractedInboxPage, ExtractedThreadPage } from '../src/facebook-messenger-extract.js';
 
@@ -674,5 +677,83 @@ describe('Messenger page interpretation', () => {
       code: 'UPSTREAM_ERROR',
       message: 'The Facebook Messenger thread messages could not be parsed.'
     });
+  });
+});
+
+// The #204 deployed repro: a verified authenticated session, one bounded messenger_threads_list
+// call, and the typed pagination-unverifiable refusal with no thread ids. Each candidate
+// deployed inbox shape is driven through the real collector over synthetic sanitized payloads
+// and must produce exactly the observed outcome — never threads, never a fabricated success.
+describe('Deployed inbox pagination fail-closed repro (#204)', () => {
+  const observedOutcome = {
+    kind: 'error',
+    code: 'UPSTREAM_ERROR',
+    message: MESSENGER_INBOX_PAGINATION_UNVERIFIED
+  } as const;
+
+  function edges(count: number): unknown[] {
+    return Array.from({ length: count }, (_value, index) => ({
+      node: { __typename: 'MessageThread', thread_key: { thread_fbid: `9000000${index}` }, id: `message_thread:9000000${index}` }
+    }));
+  }
+
+  function collectorObservation(shape: 'no_terminal_marker' | 'unidentified_request' | 'unrecognized_payload' | 'unfinished_chain'): MessengerInboxGraphQLObservation {
+    const collector = new MessengerInboxGraphQLCollector();
+    if (shape === 'no_terminal_marker') {
+      // A single page whose connection carries no page_info terminal marker.
+      collector.observe(
+        { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: edges(20) } } } },
+        { kind: 'page', cursor: null }
+      );
+    } else if (shape === 'unidentified_request') {
+      // A well-formed terminal connection whose request could not be tied to the initial page.
+      collector.observe(
+        { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: edges(20), page_info: { has_next_page: false, end_cursor: null } } } } },
+        { kind: 'unverified' }
+      );
+    } else if (shape === 'unrecognized_payload') {
+      // The initial page request's response is not the verified connection shape.
+      collector.observe({ errors: [{ message: 'unavailable' }] }, { kind: 'page', cursor: null });
+    } else {
+      // A first page promising more threads, with no continuation observed in the window.
+      collector.observe(
+        { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: edges(12), page_info: { has_next_page: true, end_cursor: 'SYNTHETIC-CURSOR' } } } } },
+        { kind: 'page', cursor: null }
+      );
+    }
+    return collector.snapshot();
+  }
+
+  it.each(['no_terminal_marker', 'unidentified_request', 'unrecognized_payload', 'unfinished_chain'] as const)(
+    'returns the observed typed refusal with no threads for the %s shape', (shape) => {
+      const observation = collectorObservation(shape);
+      expect(observation.incomplete).toBe(true);
+      // Ambiguous page evidence returns no ids at all; an unfinished chain may carry ids from
+      // the page it did verify, and the refusal keeps every one of them unreturned.
+      if (shape !== 'unfinished_chain') expect(observation.threadIds).toEqual([]);
+      expect(interpretMessengerInboxPage({
+        page: inbox(),
+        baseUrl: 'https://www.facebook.com',
+        inboxPath: '/marketplace/inbox/',
+        limit: 20,
+        graphql: observation
+      })).toEqual(observedOutcome);
+    }
+  );
+
+  it('still verifies a legitimately terminal single page instead of refusing', () => {
+    const collector = new MessengerInboxGraphQLCollector();
+    collector.observe(
+      { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: edges(3), page_info: { has_next_page: false, end_cursor: null } } } } },
+      { kind: 'page', cursor: null }
+    );
+    const expectedIds = Array.from({ length: 3 }, (_value, index) => `9000000${index}`);
+    expect(interpretMessengerInboxPage({
+      page: inbox(),
+      baseUrl: 'https://www.facebook.com',
+      inboxPath: '/marketplace/inbox/',
+      limit: 20,
+      graphql: collector.snapshot()
+    })).toEqual({ kind: 'threads', threads: expectedIds.map((thread_id) => ({ thread_id })), truncated: false });
   });
 });
