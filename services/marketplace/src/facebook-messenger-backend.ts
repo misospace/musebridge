@@ -28,7 +28,8 @@ import {
   classifyMessengerInboxPage,
   classifyMessengerThreadPage,
   interpretMessengerInboxPage,
-  interpretMessengerThreadPage
+  interpretMessengerThreadPage,
+  MESSENGER_INBOX_PAGINATION_UNVERIFIED
 } from './facebook-messenger-parse.js';
 import {
   buildMessengerInboxUrl,
@@ -259,6 +260,13 @@ export class FacebookMessengerBackend implements ConversationBackend {
       graphql
     });
     if (outcome.kind === 'error') {
+      // When the fail-closed pagination contract refused (#97), record which completeness
+      // condition fired (#204): one static line carrying a structural reason code only — never
+      // request/response content — so an authorized deployed re-validation can tell the
+      // candidate inbox shapes apart without another opaque refusal.
+      if (outcome.message === MESSENGER_INBOX_PAGINATION_UNVERIFIED) {
+        this.logger.error(`Facebook Messenger inbox pagination could not be verified (reason: ${graphql.incompleteReason ?? 'unknown'})`);
+      }
       this.recordObservedAuthFailure(outcome.code);
       throw new MarketplaceProviderError(outcome.code, outcome.message);
     }

@@ -145,6 +145,10 @@ function configure(nextInbox = 'inbox-normal.html', nextThread = 'thread-normal.
   requests.length = 0;
 }
 
+// Lines the backend under test wrote to its own error log. Reset per created backend; tests
+// assert on them to pin the sanitized fail-closed reason record (#204).
+const backendLogLines: string[] = [];
+
 function createBackend(options: { settleTimeoutMs?: number; maxThreads?: number } = {}): FacebookMessengerBackend {
   const parent = mkdtempSync(join(tmpdir(), 'marketplace-messenger-test-'));
   profileDirs.push(parent);
@@ -157,13 +161,14 @@ function createBackend(options: { settleTimeoutMs?: number; maxThreads?: number 
   });
   managers.push(browser);
   const probe = new FacebookSessionProbe({ browser, baseUrl: origin, surface: 'messenger', navigationTimeoutMs: 5_000, settleTimeoutMs: 100 });
+  backendLogLines.length = 0;
   return new FacebookMessengerBackend({
     browser,
     probe,
     navigationTimeoutMs: 5_000,
     settleTimeoutMs: options.settleTimeoutMs ?? 50,
     ...(options.maxThreads !== undefined ? { maxThreads: options.maxThreads } : {}),
-    logger: { error: () => undefined }
+    logger: { error: (message?: unknown) => { if (typeof message === 'string') backendLogLines.push(message); } }
   });
 }
 
@@ -390,6 +395,37 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
       'UPSTREAM_ERROR',
       'The Facebook Marketplace inbox pagination could not be verified; a complete thread list cannot be returned.'
     );
+  }, 15_000);
+
+  it('records the sanitized completeness reason when the deployed pagination evidence is unverifiable (#204)', async () => {
+    // The #204 deployed repro: a verified authenticated session, one bounded read, and the
+    // typed refusal. The backend log must carry which completeness condition fired — a
+    // structural reason code only, never any request or response content.
+    configure('inbox-buttons-graphql.html');
+    const backend = createBackend({ settleTimeoutMs: 30 });
+    graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [
+      { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654321' }, id: 'message_thread:87654321' } }
+    ] } } } };
+    await expectProviderError(
+      backend.listThreads(listInput(), new AbortController().signal),
+      'UPSTREAM_ERROR',
+      'The Facebook Marketplace inbox pagination could not be verified; a complete thread list cannot be returned.'
+    );
+    expect(backendLogLines).toEqual([
+      'Facebook Messenger inbox pagination could not be verified (reason: unverified_page)'
+    ]);
+  }, 15_000);
+
+  it('does not record a pagination reason when the read succeeds or fails for another reason', async () => {
+    configure('inbox-buttons-graphql.html');
+    const backend = createBackend({ settleTimeoutMs: 30 });
+    graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [
+      { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654321' }, id: 'message_thread:87654321' } }
+    ], page_info: { has_next_page: false, end_cursor: null } } } } };
+    await expect(backend.listThreads(listInput(), new AbortController().signal)).resolves.toMatchObject({
+      threads: [{ thread_id: '87654321' }], truncated: false
+    });
+    expect(backendLogLines).toEqual([]);
   }, 15_000);
 
   it('bounds the total GraphQL flush deadline so multiple stalled responses cannot serialize per-body timeouts', async () => {

@@ -87,8 +87,66 @@ describe.skipIf(!browserAvailable)('Facebook consumer menu extraction', () => {
     expect(outcome.threads[0]?.preview).toBe('Is the fixture bike available?');
   });
 
+  it('preserves one-character CJK, emoji, and punctuation fields while still excluding the separator (#197)', async () => {
+    // The separator is excluded by its structural position (the row's last field before the
+    // timestamp) and its shape, never by "any single non-ASCII character": a one-character CJK
+    // participant (`李`), snippet (`好`), or single-code-unit emoji/punctuation snippet is a
+    // searchable field, not a separator. The `·`-snippet row also proves the separator is still
+    // excluded — only its own trailing `·` is dropped, and the snippet `·` survives attribution.
+    const html = `<!doctype html><html><head><title>Synthetic Facebook</title></head><body>
+      <div role="banner"><div role="button" aria-label="Messenger" style="width:40px;height:40px"></div></div>
+      <div role="dialog" aria-label="Menu"><div aria-label="Chats" role="grid">
+        <div role="row"><div role="gridcell"><img alt=""></div><a href="/messages/t/444444444444444/"><span>李</span><span>Is the fixture bike available?</span><span>·</span><abbr>2h</abbr></a></div>
+        <div role="row"><div role="gridcell"><img alt=""></div><a href="/messages/t/555555555555555/"><span>Alice</span><span>好</span><span>·</span><abbr>3h</abbr></a></div>
+        <div role="row"><div role="gridcell"><img alt=""></div><a href="/messages/t/666666666666666/"><span>Alice</span><span>♥</span><span>·</span><abbr>4h</abbr></a></div>
+        <div role="row"><div role="gridcell"><img alt=""></div><a href="/messages/t/777777777777777/"><span>Alice</span><span>·</span><span>·</span><abbr>5h</abbr></a></div>
+      </div></div><a href="/logout">Log out</a></body></html>`;
+    const extracted = await extractOf(html);
+    expect(extracted.chatsRegionCount).toBe(1);
+    expect(extracted.rows).toHaveLength(4);
+    expect(extracted.malformedRows).toBe(0);
+    expect(extracted.duplicateKeyRows).toBe(0);
+    expect(extracted.rows[0]?.participants).toEqual(['李']);
+    expect(extracted.rows[0]?.preview).toBe('Is the fixture bike available?');
+    expect(extracted.rows[1]?.participants).toEqual(['Alice']);
+    expect(extracted.rows[1]?.preview).toBe('好');
+    expect(extracted.rows[2]?.preview).toBe('♥');
+    expect(extracted.rows[3]?.preview).toBe('·');
+    // None of the rows leaked the separator or the timestamp into the searchable fields.
+    for (const row of extracted.rows) {
+      expect(row.preview).not.toBe('2h');
+    }
+
+    const outcome = interpret(extracted);
+    expect(outcome.kind).toBe('menu');
+    if (outcome.kind !== 'menu') return;
+    expect(outcome.threads).toHaveLength(4);
+    expect(outcome.threads[0]).toMatchObject({ thread_id: '444444444444444', participants: ['李'] });
+    expect(outcome.threads[1]).toMatchObject({ thread_id: '555555555555555', preview: '好' });
+  });
+
+  it('fails closed when the separator position carries letter- or word-shaped text (#197)', async () => {
+    // A last field shaped like text (a Unicode letter, a multi-character word, or a two-code-unit
+    // emoji) is not the verified separator: the row is unattributable and fails closed, instead
+    // of the old behavior of silently swallowing any single non-ASCII character at any position.
+    const html = `<!doctype html><html><head><title>Synthetic Facebook</title></head><body>
+      <div role="banner"><div role="button" aria-label="Messenger" style="width:40px;height:40px"></div></div>
+      <div role="dialog" aria-label="Menu"><div aria-label="Chats" role="grid">
+        <div role="row"><div role="gridcell"><img alt=""></div><a href="/messages/t/888888888888888/"><span>Alice</span><span>hi</span><span>李</span><abbr>2h</abbr></a></div>
+        <div role="row"><div role="gridcell"><img alt=""></div><a href="/messages/t/999999999999999/"><span>Alice</span><span>hi</span><span>abc</span><abbr>3h</abbr></a></div>
+        <div role="row"><div role="gridcell"><img alt=""></div><a href="/messages/t/101010101010101/"><span>Alice</span><span>hi</span><span>👍</span><abbr>4h</abbr></a></div>
+      </div></div><a href="/logout">Log out</a></body></html>`;
+    const extracted = await extractOf(html);
+    expect(extracted.rows).toHaveLength(0);
+    expect(extracted.malformedRows).toBe(3);
+    expect(interpret(extracted)).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+  });
+
   it('recognizes an explicitly empty menu and never mistakes a changed layout for one', async () => {
     const empty = await extractOf(loadFixture('menu-empty.html'));
+    // The empty-state marker renders inside the verified Chats region, so the region's own
+    // visible evidence certifies the emptiness (#198).
+    expect(empty.hasEmptyStateMarker).toBe(true);
     expect(classifyConsumerMenuPage(empty)).toBe('empty');
     expect(interpret(empty).kind).toBe('empty');
 
@@ -96,6 +154,22 @@ describe.skipIf(!browserAvailable)('Facebook consumer menu extraction', () => {
     expect(noRegion.chatsRegionCount).toBe(0);
     expect(classifyConsumerMenuPage(noRegion)).toBe('unknown');
     expect(interpret(noRegion)).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+  });
+
+  it('scopes empty-state evidence to the Chats region, so unrelated or hidden text never certifies an empty menu', async () => {
+    // An empty-but-unmarked region with empty-state wording elsewhere on the page: the region
+    // itself carries no verified empty state, so the page stays unknown/upstream error rather
+    // than a successful zero-thread observation (#198 regression).
+    const outside = await extractOf(loadFixture('menu-empty-marker-outside.html'));
+    expect(outside.hasEmptyStateMarker).toBe(false);
+    expect(classifyConsumerMenuPage(outside)).toBe('unknown');
+    expect(interpret(outside)).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+
+    // A hidden empty-state template inside the region is not visible evidence either.
+    const hidden = await extractOf(loadFixture('menu-empty-hidden-marker.html'));
+    expect(hidden.hasEmptyStateMarker).toBe(false);
+    expect(classifyConsumerMenuPage(hidden)).toBe('unknown');
+    expect(interpret(hidden)).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
   });
 
   it('fails closed on conflicting keys, malformed keys, a saturated row scan, and structure drift', async () => {

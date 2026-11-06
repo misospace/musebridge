@@ -205,7 +205,7 @@ describe('Messenger inbox GraphQL pagination coverage', () => {
     const collector = new MessengerInboxGraphQLCollector();
     observe(collector, response(edges(['12345678'])), 'cursor-one');
     expect(collector.snapshot()).toEqual({
-      recognized: true, malformed: false, empty: false, incomplete: true, truncated: false, threadIds: []
+      recognized: true, malformed: false, empty: false, incomplete: true, incompleteReason: 'incomplete_chain', truncated: false, threadIds: []
     });
   });
 
@@ -214,7 +214,7 @@ describe('Messenger inbox GraphQL pagination coverage', () => {
     observe(collector, response(edges(['12345678']), { has_next_page: true, end_cursor: 'cursor-one' }), null);
     observe(collector, response(edges(['12345680'])), 'cursor-two');
     expect(collector.snapshot()).toEqual({
-      recognized: true, malformed: false, empty: false, incomplete: true, truncated: false, threadIds: ['12345678']
+      recognized: true, malformed: false, empty: false, incomplete: true, incompleteReason: 'incomplete_chain', truncated: false, threadIds: ['12345678']
     });
   });
 
@@ -232,7 +232,7 @@ describe('Messenger inbox GraphQL pagination coverage', () => {
     const collector = new MessengerInboxGraphQLCollector();
     observe(collector, { errors: [{ message: 'unavailable' }] });
     expect(collector.snapshot()).toEqual({
-      recognized: true, malformed: false, empty: false, incomplete: true, truncated: false, threadIds: []
+      recognized: true, malformed: false, empty: false, incomplete: true, incompleteReason: 'unverified_page', truncated: false, threadIds: []
     });
   });
 
@@ -243,7 +243,7 @@ describe('Messenger inbox GraphQL pagination coverage', () => {
     });
     collector.observe({ errors: [{ message: 'unavailable' }] }, request);
     expect(collector.snapshot()).toEqual({
-      recognized: true, malformed: false, empty: false, incomplete: true, truncated: false, threadIds: []
+      recognized: true, malformed: false, empty: false, incomplete: true, incompleteReason: 'unverified_page', truncated: false, threadIds: []
     });
   });
 
@@ -258,5 +258,82 @@ describe('Messenger inbox GraphQL pagination coverage', () => {
     observe(conflict, page, null);
     observe(conflict, response(edges(['12345679'])), null);
     expect(conflict.snapshot()).toMatchObject({ malformed: true, incomplete: true });
+  });
+});
+
+// #204: the deployed session reached a verified authenticated state, yet one bounded
+// messenger_threads_list call returned the typed pagination-unverifiable refusal. Each test
+// here pins one candidate deployed shape to the completeness condition that fails closed for
+// it, so the recorded `incompleteReason` distinguishes the shapes on the next authorized run.
+describe('Messenger inbox deployed fail-closed classification (#204)', () => {
+  it('verifies a legitimate single-page inbox that carries an explicit terminal marker', () => {
+    const collector = new MessengerInboxGraphQLCollector();
+    observe(collector, response(edges(ids(1, 20)), terminal), null);
+    expect(collector.snapshot()).toEqual({
+      recognized: true, malformed: false, empty: false, incomplete: false, truncated: false,
+      threadIds: ids(1, 20)
+    });
+  });
+
+  it('classifies a single page without a terminal page_info as an unverified page, not a chain failure', () => {
+    const collector = new MessengerInboxGraphQLCollector();
+    // Connection shape matches the verified live record (#64: edges[].node MessageThread with
+    // thread_key.thread_fbid) but the connection carries no page_info at all.
+    observe(collector, response(edges(ids(1, 20)), null), null);
+    expect(collector.snapshot()).toMatchObject({
+      recognized: true, malformed: false, empty: false, incomplete: true,
+      incompleteReason: 'unverified_page', threadIds: []
+    });
+  });
+
+  it('classifies a malformed page_info as an unverified page', () => {
+    const collector = new MessengerInboxGraphQLCollector();
+    observe(collector, response(edges(ids(1, 20)), { has_next_page: 'no' }), null);
+    expect(collector.snapshot()).toMatchObject({
+      incomplete: true, malformed: true, incompleteReason: 'malformed_connection'
+    });
+  });
+
+  it('classifies an initial request that cannot be tied to its connection as an unverified page', () => {
+    const collector = new MessengerInboxGraphQLCollector();
+    // The response parses as a terminal connection, but the request observation is not the
+    // initial page request (unreadable body, unknown friendly name, or unusable cursor).
+    collector.observe(response(edges(ids(1, 20)), terminal), { kind: 'unverified' });
+    expect(collector.snapshot()).toMatchObject({
+      recognized: true, malformed: false, incomplete: true, incompleteReason: 'unverified_page', threadIds: []
+    });
+  });
+
+  it('classifies an unrecognized payload on a verified page request as an unverified page', () => {
+    const collector = new MessengerInboxGraphQLCollector();
+    // An error envelope (or any response whose shape is not the verified connection) on the
+    // initial page request leaves the page evidence ambiguous.
+    observe(collector, { errors: [{ message: 'unavailable' }] }, null);
+    expect(collector.snapshot()).toMatchObject({
+      recognized: true, malformed: false, incomplete: true, incompleteReason: 'unverified_page', threadIds: []
+    });
+  });
+
+  it('classifies a first page whose continuation was never observed as an incomplete chain', () => {
+    const collector = new MessengerInboxGraphQLCollector();
+    // A first page that promises more threads keeps the listing incomplete until the collector
+    // observes the continuation request and its terminal response in the same bounded window.
+    observe(collector, response(edges(ids(1, 12)), { has_next_page: true, end_cursor: 'cursor-one' }), null);
+    expect(collector.snapshot()).toMatchObject({
+      recognized: true, malformed: false, incomplete: true, incompleteReason: 'incomplete_chain', threadIds: ids(1, 12)
+    });
+  });
+
+  it('classifies a bounded read that stopped before every observed response was read as a response limit', () => {
+    const collector = new MessengerInboxGraphQLCollector();
+    observe(collector, response(edges(ids(1, 12)), { has_next_page: true, end_cursor: 'cursor-one' }), null);
+    observe(collector, response(edges(ids(13, 12)), { has_next_page: true, end_cursor: 'cursor-two' }), 'cursor-one');
+    // Fill the response window to its bound without recording a terminal page, then exhaust it.
+    for (let index = 0; index < 39; index += 1) {
+      collector.observe(response(edges(['12345678'])), { kind: 'page', cursor: `cursor-${index}` });
+    }
+    expect(collector.snapshot()).toMatchObject({
+      recognized: true, malformed: false, incomplete: true, incompleteReason: 'response_limit'
+    });
   });
 });

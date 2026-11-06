@@ -385,6 +385,15 @@ export function assertWritableToolsHaveAuthorizer(
   }
 }
 
+/**
+ * The not-configured guard every dispatch branch applies to its surface backend, so the typed
+ * `UPSTREAM_ERROR` and its message are declared once instead of restated per branch.
+ */
+function requireBackend<T>(backend: T | undefined, message: string): T {
+  if (!backend) throw new ProviderError('UPSTREAM_ERROR', message);
+  return backend;
+}
+
 export function registerMarketplaceTools(
   server: Server,
   backend: MarketplaceBackend,
@@ -496,8 +505,7 @@ export function registerMarketplaceTools(
             ? runtimeFailure('NOT_FOUND', 'No listing matched the supplied identifier.')
             : { ok: true, backend: backendName, listing };
         } else if (name === 'messenger_threads_list') {
-          const conversations = options.conversations;
-          if (!conversations) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');
+          const conversations = requireBackend(options.conversations, 'The messenger surface is not configured on this deployment.');
           const listing = await runBackendOperation(
             (signal) => conversations.listThreads(parsed.data as z.infer<typeof threadsListInputSchema>, signal),
             backendTimeoutMs,
@@ -511,8 +519,7 @@ export function registerMarketplaceTools(
             ? { ok: true, backend: backendName, threads: listing }
             : { ok: true, backend: backendName, threads: listing.threads, truncated: listing.truncated };
         } else if (name === 'messenger_thread_read') {
-          const conversations = options.conversations;
-          if (!conversations) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');
+          const conversations = requireBackend(options.conversations, 'The messenger surface is not configured on this deployment.');
           const thread = await runBackendOperation(
             (signal) => conversations.readThread(parsed.data as z.infer<typeof threadReadInputSchema>, signal),
             backendTimeoutMs,
@@ -529,8 +536,7 @@ export function registerMarketplaceTools(
               ...(thread.coverage ? { coverage: thread.coverage } : {})
             };
         } else if (name === 'messenger_prepare') {
-          const conversations = options.conversations;
-          if (!conversations) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');
+          const conversations = requireBackend(options.conversations, 'The messenger surface is not configured on this deployment.');
           // Token first, complete validated send payload next, digest last: the published
           // subject_digest is computed over that validated payload, so it is exactly what
           // authorizeAction later checks for messenger_send against the same send_input. Digesting
@@ -566,8 +572,7 @@ export function registerMarketplaceTools(
             };
           }
         } else if (name === 'messenger_send') {
-          const conversations = options.conversations;
-          if (!conversations) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');
+          const conversations = requireBackend(options.conversations, 'The messenger surface is not configured on this deployment.');
           const sendInput = parsed.data as ThreadSendInput;
           // A DOM interaction succeeding is not delivery confirmation, so a resolved send is
           // never reported 'sent' directly; a failure whose submit was already dispatched is
@@ -591,9 +596,9 @@ export function registerMarketplaceTools(
           const delivered = await reconcileSentThread(conversations, sendInput, backendTimeoutMs, extra.signal, shutdownSignal);
           output = { ok: true, backend: backendName, thread_id: sendInput.thread_id, status: delivered ? 'sent' : 'unknown' };
         } else if (name === 'consumer_threads_list') {
-          const conversations = options.conversations;
-          const listConsumerThreads = conversations?.listConsumerThreads;
-          if (!conversations || !listConsumerThreads) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');
+          const conversations = requireBackend(options.conversations, 'The messenger surface is not configured on this deployment.');
+          const listConsumerThreads = conversations.listConsumerThreads;
+          if (!listConsumerThreads) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');
           const page = await runBackendOperation(
             (signal) => listConsumerThreads.call(conversations, parsed.data as z.infer<typeof consumerThreadsListInputSchema>, signal),
             backendTimeoutMs,
@@ -602,9 +607,9 @@ export function registerMarketplaceTools(
           );
           output = { ok: true, backend: backendName, threads: page.threads, truncated: page.truncated, coverage: page.coverage };
         } else if (name === 'consumer_threads_search') {
-          const conversations = options.conversations;
-          const searchConsumerThreadsMethod = conversations?.searchConsumerThreads;
-          if (!conversations || !searchConsumerThreadsMethod) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');
+          const conversations = requireBackend(options.conversations, 'The messenger surface is not configured on this deployment.');
+          const searchConsumerThreadsMethod = conversations.searchConsumerThreads;
+          if (!searchConsumerThreadsMethod) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');
           const page = await runBackendOperation(
             (signal) => searchConsumerThreadsMethod.call(conversations, parsed.data as z.infer<typeof consumerThreadsSearchInputSchema>, signal),
             backendTimeoutMs,
@@ -654,8 +659,7 @@ export function registerMarketplaceTools(
             ? runtimeFailure('NOT_FOUND', 'No conversation thread matched the supplied identifier.')
             : { ok: true, backend: meta.name, thread_id: backfillInput.thread_id, messages: page.messages, coverage: page.coverage };
         } else if (name === 'shopping_search') {
-          const shopping = options.shopping;
-          if (!shopping) throw new ProviderError('UPSTREAM_ERROR', 'The shopping surface is not configured on this deployment.');
+          const shopping = requireBackend(options.shopping, 'The shopping surface is not configured on this deployment.');
           const offers = await runBackendOperation(
             (signal) => shopping.search(parsed.data as z.infer<typeof shoppingSearchInputSchema>, signal),
             backendTimeoutMs,
@@ -664,8 +668,7 @@ export function registerMarketplaceTools(
           );
           output = { ok: true, backend: shopping.name, offers };
         } else if (name === 'shopping_fetch') {
-          const shopping = options.shopping;
-          if (!shopping) throw new ProviderError('UPSTREAM_ERROR', 'The shopping surface is not configured on this deployment.');
+          const shopping = requireBackend(options.shopping, 'The shopping surface is not configured on this deployment.');
           const offer = await runBackendOperation(
             (signal) => shopping.fetch(parsed.data as z.infer<typeof shoppingFetchInputSchema>, signal),
             backendTimeoutMs,
@@ -676,8 +679,7 @@ export function registerMarketplaceTools(
             ? runtimeFailure('NOT_FOUND', 'No product offer matched the supplied identifier.')
             : { ok: true, backend: shopping.name, offer };
         } else if (name === 'events_search') {
-          const events = options.events;
-          if (!events) throw new ProviderError('UPSTREAM_ERROR', 'The events surface is not configured on this deployment.');
+          const events = requireBackend(options.events, 'The events surface is not configured on this deployment.');
           const results = await runBackendOperation(
             (signal) => events.search(parsed.data as z.infer<typeof eventsSearchInputSchema>, signal),
             backendTimeoutMs,
@@ -686,8 +688,7 @@ export function registerMarketplaceTools(
           );
           output = { ok: true, backend: events.name, events: results };
         } else if (name === 'events_fetch') {
-          const events = options.events;
-          if (!events) throw new ProviderError('UPSTREAM_ERROR', 'The events surface is not configured on this deployment.');
+          const events = requireBackend(options.events, 'The events surface is not configured on this deployment.');
           const event = await runBackendOperation(
             (signal) => events.fetch(parsed.data as z.infer<typeof eventsFetchInputSchema>, signal),
             backendTimeoutMs,
@@ -698,8 +699,7 @@ export function registerMarketplaceTools(
             ? runtimeFailure('NOT_FOUND', 'No event matched the supplied identifier.')
             : { ok: true, backend: events.name, event };
         } else if (name === 'threads_posts_list') {
-          const threads = options.threads;
-          if (!threads) throw new ProviderError('UPSTREAM_ERROR', 'The Threads social surface is not configured on this deployment.');
+          const threads = requireBackend(options.threads, 'The Threads social surface is not configured on this deployment.');
           const result = await runBackendOperation(
             (signal) => threads.listOwnPosts(parsed.data as z.infer<typeof threadsPostsListInputSchema>, signal),
             backendTimeoutMs,
@@ -708,8 +708,7 @@ export function registerMarketplaceTools(
           );
           output = { ok: true, backend: threads.name, posts: result.posts, truncated: result.truncated };
         } else if (name === 'threads_replies_list') {
-          const threads = options.threads;
-          if (!threads) throw new ProviderError('UPSTREAM_ERROR', 'The Threads social surface is not configured on this deployment.');
+          const threads = requireBackend(options.threads, 'The Threads social surface is not configured on this deployment.');
           const repliesInput = parsed.data as z.infer<typeof threadsRepliesListInputSchema>;
           const result = await runBackendOperation(
             (signal) => threads.listReplies(repliesInput, signal),
@@ -721,8 +720,7 @@ export function registerMarketplaceTools(
             ? runtimeFailure('NOT_FOUND', 'No Threads media matched the supplied identifier.')
             : { ok: true, backend: threads.name, media_id: repliesInput.media_id, replies: result.replies, truncated: result.truncated };
         } else if (name === 'threads_mentions_list') {
-          const threads = options.threads;
-          if (!threads) throw new ProviderError('UPSTREAM_ERROR', 'The Threads social surface is not configured on this deployment.');
+          const threads = requireBackend(options.threads, 'The Threads social surface is not configured on this deployment.');
           const result = await runBackendOperation(
             (signal) => threads.listMentions(parsed.data as z.infer<typeof threadsMentionsListInputSchema>, signal),
             backendTimeoutMs,

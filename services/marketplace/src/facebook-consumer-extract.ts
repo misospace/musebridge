@@ -46,6 +46,9 @@ export interface ExtractedConsumerMenuPage {
   /** True when the region rendered more rows than the scan examined, so an unexamined row could
    *  carry a conversation the extracted rows do not show: the observation is untrusted. */
   rowsScanSaturated: boolean;
+  /** True only when the single verified Chats region's own visibly rendered text carries an
+   *  explicit empty-state marker; false when there is no single verified region, so homepage
+   *  copy outside the region can never certify the menu as empty (#198). */
   hasEmptyStateMarker: boolean;
 }
 
@@ -151,19 +154,83 @@ export function extractConsumerMenuPage(options: ExtractConsumerMenuOptions): Ex
     mentionsCheckpoint: /security check|confirm your identity|unusual activity/i.test(pageText),
     mentionsCaptcha: /captcha|i'?m\s+not\s+a\s+robot|verify\s+you\s+are\s+a\s+human/i.test(pageText)
   };
-  const hasEmptyStateMarker = /no conversations|no messages yet|nothing here yet/i.test(pageText);
+  const emptyStatePattern = /no conversations|no messages yet|nothing here yet/gi;
+  // Empty-state evidence belongs to the single verified Chats region (#198): the homepage body
+  // can carry unrelated feed copy or hidden text with the same wording, and none of it may
+  // certify the observed menu as empty. When the page does not render exactly one region there
+  // is no verified place for the evidence at all, so the flag stays false.
+  const chatsRegions = document.querySelectorAll('[aria-label="Chats"]');
+  const chatsRegionCount = chatsRegions.length;
+  const region = chatsRegionCount === 1 ? chatsRegions.item(0) ?? undefined : undefined;
+  const hasEmptyStateMarker = (() => {
+    if (!region) return false;
+    if (!emptyStatePattern.test(region.textContent ?? '')) return false;
+    emptyStatePattern.lastIndex = 0;
+    // The region's text carries the phrase somewhere; require every text span under a matching
+    // occurrence to be visibly rendered, so a dormant or hidden empty-state template inside the
+    // region cannot certify the menu as empty either (#198 acceptance).
+    const parts: { start: number; end: number; element: Element }[] = [];
+    let stream = '';
+    const walker = document.createTreeWalker(region, 4);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const parent = node.parentElement;
+      if (!parent) continue;
+      if (parent.matches('script, style, template, noscript, [hidden]')) {
+        stream += '\u0000';
+        continue;
+      }
+      const value = node.textContent ?? '';
+      if (!value) continue;
+      if (stream.length >= 20000) break;
+      parts.push({ start: stream.length, end: stream.length + value.length, element: parent });
+      stream += value;
+    }
+    let match = emptyStatePattern.exec(stream);
+    let cursor = 0;
+    while (match !== null) {
+      const start = match.index;
+      const end = start + match[0].length;
+      while (cursor < parts.length) {
+        const part = parts[cursor];
+        if (!part || part.end <= start) {
+          cursor += 1;
+          continue;
+        }
+        break;
+      }
+      let covered = 0;
+      let rendered = true;
+      for (let index = cursor; index < parts.length; index += 1) {
+        const part = parts[index];
+        if (!part || part.start >= end) break;
+        covered += 1;
+        if (!isVisiblyRendered(part.element)) {
+          rendered = false;
+          break;
+        }
+      }
+      if (covered > 0 && rendered) return true;
+      if (match[0].length === 0) emptyStatePattern.lastIndex += 1;
+      match = emptyStatePattern.exec(stream);
+    }
+    return false;
+  })();
 
   // Attributes the row's rendered text to the verified field structure, in document order inside
   // the conversation link:
   //
   //   [presence label (a `div`, optional)] [participant label span] [snippet span]
-  //   [one-character separator span (excluded)] [timestamp inside the row's single `abbr` (excluded)]
+  //   [trailing separator span (excluded by position and shape)] [timestamp inside the row's single `abbr` (excluded)]
   //
   // The presence label is a static provider-rendered string ("Active now"-shaped, observed on 4
   // of 18 live rows) and the timestamp is the `abbr`'s own text; neither is an allowlisted search
   // field, so both are excluded from the returned fields rather than flattened into one
-  // searchable value. Any other element count, order, or tag shape is structure drift: the row is
-  // unattributable and its caller fails the whole observation closed. The shape contract must be
+  // searchable value. The separator is excluded by its structural position — it is the row's
+  // LAST field, immediately before the timestamp — and its shape (a single UTF-16 code unit that
+  // is neither a Unicode letter nor a number), never by "any single non-ASCII character": a
+  // one-character CJK participant or snippet is a field, not a separator (#197). Any other
+  // element count, order, or tag shape is structure drift: the row is unattributable and its
+  // caller fails the whole observation closed. The shape contract must be
   // kept in sync with `facebook-consumer-parse.ts` and the fixtures.
   const attributeRowFields = (row: Element): { participants: string[]; preview?: string } | undefined => {
     const own = (el: Element): string => [...el.childNodes]
@@ -180,11 +247,12 @@ export function extractConsumerMenuPage(options: ExtractConsumerMenuOptions): Ex
     const outside = [...scope.querySelectorAll('*')].filter(
       (el) => own(el).length > 0 && !(timestampEl && (el === timestampEl || timestampEl.contains(el)))
     );
-    const fields = outside.filter((el) => {
-      const text = own(el);
-      // The one-character separator between snippet and timestamp is not a field.
-      return !(text.length === 1 && !/[a-z0-9]/i.test(text));
-    });
+    // The rule above this point is stated in the contract comment: the separator is excluded by
+    // its structural position and shape, never by "any single non-ASCII character" (#197).
+    const lastField = outside[outside.length - 1];
+    const separatorText = lastField ? own(lastField) : '';
+    const isSeparatorShape = separatorText.length === 1 && !/[\p{L}\p{N}]/u.test(separatorText);
+    const fields = isSeparatorShape ? outside.slice(0, -1) : outside;
     if (fields.length < 2 || fields.length > 3) return undefined;
     // The verified shapes: [name span, snippet span] or [presence div, name span, snippet span].
     if (fields.length === 3 && fields[0]?.tagName !== 'DIV') return undefined;
@@ -204,7 +272,7 @@ export function extractConsumerMenuPage(options: ExtractConsumerMenuOptions): Ex
     url,
     pathname: location.pathname.slice(0, 512),
     signals,
-    chatsRegionCount: document.querySelectorAll('[aria-label="Chats"]').length,
+    chatsRegionCount,
     regionRowCount: 0,
     rows: [],
     malformedRows: 0,
@@ -212,10 +280,8 @@ export function extractConsumerMenuPage(options: ExtractConsumerMenuOptions): Ex
     rowsScanSaturated: false,
     hasEmptyStateMarker
   };
-  if (result.chatsRegionCount !== 1) return result;
-
-  const region = document.querySelector('[aria-label="Chats"]');
   if (!region) return result;
+
   const rows = Array.from(region.querySelectorAll('[role="row"]'));
   result.regionRowCount = rows.length;
   result.rowsScanSaturated = rows.length > maxRowsScan;

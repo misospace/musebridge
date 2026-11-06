@@ -50,6 +50,13 @@ export type MessengerInboxOutcome =
   | { kind: 'empty' }
   | { kind: 'error'; code: ProviderErrorCode; message: string };
 
+/**
+ * The fail-closed outcome when the observed GraphQL pagination evidence does not prove a
+ * complete thread list (#97). Shared as a constant so the backend can recognize this exact
+ * outcome when it records the sanitized failure reason (#204) without matching a bare string.
+ */
+export const MESSENGER_INBOX_PAGINATION_UNVERIFIED = 'The Facebook Marketplace inbox pagination could not be verified; a complete thread list cannot be returned.';
+
 export function interpretMessengerInboxPage(input: {
   page: ExtractedInboxPage;
   baseUrl: string;
@@ -86,7 +93,7 @@ export function interpretMessengerInboxPage(input: {
     return {
       kind: 'error',
       code: 'UPSTREAM_ERROR',
-      message: 'The Facebook Marketplace inbox pagination could not be verified; a complete thread list cannot be returned.'
+      message: MESSENGER_INBOX_PAGINATION_UNVERIFIED
     };
   }
   if (graphql && graphql.threadIds.length > 0) {
