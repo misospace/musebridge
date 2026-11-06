@@ -102,6 +102,16 @@ export function isMetaOwnedHost(host: string): boolean {
 }
 
 /**
+ * Comparison form of a WHATWG hostname: lowercased, IPv6 brackets stripped, and one
+ * trailing dot stripped. The trailing dot matters because `https://facebook.com.` is the
+ * fully-qualified spelling of the same host — DNS resolves it to Meta — and the bracket
+ * form matters because `http://[::1]:9000` is the documented IPv6 sidecar.
+ */
+function canonicalHostname(hostname: string): string {
+  return hostname.toLowerCase().replace(/^\[(.*)\]$/, '$1').replace(/\.$/, '');
+}
+
+/**
  * Resolves the transport base URL. Must be http(s), with no userinfo, search, or hash.
  * Meta-owned hosts are refused; loopback (the normal sidecar shape) and operator-private
  * hosts are accepted. There is deliberately no default destination: selecting the
@@ -110,7 +120,7 @@ export function isMetaOwnedHost(host: string): boolean {
 export function resolveMetaTransportBaseUrl(baseUrl: string): string {
   let parsed: URL;
   try { parsed = new URL(baseUrl); } catch { throw new TypeError('MAUTRIX_META_BASE_URL must be a valid http(s) URL'); }
-  const host = parsed.hostname.toLowerCase();
+  const host = canonicalHostname(parsed.hostname);
   const isLoopback = ['127.0.0.1', '::1', 'localhost'].includes(host);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:'
     || parsed.username || parsed.password || parsed.search || parsed.hash
@@ -175,6 +185,11 @@ export class MautrixMetaClient {
     const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
       method: 'GET',
       headers: { Accept: 'application/json' },
+      // Manual redirects: the Meta-host rule constrains every destination Musebridge
+      // contacts, not just the configured base URL. A transport that answers with a
+      // redirect to Meta or any other host is refused as a failure below instead of
+      // being followed.
+      redirect: 'manual',
       signal
     });
     if (!response.ok) throw await responseError(response);

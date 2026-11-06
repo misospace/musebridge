@@ -143,8 +143,12 @@ export class MautrixMetaApiBackend implements MautrixMetaBackend {
   }
 }
 
+// An absence notice is only an absence when the transport says so with a 404. A
+// `thread_not_found` code attached to a 5xx (or any other status) is a provider failure
+// wearing an absence label: it fails closed through the typed-error mapping rather than
+// becoming a definitive NOT_FOUND the caller could cache.
 function isThreadNotFound(error: unknown): boolean {
-  return error instanceof MautrixMetaHttpError && error.code === 'thread_not_found';
+  return error instanceof MautrixMetaHttpError && error.status === 404 && error.code === 'thread_not_found';
 }
 
 /**
@@ -157,11 +161,15 @@ function isThreadNotFound(error: unknown): boolean {
 function toProviderFailure(error: unknown): unknown {
   if (error instanceof ProviderError) return error;
   if (error instanceof MautrixMetaHttpError) {
-    if (error.code === 'thread_not_found') return error;
-    const mapped = META_FAILURE_TEXT[error.code === 'unknown' ? classifyByStatus(error.status) : error.code as Exclude<MautrixMetaErrorCode, 'thread_not_found'>];
+    // A 404 thread_not_found never reaches this branch (the callers map it to absence).
+    // Reaching here with that label — from a listing route or a non-404 status — is a
+    // provider failure, classified like any other status fallback.
+    const classified: Exclude<MautrixMetaErrorCode, 'thread_not_found'> =
+      error.code === 'unknown' || error.code === 'thread_not_found' ? classifyByStatus(error.status) : error.code;
+    const mapped = META_FAILURE_TEXT[classified];
     const metadata = {
       ...(mapped.action_required !== undefined ? { action_required: mapped.action_required } : {}),
-      ...(error.code === 'rate_limited' && error.retryAfter !== undefined ? { retry_after: error.retryAfter } : {})
+      ...(classified === 'rate_limited' && error.retryAfter !== undefined ? { retry_after: error.retryAfter } : {})
     };
     return new ProviderError(mapped.code, mapped.message, metadata);
   }

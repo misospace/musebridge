@@ -30,6 +30,20 @@ describe('resolveMetaTransportBaseUrl', () => {
     }
   });
 
+  it('refuses the trailing-dot FQDN spelling of Meta hosts: DNS resolves them to Meta', () => {
+    for (const rejected of ['https://facebook.com.', 'https://messenger.com.', 'https://m.facebook.com.']) {
+      expect(() => resolveMetaTransportBaseUrl(rejected)).toThrow(TypeError);
+    }
+  });
+
+  it('accepts the bracketed IPv6 loopback over http (the documented sidecar shape)', () => {
+    expect(resolveMetaTransportBaseUrl('http://[::1]:9000')).toBe('http://[::1]:9000');
+  });
+
+  it('accepts a trailing-dot operator-private host', () => {
+    expect(resolveMetaTransportBaseUrl('https://meta.internal.example.')).toBe('https://meta.internal.example.');
+  });
+
   it('accepts a Meta-lookalike suffix: only real Meta hosts are refused', () => {
     // The dotted-suffix rule is exactly what separates `checkpoint.facebook.com` (refused)
     // from `checkpoint.facebook.com.evil.example` — an unrelated host whose name merely ends
@@ -71,6 +85,23 @@ describe('MautrixMetaClient', () => {
       expect(call.accept).toBe('application/json');
       expect(call.signal).toBe(controller.signal);
     }
+  });
+
+  it('requests manual redirects so a transport reply can never aim Musebridge at another host', async () => {
+    const seen: unknown[] = [];
+    const client = new MautrixMetaClient({ baseUrl, fetchImpl: async (_input, init) => {
+      seen.push(init?.redirect);
+      return ok(listBody);
+    } });
+    await client.listThreads(5);
+    expect(seen).toEqual(['manual']);
+  });
+
+  it('treats a 3xx reply as a typed failure instead of following or parsing it', async () => {
+    const client = new MautrixMetaClient({ baseUrl, fetchImpl: async () => new Response('', { status: 302, headers: { location: 'https://facebook.com/v1/threads' } }) });
+    const error = await client.listThreads(5).catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(MautrixMetaHttpError);
+    if (error instanceof MautrixMetaHttpError) expect(error.status).toBe(302);
   });
 
   it('assembles the pinned request URLs', async () => {

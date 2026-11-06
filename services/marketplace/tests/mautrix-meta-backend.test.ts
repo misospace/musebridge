@@ -57,6 +57,23 @@ describe('MautrixMetaApiBackend', () => {
     }
   });
 
+  it('refuses to read an absence label on a 5xx as a definitive NOT_FOUND', async () => {
+    const backend = backendWith(async () => ok({ error: { code: 'thread_not_found', message: 'Synthetic failure wearing an absence label.' } }, 500));
+    const failure = await backend.readThread({ thread_id: 'synth-meta-thread-001' }, signal).catch((reason: unknown) => reason);
+    expect(failure).toBeInstanceOf(ProviderError);
+    if (failure instanceof ProviderError) expect(failure.code).toBe('UPSTREAM_ERROR');
+  });
+
+  it('keeps retry_after when a 429 body is reclassified from status', async () => {
+    const backend = backendWith(async () => new Response(JSON.stringify({ error: { code: 'mystery', message: 'not a known code' } }), { status: 429, headers: { 'retry-after': '30' } }));
+    const failure = await backend.listThreads({ limit: 5 }, signal).catch((reason: unknown) => reason);
+    expect(failure).toBeInstanceOf(ProviderError);
+    if (failure instanceof ProviderError) {
+      expect(failure.code).toBe('RATE_LIMITED');
+      expect(failure.metadata.retry_after).toBe(30);
+    }
+  });
+
   it('sends before as unix milliseconds and echoes the ISO bound in coverage', async () => {
     let seenUrl = '';
     const backend = backendWith(async (input) => { seenUrl = String(input); return ok({ messages: tailMessages, coverage: { window: 'backfill', scanned_rows: 2, has_more_before: false } }); });
