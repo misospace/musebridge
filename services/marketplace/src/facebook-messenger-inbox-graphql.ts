@@ -7,11 +7,31 @@ export const MESSENGER_INBOX_OPERATIONS = [
 
 const MAX_INBOX_CURSOR_LENGTH = 4_096;
 
+/**
+ * Why pagination verification failed, classified from the same observations the fail-closed
+ * decision itself uses (#204). The reason is a sanitized structural code — never request or
+ * response content — so a deployed fail-closed refusal can record which completeness condition
+ * fired without logging page data. When several conditions hold, the first in this order wins:
+ * `malformed_connection` (an observed connection could not be parsed), `response_limit` (the
+ * bounded read stopped before every observed response was read), `unverified_page` (inbox
+ * evidence was observed but a page of it could not be linked to the cursor chain — an
+ * unidentifiable request, an unrecognized payload, an unreadable body, or a connection with no
+ * usable terminal `page_info`), then `incomplete_chain` (recorded pages never reached a
+ * terminal page).
+ */
+export type MessengerInboxIncompleteReason =
+  | 'malformed_connection'
+  | 'response_limit'
+  | 'unverified_page'
+  | 'incomplete_chain';
+
 export interface MessengerInboxGraphQLObservation {
   recognized: boolean;
   malformed: boolean;
   empty: boolean;
   incomplete: boolean;
+  /** Present only when `incomplete` is true: which completeness condition failed (#204). */
+  incompleteReason?: MessengerInboxIncompleteReason;
   // Listing coverage (#151): true only when the observed cursor chain carried more verified
   // thread ids than the bounded snapshot returned. It never claims more than what was observed;
   // unverifiable chains stay `incomplete`, which fails closed before any listing is returned.
@@ -343,9 +363,21 @@ export class MessengerInboxGraphQLCollector {
       malformed: this.malformed,
       empty: chain.complete && !this.malformed && threadIds.length === 0,
       incomplete,
+      // The reason rides the same booleans the fail-closed decision uses, so a deployed refusal
+      // can name the completeness condition that fired without logging any page data (#204).
+      ...(incomplete ? { incompleteReason: this.incompleteReason() } : {}),
       truncated,
       threadIds
     };
+  }
+
+  private incompleteReason(): MessengerInboxIncompleteReason {
+    if (this.malformed) return 'malformed_connection';
+    if (this.responseLimitExceeded) return 'response_limit';
+    if (this.unverifiedPage) return 'unverified_page';
+    // `incomplete` is only reached here when the chain itself did not terminate: the recorded
+    // pages never reached a terminal page (a missing, unobserved, or unlinked continuation).
+    return 'incomplete_chain';
   }
 
   private getPageChain(): { pages: InboxPage[]; complete: boolean } {
