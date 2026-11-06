@@ -338,9 +338,11 @@ describe('registered tool action boundaries', () => {
       // Without a configured conversation surface the draft, send, and consumer discovery tools
       // are not live, so the live listing is the declaration map minus every conversation-gated
       // tool (each of their entries requires a backend method this registration does not wire).
+      // The messenger_meta_* tools (#195) are gated the same way on the mautrix-meta boundary,
+      // which this registration does not wire either.
       expect(registeredNames).toEqual(
         Object.keys(TOOL_DEFINITIONS)
-          .filter((name) => !['messenger_send', 'messenger_prepare', 'consumer_threads_list', 'consumer_threads_search'].includes(name))
+          .filter((name) => !['messenger_send', 'messenger_prepare', 'consumer_threads_list', 'consumer_threads_search', 'messenger_meta_threads_list', 'messenger_meta_thread_read', 'messenger_meta_thread_backfill'].includes(name))
           .sort()
       );
     } finally {
