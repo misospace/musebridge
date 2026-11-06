@@ -1,8 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { MautrixMetaClient, MautrixMetaHttpError, resolveMetaTransportBaseUrl } from '../src/mautrix-meta.js';
+import {
+  MautrixMetaClient,
+  MautrixMetaHttpError,
+  isLoopbackTransportHost,
+  isValidMautrixMetaServiceToken,
+  resolveMetaTransportBaseUrl
+} from '../src/mautrix-meta.js';
 
 const baseUrl = 'http://127.0.0.1:9000';
+const serviceToken = 'synth-service-token';
 const ok = (body: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { status, headers });
 
 const threadRow = { thread_id: 'synth-meta-thread-001', preview: 'Synthetic list preview.' };
@@ -13,15 +20,20 @@ const backfillBody = { messages: [messageRow], coverage: { window: 'backfill', s
 const bodyFor = (url: string): unknown => url.includes('before=') ? backfillBody : url.includes('/messages') ? tailBody : listBody;
 
 describe('resolveMetaTransportBaseUrl', () => {
-  it('accepts loopback http and operator-private https hosts', () => {
+  it('accepts loopback http without a credential and an operator-private https host with one', () => {
     expect(resolveMetaTransportBaseUrl('http://127.0.0.1:9000')).toBe('http://127.0.0.1:9000');
     expect(resolveMetaTransportBaseUrl('http://localhost:9000')).toBe('http://localhost:9000');
-    expect(resolveMetaTransportBaseUrl('https://meta.internal.example')).toBe('https://meta.internal.example');
+    expect(resolveMetaTransportBaseUrl('https://meta.internal.example', serviceToken)).toBe('https://meta.internal.example');
+  });
+
+  it('refuses a non-loopback destination without a credential', () => {
+    expect(() => resolveMetaTransportBaseUrl('https://meta.internal.example')).toThrow(TypeError);
+    expect(() => resolveMetaTransportBaseUrl('https://meta.internal.example')).toThrow(/MAUTRIX_META_SERVICE_TOKEN/);
   });
 
   it('strips one trailing slash', () => {
     expect(resolveMetaTransportBaseUrl('http://127.0.0.1:9000/')).toBe('http://127.0.0.1:9000');
-    expect(resolveMetaTransportBaseUrl('https://meta.internal.example/')).toBe('https://meta.internal.example');
+    expect(resolveMetaTransportBaseUrl('https://meta.internal.example/', serviceToken)).toBe('https://meta.internal.example');
   });
 
   it('refuses Meta-owned hosts by exact host and dotted subdomain', () => {
@@ -41,14 +53,14 @@ describe('resolveMetaTransportBaseUrl', () => {
   });
 
   it('accepts a trailing-dot operator-private host', () => {
-    expect(resolveMetaTransportBaseUrl('https://meta.internal.example.')).toBe('https://meta.internal.example.');
+    expect(resolveMetaTransportBaseUrl('https://meta.internal.example.', serviceToken)).toBe('https://meta.internal.example.');
   });
 
   it('accepts a Meta-lookalike suffix: only real Meta hosts are refused', () => {
     // The dotted-suffix rule is exactly what separates `checkpoint.facebook.com` (refused)
     // from `checkpoint.facebook.com.evil.example` — an unrelated host whose name merely ends
     // the way a Meta subdomain path segment does.
-    expect(resolveMetaTransportBaseUrl('https://checkpoint.facebook.com.evil.example')).toBe('https://checkpoint.facebook.com.evil.example');
+    expect(resolveMetaTransportBaseUrl('https://checkpoint.facebook.com.evil.example', serviceToken)).toBe('https://checkpoint.facebook.com.evil.example');
   });
 
   it('refuses userinfo, query, fragment, non-http(s), non-loopback http, empty host, and garbage', () => {
@@ -63,6 +75,37 @@ describe('resolveMetaTransportBaseUrl', () => {
       'not a url'
     ]) {
       expect(() => resolveMetaTransportBaseUrl(rejected)).toThrow(TypeError);
+    }
+  });
+});
+
+describe('isLoopbackTransportHost', () => {
+  it('names the loopback destinations that need no service credential', () => {
+    expect(isLoopbackTransportHost('http://127.0.0.1:9000')).toBe(true);
+    expect(isLoopbackTransportHost('http://localhost:9000')).toBe(true);
+    expect(isLoopbackTransportHost('http://[::1]:9000')).toBe(true);
+  });
+
+  it('treats every other destination as one that leaves the host', () => {
+    expect(isLoopbackTransportHost('https://meta.internal.example')).toBe(false);
+    expect(isLoopbackTransportHost('https://198.51.100.7:9000')).toBe(false);
+  });
+
+  it('refuses a destination that does not parse instead of reading it as non-loopback', () => {
+    expect(() => isLoopbackTransportHost('not a url')).toThrow(TypeError);
+  });
+});
+
+describe('isValidMautrixMetaServiceToken', () => {
+  it('accepts printable ASCII of 1 to 512 characters', () => {
+    expect(isValidMautrixMetaServiceToken('a')).toBe(true);
+    expect(isValidMautrixMetaServiceToken('A-b_0.+/=')).toBe(true);
+    expect(isValidMautrixMetaServiceToken('x'.repeat(512))).toBe(true);
+  });
+
+  it('refuses an empty value, a value with a space, a control character, and an over-long value', () => {
+    for (const invalid of ['', 'has space', 'tab\there', 'x'.repeat(513)]) {
+      expect(isValidMautrixMetaServiceToken(invalid)).toBe(false);
     }
   });
 });
@@ -175,5 +218,91 @@ describe('MautrixMetaClient', () => {
   it('drops a garbage retry-after header instead of fabricating a hint', async () => {
     const client = new MautrixMetaClient({ baseUrl, fetchImpl: async () => ok({ error: { code: 'rate_limited', message: 'Synthetic rate limit.' } }, 429, { 'retry-after': 'later' }) });
     await expect(client.listThreads(5)).rejects.toMatchObject({ status: 429, code: 'rate_limited', retryAfter: undefined });
+  });
+
+  it('sends the service credential as a Bearer authorization header on every route', async () => {
+    const seen: Headers[] = [];
+    const client = new MautrixMetaClient({ baseUrl, serviceToken, fetchImpl: async (input, init) => {
+      seen.push(new Headers(init?.headers));
+      return ok(bodyFor(String(input)));
+    } });
+    await client.listThreads(5);
+    await client.readThreadTail('synth-meta-thread-001');
+    expect(seen).toHaveLength(2);
+    for (const headers of seen) {
+      expect(headers.get('authorization')).toBe(`Bearer ${serviceToken}`);
+    }
+  });
+
+  it('sends no authorization header at all when no credential is configured', async () => {
+    const seen: Headers[] = [];
+    const client = new MautrixMetaClient({ baseUrl, fetchImpl: async (input, init) => {
+      seen.push(new Headers(init?.headers));
+      return ok(listBody);
+    } });
+    await client.listThreads(5);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.has('authorization')).toBe(false);
+  });
+
+  it('refuses a non-loopback destination without a credential', () => {
+    expect(() => new MautrixMetaClient({ baseUrl: 'https://meta.internal.example' }))
+      .toThrow(/MAUTRIX_META_SERVICE_TOKEN/);
+  });
+
+  it('refuses an invalid credential format and never echoes the value', () => {
+    const invalid = 'not a valid token';
+    let failure: unknown;
+    try {
+      new MautrixMetaClient({ baseUrl, serviceToken: invalid });
+    } catch (reason) {
+      failure = reason;
+    }
+    expect(failure).toBeInstanceOf(TypeError);
+    const message = failure instanceof Error ? failure.message : String(failure);
+    expect(message).toMatch(/MAUTRIX_META_SERVICE_TOKEN/);
+    expect(message).not.toContain(invalid);
+  });
+
+  it('refuses an invalid credential format on a non-loopback destination too', () => {
+    expect(() => new MautrixMetaClient({ baseUrl: 'https://meta.internal.example', serviceToken: 'bad token' }))
+      .toThrow(/MAUTRIX_META_SERVICE_TOKEN/);
+  });
+
+  it('refuses a blank credential on a non-loopback destination', () => {
+    // A blank value is not a credential. Treating it as one would let a non-loopback
+    // destination start without authentication.
+    for (const blank of ['', '   ']) {
+      expect(() => new MautrixMetaClient({ baseUrl: 'https://meta.internal.example', serviceToken: blank }))
+        .toThrow(/MAUTRIX_META_SERVICE_TOKEN/);
+    }
+  });
+
+  it('refuses a credential that is not a string', () => {
+    // The pattern test alone would coerce null to the text "null" and accept it.
+    expect(() => new MautrixMetaClient({ baseUrl: 'https://meta.internal.example', serviceToken: null as unknown as string }))
+      .toThrow(/MAUTRIX_META_SERVICE_TOKEN/);
+  });
+
+  it('reads the credential once, so a changing options property cannot drop it', async () => {
+    // A caller can pass an options object whose property returns a different value on each
+    // read. The value that passed the check must be the value the client sends.
+    let reads = 0;
+    const seen: Headers[] = [];
+    const options = {
+      baseUrl: 'https://meta.internal.example',
+      get serviceToken(): string | undefined {
+        reads += 1;
+        return reads === 1 ? 'synth-service-token' : undefined;
+      },
+      fetchImpl: async (_input: unknown, init: { headers?: HeadersInit } | undefined) => {
+        seen.push(new Headers(init?.headers));
+        return ok(listBody);
+      }
+    };
+    const client = new MautrixMetaClient(options as unknown as ConstructorParameters<typeof MautrixMetaClient>[0]);
+    expect(reads).toBe(1);
+    await client.listThreads(5);
+    expect(seen[0]?.get('authorization')).toBe('Bearer synth-service-token');
   });
 });

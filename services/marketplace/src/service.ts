@@ -13,7 +13,7 @@ import { ThreadsClient } from './threads.js';
 import { ThreadsApiBackend } from './threads-backend.js';
 import { FacebookMarketplaceBackend } from './facebook-marketplace-backend.js';
 import { FacebookMessengerBackend } from './facebook-messenger-backend.js';
-import { MautrixMetaClient } from './mautrix-meta.js';
+import { MautrixMetaClient, isLoopbackTransportHost, isValidMautrixMetaServiceToken } from './mautrix-meta.js';
 import { MautrixMetaApiBackend } from './mautrix-meta-backend.js';
 import { FacebookLoginCircuitBreaker } from './facebook-login-circuit-breaker.js';
 import type { FacebookMarket } from './facebook-marketplace-url.js';
@@ -99,6 +99,13 @@ export interface ServiceOptions {
   messengerTransport?: 'browser' | 'mautrix-meta';
   /** Explicit operator acknowledgement that the `mautrix-meta` transport presents Meta with an unofficial client carrying account risk; the experimental transport refuses to start without it (or `MAUTRIX_META_RISK_ACK=1`). */
   mautrixMetaRiskAcknowledged?: boolean;
+  /**
+   * Service credential for Musebridge's own `mautrix-meta` transport service; it is never a
+   * Meta credential. Environment-only (`MAUTRIX_META_SERVICE_TOKEN`), read at assembly time,
+   * and never logged, never returned in tool output, and never persisted. A non-loopback
+   * transport destination requires it, and a loopback destination needs none.
+   */
+  mautrixMetaServiceToken?: string;
   /** Internal dependency/test seam for the read-only `mautrix-meta` provider boundary. When omitted and the transport is selected, the service constructs the HTTP backend over `MAUTRIX_META_BASE_URL`. Supplying it requires `messengerTransport: 'mautrix-meta'`. */
   metaConversations?: MautrixMetaBackend;
   /** Per-call host seam for approval grants; receives the validated action request (including the payload digest) so a host can correlate it with its own approval records. Grants must come from the host, never from tool arguments; this service does not issue grants. */
@@ -208,7 +215,10 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
   // seam, whose absence is a typed `RangeError` naming the variable. The acknowledgement is
   // parsed on the experimental path only; a browser deployment never touches it. The gate
   // value is checked before the base URL so a half-configured deployment reports the missing
-  // acknowledgement first.
+  // acknowledgement first. After the destination, the live path checks the service
+  // credential: a transport service that is not on loopback must be authenticated, and a
+  // loopback sidecar needs no credential. The credential is a secret between Musebridge and
+  // its own transport service, so it is never logged and never echoed in an error.
   const messengerTransport = options.messengerTransport ?? parseMessengerTransport(process.env.MESSENGER_TRANSPORT);
   if (options.metaConversations !== undefined && messengerTransport !== 'mautrix-meta') {
     throw new TypeError('metaConversations requires messengerTransport "mautrix-meta"');
@@ -219,8 +229,27 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     if (!mautrixMetaRiskAcknowledged) {
       throw new RangeError('MAUTRIX_META_RISK_ACK=1 is required to select the experimental mautrix-meta Messenger transport; it presents Meta with an unofficial client carrying account risk (docs/mautrix-meta-transport-evaluation.md §6). Enable it only with deliberate operator acknowledgement.');
     }
-    metaConversations = options.metaConversations
-      ?? new MautrixMetaApiBackend({ client: new MautrixMetaClient({ baseUrl: requiredEnv('MAUTRIX_META_BASE_URL') }) });
+    // The service credential gate: the destination is checked before the client exists, so a
+    // transport service that leaves the host never starts an unauthenticated client. Only the
+    // live path has a destination and a credential; an injected boundary backend has neither.
+    if (options.metaConversations === undefined) {
+      const metaBaseUrl = requiredEnv('MAUTRIX_META_BASE_URL');
+      const metaServiceToken = readMautrixMetaServiceToken(options.mautrixMetaServiceToken, process.env.MAUTRIX_META_SERVICE_TOKEN);
+      if (metaServiceToken !== undefined && !isValidMautrixMetaServiceToken(metaServiceToken)) {
+        throw new RangeError('MAUTRIX_META_SERVICE_TOKEN must be 1 to 512 printable ASCII characters (0x21 to 0x7E)');
+      }
+      if (!isLoopbackTransportHost(metaBaseUrl) && metaServiceToken === undefined) {
+        throw new RangeError('MAUTRIX_META_SERVICE_TOKEN is required when MAUTRIX_META_BASE_URL points at a destination that is not loopback; the experimental transport refuses to start without it');
+      }
+      metaConversations = new MautrixMetaApiBackend({
+        client: new MautrixMetaClient({
+          baseUrl: metaBaseUrl,
+          ...(metaServiceToken === undefined ? {} : { serviceToken: metaServiceToken })
+        })
+      });
+    } else {
+      metaConversations = options.metaConversations;
+    }
   }
   const loginWaitMs = options.facebookLoginWaitMs ?? parseLoginWaitMs(process.env.FACEBOOK_LOGIN_WAIT_SECONDS);
   if (!Number.isSafeInteger(loginWaitMs) || loginWaitMs <= 0) {
@@ -677,6 +706,23 @@ export function parseMautrixMetaRiskAck(value: string | undefined): boolean {
   if (value === undefined || value === '0') return false;
   if (value === '1') return true;
   throw new RangeError('MAUTRIX_META_RISK_ACK must be "0" or "1"');
+}
+
+/**
+ * Reads the service credential for Musebridge's own mautrix-meta transport service (#195).
+ * A non-empty seam wins over the environment value. An empty or whitespace-only value
+ * counts as absent, so a blank variable never looks like a configured credential. A value
+ * that is not a string is a typed startup failure, not a crash. The value is read at
+ * assembly time only, and it is never logged, never returned in tool output, and never
+ * persisted.
+ */
+function readMautrixMetaServiceToken(seam: unknown, env: string | undefined): string | undefined {
+  if (seam !== undefined && typeof seam !== 'string') {
+    throw new RangeError('MAUTRIX_META_SERVICE_TOKEN must be 1 to 512 printable ASCII characters (0x21 to 0x7E)');
+  }
+  const candidate = typeof seam === 'string' && seam.trim() !== '' ? seam : env;
+  if (candidate === undefined || candidate.trim() === '') return undefined;
+  return candidate;
 }
 
 function requiredEnv(name: 'EBAY_CLIENT_ID' | 'EBAY_CLIENT_SECRET' | 'TICKETMASTER_API_KEY' | 'THREADS_ACCESS_TOKEN' | 'THREADS_USER_ID' | 'MAUTRIX_META_BASE_URL'): string {

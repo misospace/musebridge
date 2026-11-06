@@ -16,6 +16,7 @@ const GATED_ENV_VARS = [
   'MESSENGER_TRANSPORT',
   'MAUTRIX_META_RISK_ACK',
   'MAUTRIX_META_BASE_URL',
+  'MAUTRIX_META_SERVICE_TOKEN',
   'MARKETPLACE_BACKEND',
   'MARKETPLACE_MESSENGER',
   'MESSENGER_PROFILE_DIR',
@@ -158,6 +159,79 @@ describe('mautrix-meta transport startup gate', () => {
     const service = track(createTestService());
     expect(service.metaConversations?.name).toBe('mautrix-meta');
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses a non-loopback destination without the service credential', () => {
+    vi.stubEnv('MESSENGER_TRANSPORT', 'mautrix-meta');
+    vi.stubEnv('MAUTRIX_META_RISK_ACK', '1');
+    vi.stubEnv('MAUTRIX_META_BASE_URL', 'https://transport.internal.example');
+    expect(() => createTestService()).toThrow(RangeError);
+    expect(() => createTestService()).toThrow(/MAUTRIX_META_SERVICE_TOKEN/);
+  });
+
+  it('constructs the live backend over a non-loopback destination when the service credential is set', async () => {
+    vi.stubEnv('MESSENGER_TRANSPORT', 'mautrix-meta');
+    vi.stubEnv('MAUTRIX_META_RISK_ACK', '1');
+    vi.stubEnv('MAUTRIX_META_BASE_URL', 'https://transport.internal.example');
+    vi.stubEnv('MAUTRIX_META_SERVICE_TOKEN', 'synth-service-token');
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      throw new Error('service assembly must not touch the network');
+    });
+    const service = track(createTestService());
+    expect(service.metaConversations?.name).toBe('mautrix-meta');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('accepts the service credential seam for a non-loopback destination', () => {
+    vi.stubEnv('MESSENGER_TRANSPORT', 'mautrix-meta');
+    vi.stubEnv('MAUTRIX_META_RISK_ACK', '1');
+    vi.stubEnv('MAUTRIX_META_BASE_URL', 'https://transport.internal.example');
+    const service = track(createTestService({ mautrixMetaServiceToken: 'synth-service-token' }));
+    expect(service.metaConversations?.name).toBe('mautrix-meta');
+  });
+
+  it('refuses an invalid service credential and never echoes the value', () => {
+    vi.stubEnv('MESSENGER_TRANSPORT', 'mautrix-meta');
+    vi.stubEnv('MAUTRIX_META_RISK_ACK', '1');
+    vi.stubEnv('MAUTRIX_META_BASE_URL', 'https://transport.internal.example');
+    vi.stubEnv('MAUTRIX_META_SERVICE_TOKEN', 'not a valid token');
+    let failure: unknown;
+    try {
+      createTestService();
+    } catch (reason) {
+      failure = reason;
+    }
+    expect(failure).toBeInstanceOf(RangeError);
+    const message = failure instanceof Error ? failure.message : String(failure);
+    expect(message).toMatch(/MAUTRIX_META_SERVICE_TOKEN/);
+    expect(message).not.toContain('not a valid token');
+  });
+
+  it('treats a blank service credential as absent, so a loopback destination still starts', () => {
+    vi.stubEnv('MESSENGER_TRANSPORT', 'mautrix-meta');
+    vi.stubEnv('MAUTRIX_META_RISK_ACK', '1');
+    vi.stubEnv('MAUTRIX_META_BASE_URL', 'http://127.0.0.1:9777');
+    vi.stubEnv('MAUTRIX_META_SERVICE_TOKEN', '   ');
+    const service = track(createTestService());
+    expect(service.metaConversations?.name).toBe('mautrix-meta');
+  });
+
+  it('refuses a non-loopback destination when the service credential is blank', () => {
+    // A blank value is no credential. It must not open a non-loopback destination.
+    vi.stubEnv('MESSENGER_TRANSPORT', 'mautrix-meta');
+    vi.stubEnv('MAUTRIX_META_RISK_ACK', '1');
+    vi.stubEnv('MAUTRIX_META_BASE_URL', 'https://transport.internal.example');
+    vi.stubEnv('MAUTRIX_META_SERVICE_TOKEN', '   ');
+    expect(() => createTestService()).toThrow(RangeError);
+    expect(() => createTestService()).toThrow(/MAUTRIX_META_SERVICE_TOKEN/);
+  });
+
+  it('refuses a service credential seam that is not a string', () => {
+    vi.stubEnv('MESSENGER_TRANSPORT', 'mautrix-meta');
+    vi.stubEnv('MAUTRIX_META_RISK_ACK', '1');
+    vi.stubEnv('MAUTRIX_META_BASE_URL', 'https://transport.internal.example');
+    expect(() => createTestService({ mautrixMetaServiceToken: null as unknown as string }))
+      .toThrow(/MAUTRIX_META_SERVICE_TOKEN/);
   });
 
   it('rejects a metaConversations seam without the transport selection', () => {

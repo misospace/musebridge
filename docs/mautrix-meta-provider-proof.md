@@ -23,16 +23,18 @@ This repository-wide rule follows from the shape: no file under `services/market
 
 ## 3. Provider selection and the risk-acknowledgement gate
 
-Two environment variables, both required, checked in order (mirroring the live-Threads gate):
+Four environment variables, checked in order (mirroring the live-Threads gate):
 
 1. `MESSENGER_TRANSPORT=mautrix-meta` — explicit provider selection. Unset or `browser` keeps the shipped browser-backed path; **the default configuration starts nothing for this transport** (no client, no tools, no connection). An invalid value is a startup `RangeError`.
 2. `MAUTRIX_META_RISK_ACK=1` — explicit operator acknowledgement that this transport presents Meta with an unofficial client carrying account risk (evaluation §6). Only the literal `1` acknowledges. Missing acknowledgement is a startup `RangeError` naming the variable, and it is checked **before** the base URL so a half-configured deployment learns the risk gate first.
+3. `MAUTRIX_META_BASE_URL`: the operator's own transport service. It is required with the selection, and there is no default destination (§4). A missing value is a startup `RangeError` naming the variable.
+4. `MAUTRIX_META_SERVICE_TOKEN`: the service credential that authenticates Musebridge to its own transport service. It is not a Meta credential. It is required only when the destination is not loopback, because a loopback sidecar never leaves the host. A missing credential on a non-loopback destination is a startup `RangeError` naming the variable. An invalid value is also a startup `RangeError` naming the variable, and the error never echoes the value.
 
 Additional rules:
 
-- `MAUTRIX_META_BASE_URL` (required with the selection) is the operator's own transport service. There is no default destination (§4).
+- The service credential is read from the environment at assembly time. It is never logged, never returned in tool output, and never persisted. The client keeps it in memory only.
 - One Messenger transport per account: selecting `mautrix-meta` while the browser messenger scope would start (`MARKETPLACE_BACKEND=facebook` + `MARKETPLACE_MESSENGER=1`) is a startup `RangeError`. Two concurrent Messenger clients on one account multiply request volume against the same session — the exact risk the acknowledgement is scoped to.
-- The browser path stays the default and the fallback: unset `MESSENGER_TRANSPORT` (or the experimental transport being down) leaves the browser Messenger scope and its tools exactly as shipped; a broken transport fails its own tools with typed errors and never touches the browser session.
+- The browser path stays the default, but the fallback is manual: while `MESSENGER_TRANSPORT=mautrix-meta` is selected, the browser messenger scope is refused at startup, so the operator unsets or switches `MESSENGER_TRANSPORT` and restarts. A broken transport fails its own tools with typed errors and never touches the browser session.
 
 ## 4. The boundary API (the contract the fork service must expose)
 
@@ -52,11 +54,13 @@ Coverage truthfulness (issue rule "preserve explicit coverage/backfill semantics
 - `has_more_before` is the provider's own range disclosure (the pinned paging exposes exactly this signal). The caller-facing `truncated` is composed as `has_more_before || rows dropped by the cap`, so an unexhausted range is never reported as a complete window, and `false` appears only on a proven-exhausted range that the cap left untouched.
 - `thread_not_found` yields `NOT_FOUND`; it is never reported as an empty-but-complete window.
 
-Destination rules: `MAUTRIX_META_BASE_URL` must be an http(s) URL with no userinfo, query, or fragment; **Meta-owned hosts (`facebook.com`, `messenger.com`, `meta.com` and their subdomains) are refused** so a misconfiguration cannot turn Musebridge into a direct unofficial-API client (lookalike suffixes like `facebook.com.evil.example` are unrelated hosts and stay valid). Non-loopback destinations must use https. Loopback is the normal sidecar shape. The request carries no Musebridge-side credential, so there is no secret to exfiltrate.
+Destination rules: `MAUTRIX_META_BASE_URL` must be an http(s) URL with no userinfo, query, or fragment; **Meta-owned hosts (`facebook.com`, `messenger.com`, `meta.com` and their subdomains) are refused** so a misconfiguration cannot turn Musebridge into a direct unofficial-API client (lookalike suffixes like `facebook.com.evil.example` are unrelated hosts and stay valid). Non-loopback destinations must use https. Loopback is the normal sidecar shape.
+
+Authentication: when a service credential is configured, every request carries `Authorization: Bearer <token>`. The fork service must verify that credential and refuse an unauthenticated request. A deployment without a credential is acceptable only on loopback. The credential travels only to the fixed configured destination, and redirects stay manual, so it cannot leak to another host.
 
 ## 5. Native login, session, and E2EE state contract
 
-Native login stays inside the transport service; Musebridge never sees a password, cookie, token, or key (evaluation §5/§9):
+Native login stays inside the transport service. Musebridge never holds Meta session material: no password, no cookie, no Meta token, and no key (evaluation §5/§9). The only credential Musebridge holds is the service credential for its own transport, and it never leaves the fixed configured destination.
 
 - **Login mode:** native Messenger login only (`messenger-lite` / `messenger-lite-android` in the pinned source). The cookie flows are excluded — their login step asks for cookies copied out of a browser, which is the credential export the boundary forbids.
 - **MFA/challenge:** typed login steps presented to a human operator inside the transport service's own console. Musebridge automates nothing; outside login, blockers cross the boundary only as the typed challenge errors above, whose text sends the operator to the official app.
@@ -81,12 +85,13 @@ No test contacts the network; every transport response in tests is a synthetic f
 | Read-only thread/history/backfill over synthetic fixtures with truthful coverage | `tests/mautrix-meta-client.test.ts`, `tests/mautrix-meta-backend.test.ts` (has_more_before, cap-drop truncation, exclusive `before`, exhaustion), `tests/messenger-meta-tools.test.ts` |
 | No Messenger write tools through this provider | `tests/messenger-meta-tools.test.ts` (risk classes + scope; send/prepare stay gated on `ConversationBackend`), `tests/mautrix-meta-backend.test.ts` (no write methods present), registry gate in `tests/tools-registry.test.ts` |
 | Message content not persisted by Musebridge | no persistence code path exists: client/backend/fixture modules contain no filesystem or storage writes; `mautrix-meta.ts` §"Boundary rules" comment carries the invariant |
+| Authenticated boundary: a destination that leaves the host needs the service credential, and the credential stays on the fixed destination | `tests/mautrix-meta-client.test.ts` (credential refusal, `Bearer` header, no header without a credential), `tests/mautrix-meta-gate.test.ts` (startup refusal without the credential, startup with it) |
 | AGPL/service boundary documented | this document §2/§4 |
 | Live validation behind an operator gate | §8; the transport refuses to start without `MAUTRIX_META_RISK_ACK=1` |
 
 ## 8. Live validation (not part of this proof)
 
-Any live-account validation is a separate operator-controlled step after this synthetic proof is reviewed: publish/deploy the AGPL fork, complete a native login in its console, point `MAUTRIX_META_BASE_URL` at it, set `MAUTRIX_META_RISK_ACK=1`, then walk a live checklist (session states, challenge text routing to the official app, coverage honesty against a known thread). Nothing in this repository performs or schedules any of that.
+Any live-account validation is a separate operator-controlled step after this synthetic proof is reviewed: publish/deploy the AGPL fork, complete a native login in its console, point `MAUTRIX_META_BASE_URL` at it, set `MAUTRIX_META_RISK_ACK=1`, set `MAUTRIX_META_SERVICE_TOKEN` when the fork is not on loopback and configure the fork service to verify that credential, then walk a live checklist (session states, challenge text routing to the official app, coverage honesty against a known thread). Nothing in this repository performs or schedules any of that.
 
 ## 9. Cross-links
 

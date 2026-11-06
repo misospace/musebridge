@@ -12,6 +12,8 @@ import {
 } from '../src/backend.js';
 import type { ConversationThreadMessages } from '../src/domain.js';
 import { TOOL_DEFINITIONS, registerMarketplaceTools, type MarketplaceToolOptions } from '../src/tools.js';
+import { MautrixMetaClient } from '../src/mautrix-meta.js';
+import { MautrixMetaApiBackend } from '../src/mautrix-meta-backend.js';
 
 const META_TOOL_NAMES = ['messenger_meta_threads_list', 'messenger_meta_thread_read', 'messenger_meta_thread_backfill'] as const;
 
@@ -257,5 +259,15 @@ describe('marketplace_status meta reporting', () => {
     expect(output.ok).toBe(true);
     expect(output.messenger_transport).toBeUndefined();
     expect(output.capabilities).toContainEqual({ surface: 'messenger_meta', provider: 'facebook', backend: null });
+  });
+
+  it('never returns the service credential in the status output', async () => {
+    // The credential authenticates Musebridge to its own transport service. It stays in the
+    // client and never crosses into a tool output.
+    const client = new MautrixMetaClient({ baseUrl: 'https://transport.internal.example', serviceToken: 'synth-service-token' });
+    const backend = new MautrixMetaApiBackend({ client });
+    const output = await callTool(metaOptions(backend, { messengerTransport: 'mautrix-meta' }), 'marketplace_status', {});
+    expect(output.ok).toBe(true);
+    expect(JSON.stringify(output)).not.toContain('synth-service-token');
   });
 });
