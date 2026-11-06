@@ -46,6 +46,7 @@ export {
   type FacebookPageSnapshot
 } from './facebook.js';
 export { FIXTURE_CONVERSATIONS, FIXTURE_EVENTS, FIXTURE_LISTINGS, FixtureEventsBackend, FIXTURE_THREADS_MENTIONS, FIXTURE_THREADS_POSTS, FIXTURE_THREADS_REPLIES, FixtureThreadsBackend } from './fixtures.js';
+export { FIXTURE_META_THREADS, FixtureMautrixMetaBackend } from './mautrix-meta-fixtures.js';
 export {
   DEFAULT_FACEBOOK_MARKETS,
   MARKETPLACE_ITEM_PATH,
