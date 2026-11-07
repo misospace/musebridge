@@ -7,12 +7,12 @@
  * environment variable or option that can move a credential destination elsewhere.
  *
  * The return value is normalized from the parsed URL, never from the raw string:
- * surrounding whitespace is trimmed before parsing, and the result is the origin plus
- * the pathname, with one trailing slash stripped (the bare `/` pathname's slash is
- * dropped entirely). A trailing `?` or `#` with no content parses to an empty
- * search/hash, passes every guard, and disappears in this normalization, so the value
- * concatenated into a fetch target can never carry it. A search or hash with content
- * stays refused by the guards below.
+ * surrounding whitespace (JS trim, so Unicode forms included) is trimmed before
+ * parsing, and the result is the origin plus the pathname, with one trailing slash
+ * stripped (the bare `/` pathname's slash is dropped entirely). A trailing `?` or `#`
+ * with no content parses to an empty search/hash, passes every guard, and disappears
+ * in this normalization, so the value concatenated into a fetch target can never
+ * carry it. A search or hash with content stays refused by the guards below.
  */
 export function resolveCredentialBaseUrl(
   baseUrl: string,

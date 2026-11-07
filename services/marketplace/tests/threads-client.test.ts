@@ -219,7 +219,9 @@ describe('ThreadsClient', () => {
       '  https://graph.threads.net  ',
       'http://localhost?',
       'http://localhost#',
-      'http://localhost '
+      'http://localhost ',
+      'http://127.0.0.1:8080',
+      'http://localhost:80'
     ]) {
       let seenUrl = '';
       const client = new ThreadsClient({ ...options, baseUrl, fetchImpl: async (input) => { seenUrl = String(input); return ok({ data: [] }); } });
