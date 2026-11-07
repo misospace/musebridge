@@ -37,6 +37,28 @@ describe('resolveMetaTransportBaseUrl', () => {
     expect(resolveMetaTransportBaseUrl('https://meta.internal.example/', serviceToken)).toBe('https://meta.internal.example');
   });
 
+  it('trims surrounding whitespace', () => {
+    expect(resolveMetaTransportBaseUrl('  http://127.0.0.1:9000  ')).toBe('http://127.0.0.1:9000');
+    expect(resolveMetaTransportBaseUrl('\t https://meta.internal.example \n', serviceToken)).toBe('https://meta.internal.example');
+  });
+
+  it('strips a trailing question mark', () => {
+    expect(resolveMetaTransportBaseUrl('http://127.0.0.1:9000?')).toBe('http://127.0.0.1:9000');
+  });
+
+  it('strips a trailing hash sign', () => {
+    expect(resolveMetaTransportBaseUrl('http://127.0.0.1:9000#')).toBe('http://127.0.0.1:9000');
+  });
+
+  it('strips whitespace and a trailing question mark and hash sign together', () => {
+    expect(resolveMetaTransportBaseUrl('  http://127.0.0.1:9000/?#  ')).toBe('http://127.0.0.1:9000');
+  });
+
+  it('keeps a non-root pathname as parsed: the removed trailing slash is only the bare-host one', () => {
+    expect(resolveMetaTransportBaseUrl('http://127.0.0.1:9000/base')).toBe('http://127.0.0.1:9000/base');
+    expect(resolveMetaTransportBaseUrl('http://127.0.0.1:9000/base/')).toBe('http://127.0.0.1:9000/base/');
+  });
+
   it('refuses Meta-owned hosts by exact host and dotted subdomain', () => {
     for (const rejected of ['https://facebook.com', 'https://messenger.com', 'https://meta.com', 'https://m.facebook.com']) {
       expect(() => resolveMetaTransportBaseUrl(rejected)).toThrow(TypeError);
@@ -75,6 +97,12 @@ describe('resolveMetaTransportBaseUrl', () => {
       'meta.internal.example',
       'not a url'
     ]) {
+      expect(() => resolveMetaTransportBaseUrl(rejected)).toThrow(TypeError);
+    }
+  });
+
+  it('refuses a query or fragment with content: only an empty trailing ? or # is stripped', () => {
+    for (const rejected of ['http://127.0.0.1:9000?x=1', 'http://127.0.0.1:9000#x', 'http://127.0.0.1:9000/?x=1#y']) {
       expect(() => resolveMetaTransportBaseUrl(rejected)).toThrow(TypeError);
     }
   });
@@ -161,6 +189,16 @@ describe('MautrixMetaClient', () => {
     expect(seenUrls[0]).toBe('http://127.0.0.1:9000/v1/threads?limit=5');
     expect(seenUrls[1]).toBe('http://127.0.0.1:9000/v1/threads/t.1-2/messages');
     expect(seenUrls[2]).toBe('http://127.0.0.1:9000/v1/threads/t1/messages?before=1762000000000&limit=25');
+  });
+
+  it('requests the normalized base, not the operator string', async () => {
+    // The resolver's value is what the request is built from, so the artifacts the
+    // operator wrote — surrounding spaces, a trailing `?` or `#` — must not reach the
+    // request path.
+    let seenUrl = '';
+    const client = new MautrixMetaClient({ baseUrl: '  http://127.0.0.1:9000/?#  ', fetchImpl: async (input) => { seenUrl = String(input); return ok(listBody); } });
+    await client.listThreads(5);
+    expect(seenUrl).toBe('http://127.0.0.1:9000/v1/threads?limit=5');
   });
 
   it('percent-encodes thread ids per encodeURIComponent semantics', async () => {
