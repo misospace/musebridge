@@ -335,7 +335,10 @@ export class MautrixMetaClient {
   }
 
   private async apiRequest(path: string, signal?: AbortSignal): Promise<unknown> {
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+    // The resolver keeps a path-prefixed pathname as parsed (#210), so a base like
+    // `http://h/base/` legitimately ends with a slash. Every path here starts with one,
+    // so the join drops a single trailing slash from the base to never double it.
+    const response = await this.fetchImpl(`${this.baseUrl.replace(/\/$/, '')}${path}`, {
       method: 'GET',
       headers: {
         Accept: 'application/json',
