@@ -229,10 +229,19 @@ export function isLoopbackTransportHost(baseUrl: string): boolean {
  * A non-loopback destination needs the service credential, and a credential that is
  * configured must be well formed. A loopback destination runs without one, because the
  * traffic never leaves the host.
+ *
+ * The return value is normalized from the parsed URL, never from the raw operator string:
+ * surrounding whitespace is trimmed before parsing, and the result is the origin plus the
+ * pathname, with the trailing slash dropped only when the pathname is the bare `/`. A
+ * trailing `?` or `#` with no content parses to an empty search/hash, passes every guard,
+ * and disappears in this normalization, so the value concatenated into a fetch target can
+ * never carry it. A search or hash with content stays refused by the guards above.
  */
 export function resolveMetaTransportBaseUrl(baseUrl: string, serviceToken?: string): string {
   let parsed: URL;
-  try { parsed = new URL(baseUrl); } catch { throw new TypeError('MAUTRIX_META_BASE_URL must be a valid http(s) URL'); }
+  // Trim inside the try: a value that is not a trimmable string must fail with the same
+  // typed refusal as one that does not parse, not with a property-access error.
+  try { parsed = new URL(baseUrl.trim()); } catch { throw new TypeError('MAUTRIX_META_BASE_URL must be a valid http(s) URL'); }
   const host = canonicalHostname(parsed.hostname);
   const isLoopback = isLoopbackHostname(host);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:'
@@ -250,7 +259,9 @@ export function resolveMetaTransportBaseUrl(baseUrl: string, serviceToken?: stri
   if (!isLoopback && serviceToken === undefined) {
     throw new TypeError('MAUTRIX_META_SERVICE_TOKEN is required for a MAUTRIX_META_BASE_URL destination that is not loopback');
   }
-  return baseUrl.replace(/\/$/, '');
+  // Normalized from the parsed URL: origin plus pathname drops any empty trailing `?`/`#`
+  // the guards let through, and the bare-`/` pathname's slash is the only one removed.
+  return parsed.pathname === '/' ? parsed.origin : `${parsed.origin}${parsed.pathname}`;
 }
 
 export interface MautrixMetaClientOptions {

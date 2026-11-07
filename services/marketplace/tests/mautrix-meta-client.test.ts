@@ -37,6 +37,28 @@ describe('resolveMetaTransportBaseUrl', () => {
     expect(resolveMetaTransportBaseUrl('https://meta.internal.example/', serviceToken)).toBe('https://meta.internal.example');
   });
 
+  it('trims surrounding whitespace', () => {
+    expect(resolveMetaTransportBaseUrl('  http://127.0.0.1:9000  ')).toBe('http://127.0.0.1:9000');
+    expect(resolveMetaTransportBaseUrl('\t https://meta.internal.example \n', serviceToken)).toBe('https://meta.internal.example');
+  });
+
+  it('strips a trailing question mark', () => {
+    expect(resolveMetaTransportBaseUrl('http://127.0.0.1:9000?')).toBe('http://127.0.0.1:9000');
+  });
+
+  it('strips a trailing hash sign', () => {
+    expect(resolveMetaTransportBaseUrl('http://127.0.0.1:9000#')).toBe('http://127.0.0.1:9000');
+  });
+
+  it('strips whitespace and a trailing question mark and hash sign together', () => {
+    expect(resolveMetaTransportBaseUrl('  http://127.0.0.1:9000/?#  ')).toBe('http://127.0.0.1:9000');
+  });
+
+  it('keeps a non-root pathname as parsed: the removed trailing slash is only the bare-host one', () => {
+    expect(resolveMetaTransportBaseUrl('http://127.0.0.1:9000/base')).toBe('http://127.0.0.1:9000/base');
+    expect(resolveMetaTransportBaseUrl('http://127.0.0.1:9000/base/')).toBe('http://127.0.0.1:9000/base/');
+  });
+
   it('refuses Meta-owned hosts by exact host and dotted subdomain', () => {
     for (const rejected of ['https://facebook.com', 'https://messenger.com', 'https://meta.com', 'https://m.facebook.com']) {
       expect(() => resolveMetaTransportBaseUrl(rejected)).toThrow(TypeError);
@@ -75,6 +97,12 @@ describe('resolveMetaTransportBaseUrl', () => {
       'meta.internal.example',
       'not a url'
     ]) {
+      expect(() => resolveMetaTransportBaseUrl(rejected)).toThrow(TypeError);
+    }
+  });
+
+  it('refuses a query or fragment with content: only an empty trailing ? or # is stripped', () => {
+    for (const rejected of ['http://127.0.0.1:9000?x=1', 'http://127.0.0.1:9000#x', 'http://127.0.0.1:9000/?x=1#y']) {
       expect(() => resolveMetaTransportBaseUrl(rejected)).toThrow(TypeError);
     }
   });
