@@ -201,6 +201,32 @@ describe('MautrixMetaClient', () => {
     expect(seenUrl).toBe('http://127.0.0.1:9000/v1/threads?limit=5');
   });
 
+  it('joins a path-prefixed base with a trailing slash without doubling the slash (#214)', async () => {
+    // The resolver keeps `http://h/base/` as parsed (#210), and every request path starts
+    // with `/`. The join must not produce `http://h/base//v1/...`.
+    const seenUrls: string[] = [];
+    const client = new MautrixMetaClient({ baseUrl: 'http://127.0.0.1:9000/base/', fetchImpl: async (input) => {
+      const url = String(input);
+      seenUrls.push(url);
+      return ok(bodyFor(url));
+    } });
+    await client.listThreads(5);
+    await client.readThreadTail('t1');
+    await client.backfillThread('t1', 1762000000000, 25);
+    expect(seenUrls).toEqual([
+      'http://127.0.0.1:9000/base/v1/threads?limit=5',
+      'http://127.0.0.1:9000/base/v1/threads/t1/messages',
+      'http://127.0.0.1:9000/base/v1/threads/t1/messages?before=1762000000000&limit=25'
+    ]);
+  });
+
+  it('keeps a path-prefixed base without a trailing slash unchanged in the request (#214 regression)', async () => {
+    let seenUrl = '';
+    const client = new MautrixMetaClient({ baseUrl: 'http://127.0.0.1:9000/base', fetchImpl: async (input) => { seenUrl = String(input); return ok(listBody); } });
+    await client.listThreads(5);
+    expect(seenUrl).toBe('http://127.0.0.1:9000/base/v1/threads?limit=5');
+  });
+
   it('percent-encodes thread ids per encodeURIComponent semantics', async () => {
     let seenUrl = '';
     const client = new MautrixMetaClient({ baseUrl, fetchImpl: async (input) => { seenUrl = String(input); return ok(tailBody); } });
