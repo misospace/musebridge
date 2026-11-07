@@ -33,7 +33,7 @@ Today's six surfaces:
 | `marketplace` | `facebook` | `MarketplaceBackend` | `marketplace_search`, `marketplace_fetch`, `marketplace_status` | Browser session scope |
 | `shopping` | `ebay` | `ShoppingBackend` | `shopping_search`, `shopping_fetch` | API token, no browser |
 | `messenger` | `facebook` | `ConversationBackend` | `messenger_threads_list`, `messenger_thread_read`, `messenger_prepare`, `messenger_send` | Separate browser session scope |
-| `messenger_meta` | `facebook` | `MautrixMetaBackend` | `messenger_meta_threads_list`, `messenger_meta_thread_read`, `messenger_meta_thread_backfill` | Isolated AGPL transport service over HTTP (opt-in, disabled by default; no browser, no credentials in this process) |
+| `messenger_meta` | `facebook` | `MautrixMetaBackend` | `messenger_meta_threads_list`, `messenger_meta_thread_read`, `messenger_meta_thread_backfill` | Isolated AGPL transport service over HTTP (opt-in, disabled by default; no browser and no Meta credentials in this process; non-loopback destinations require the `MAUTRIX_META_SERVICE_TOKEN` service bearer credential) |
 | `events` | `ticketmaster` | `EventsBackend` | `events_search`, `events_fetch` | API token, no browser |
 | `social` | `threads` | `ThreadsBackend` | `threads_posts_list`, `threads_replies_list`, `threads_mentions_list` | API token, no browser |
 
