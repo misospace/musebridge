@@ -191,6 +191,16 @@ describe('MautrixMetaClient', () => {
     expect(seenUrls[2]).toBe('http://127.0.0.1:9000/v1/threads/t1/messages?before=1762000000000&limit=25');
   });
 
+  it('requests the normalized base, not the operator string', async () => {
+    // The resolver's value is what the request is built from, so the artifacts the
+    // operator wrote — surrounding spaces, a trailing `?` or `#` — must not reach the
+    // request path.
+    let seenUrl = '';
+    const client = new MautrixMetaClient({ baseUrl: '  http://127.0.0.1:9000/?#  ', fetchImpl: async (input) => { seenUrl = String(input); return ok(listBody); } });
+    await client.listThreads(5);
+    expect(seenUrl).toBe('http://127.0.0.1:9000/v1/threads?limit=5');
+  });
+
   it('percent-encodes thread ids per encodeURIComponent semantics', async () => {
     let seenUrl = '';
     const client = new MautrixMetaClient({ baseUrl, fetchImpl: async (input) => { seenUrl = String(input); return ok(tailBody); } });
