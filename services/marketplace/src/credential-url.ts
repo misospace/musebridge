@@ -6,8 +6,13 @@
  * loopback HTTP(S) exists solely as an explicit test seam. There is deliberately no
  * environment variable or option that can move a credential destination elsewhere.
  *
- * Returns the base URL with one trailing slash stripped, preserving the callers'
- * existing normalization of the raw string.
+ * The return value is normalized from the parsed URL, never from the raw string:
+ * surrounding whitespace is trimmed before parsing, and the result is the origin plus
+ * the pathname, with one trailing slash stripped (the bare `/` pathname's slash is
+ * dropped entirely). A trailing `?` or `#` with no content parses to an empty
+ * search/hash, passes every guard, and disappears in this normalization, so the value
+ * concatenated into a fetch target can never carry it. A search or hash with content
+ * stays refused by the guards below.
  */
 export function resolveCredentialBaseUrl(
   baseUrl: string,
@@ -15,12 +20,17 @@ export function resolveCredentialBaseUrl(
   allowedMessage: string
 ): string {
   let parsed: URL;
-  try { parsed = new URL(baseUrl); } catch { throw new TypeError('baseUrl must be a valid URL'); }
+  // Trim inside the try: a value that is not a trimmable string must fail with the
+  // same typed refusal as one that does not parse, not with a property-access error.
+  try { parsed = new URL(baseUrl.trim()); } catch { throw new TypeError('baseUrl must be a valid URL'); }
   const host = parsed.hostname.toLowerCase();
   const isLoopback = ['127.0.0.1', '::1', 'localhost'].includes(host);
   const isProviderHost = parsed.protocol === 'https:' && allowedHttpsHosts.includes(host);
   if (parsed.username || parsed.password || parsed.search || parsed.hash || (!isProviderHost && !(isLoopback && ['http:', 'https:'].includes(parsed.protocol)))) {
     throw new TypeError(allowedMessage);
   }
-  return baseUrl.replace(/\/$/, '');
+  // Normalized from the parsed URL: origin plus pathname drops the empty trailing
+  // `?`/`#` the guards let through, and the single trailing-slash strip keeps the
+  // supported base-path behavior (a bare `/` yields the bare origin).
+  return parsed.origin + parsed.pathname.replace(/\/$/, '');
 }

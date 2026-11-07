@@ -206,4 +206,46 @@ describe('ThreadsClient', () => {
     expect(() => new ThreadsClient({ ...options, baseUrl: 'https://user:pass@graph.threads.net' })).toThrow(TypeError);
     expect(ThreadsHttpError).toBeDefined();
   });
+
+  it('normalizes bare query/fragment markers and surrounding whitespace out of the request URL', async () => {
+    // #216: an empty trailing `?`/`#` or surrounding whitespace used to pass validation
+    // unchanged and then corrupt the concatenated API route (path moved into the query
+    // or fragment, or an invalid URL). The captured request must carry the API route in
+    // the pathname with the real query, not just construct successfully.
+    for (const baseUrl of [
+      'https://graph.threads.net?',
+      'https://graph.threads.net#',
+      'https://graph.threads.net ',
+      '  https://graph.threads.net  ',
+      'http://localhost?',
+      'http://localhost#',
+      'http://localhost '
+    ]) {
+      let seenUrl = '';
+      const client = new ThreadsClient({ ...options, baseUrl, fetchImpl: async (input) => { seenUrl = String(input); return ok({ data: [] }); } });
+      await client.listOwnPosts({ limit: 5 });
+      const url = new URL(seenUrl);
+      expect(url.pathname).toBe('/synthetic-user-id/threads');
+      expect(url.searchParams.get('limit')).toBe('5');
+      expect(url.searchParams.get('fields')).toContain('permalink');
+      expect(url.hash).toBe('');
+    }
+  });
+
+  it('preserves a supported base path when normalizing', async () => {
+    for (const baseUrl of ['http://localhost/api/v1.0', 'http://localhost/api/v1.0/']) {
+      let seenUrl = '';
+      const client = new ThreadsClient({ ...options, baseUrl, fetchImpl: async (input) => { seenUrl = String(input); return ok({ data: [] }); } });
+      await client.listOwnPosts({ limit: 5 });
+      const url = new URL(seenUrl);
+      expect(url.pathname).toBe('/api/v1.0/synthetic-user-id/threads');
+      expect(url.searchParams.get('limit')).toBe('5');
+    }
+  });
+
+  it('still refuses base URLs with a nonempty query or fragment', () => {
+    expect(() => new ThreadsClient({ ...options, baseUrl: 'http://localhost?a=1' })).toThrow(TypeError);
+    expect(() => new ThreadsClient({ ...options, baseUrl: 'http://localhost#frag' })).toThrow(TypeError);
+    expect(() => new ThreadsClient({ ...options, baseUrl: 'https://graph.threads.net?access_token=steal' })).toThrow(TypeError);
+  });
 });
