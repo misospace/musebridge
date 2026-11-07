@@ -97,7 +97,7 @@ Option 3 is the least-committal shape that fits the Section 2 conclusion (the sh
 **GO for an experimental, disabled-by-default, explicit opt-in `mautrix-meta` provider.** The operator recorded this decision on #193 on 2026-11-02, and #195 is the bounded implementation/proof issue. The first version of this document recorded NO-GO, on the boundary row in `messenger-consumer-research.md` §2 ("unofficial protocol libraries / scrapers — rejected, ToS violation and ban risk"). That row stands as the default policy; what changed is that the operator, who alone can change it, granted a narrow bounded exception for `mautrix-meta`. The policy the operator set:
 
 - **GO** for an experimental, disabled-by-default, explicit opt-in `mautrix-meta` provider.
-- Browser-backed Messenger remains the default and fallback.
+- Browser-backed Messenger remains the default, but the fallback is manual: while the experimental transport is selected, the browser messenger scope does not start, so the operator switches the transport and restarts.
 - Enabling `mautrix-meta` requires explicit provider selection **and** explicit operator acknowledgement of the Meta account-risk boundary.
 - This is a narrow exception for `mautrix-meta`, not blanket approval for arbitrary unofficial or private Meta APIs.
 - The first implementation is **read-only**: thread, history, and backfill only.
@@ -117,7 +117,7 @@ The blocker was never engineering, and Sections 2 through 5 still show that: the
 - Search scoped and disclosed as recipient/thread discovery only, per Section 4.
 - No message-content persistence, with the session-shape choice from Section 5 made explicit; E2EE path included or the coverage limitation disclosed, per Section 5.
 - Synthetic-first tests over synthetic LightSpeed table fixtures with zero Facebook requests (any real-payload capture is a separate operator-approved step); typed challenge errors only, no automation; live validation only after separate operator approval.
-- The provider cannot start without both explicit provider selection and explicit risk acknowledgement; the browser provider must stay usable when the experimental provider is disabled or broken.
+- The provider cannot start without both explicit provider selection and explicit risk acknowledgement; the browser provider stays the default and must not be touched by the experimental path — one Messenger transport per account, so with the experimental transport selected the browser messenger scope is refused at startup, and the fallback is manual: the operator unsets or switches `MESSENGER_TRANSPORT` and restarts.
 
 **Reconsideration trigger:** superseded on 2026-11-02 by the operator's bounded exception recorded on #193 and the opening of #195; the §2 row itself stands unamended as the default policy (see §9). Re-open the decision if Meta sanctions a personal-account protocol that makes this transport unnecessary, or if the operator withdraws or narrows the exception.
 
