@@ -582,6 +582,20 @@ describe('last-resort orphan termination', () => {
     expect(stub.errors).toContain('Owned browser process termination did not settle within 20 ms; abandoning it without waiting');
   });
 
+  it('records the accounting of a terminator that settles only after the abandoned wait', async () => {
+    let release!: (result: OwnedBrowserTerminationResult) => void;
+    const stub = createTerminationStub({
+      contextClose: 'hang',
+      browserMode: 'hang',
+      terminate: () => new Promise<OwnedBrowserTerminationResult>((resolve) => { release = resolve; })
+    });
+    await startAndClose(stub);
+    expect(stub.errors).toContain('Owned browser process termination did not settle within 20 ms; abandoning it without waiting');
+    release({ platformSupported: true, terminatedPids: [4242], failedPids: [] });
+    await new Promise((resolveReport) => setTimeout(resolveReport, 0));
+    expect(stub.errors).toContain('Terminated 1 orphaned browser process(es) after graceful close failed');
+  });
+
   it('escalates an abandoned context whose close hangs to owned-process termination', async () => {
     const calls: string[] = [];
     const stub = createTerminationStub({
@@ -751,7 +765,16 @@ describe.skipIf(!browserAvailable)('browser session manager', () => {
     const startedAt = Date.now();
     await manager.close();
     expect(Date.now() - startedAt).toBeLessThan(10_000);
-    expect(errors.some((message) => /Terminated \d+ orphaned browser process\(es\)/.test(message))).toBe(true);
+    // The sweep is only given the manager's settle budget. On a loaded runner Chromium can die
+    // just after that budget, so close() records the abandoned wait and the terminator's
+    // confirmed accounting lands as soon as the process is gone. Wait for that trail (bounded)
+    // instead of assuming it already arrived inside close().
+    const swept = /Terminated \d+ orphaned browser process\(es\)/;
+    const sweptDeadline = Date.now() + 10_000;
+    while (!errors.some((message) => swept.test(message)) && Date.now() < sweptDeadline) {
+      await new Promise((resolveSweepWait) => setTimeout(resolveSweepWait, 25));
+    }
+    expect(errors.some((message) => swept.test(message))).toBe(true);
 
     const reopened = makeManager(profileDir);
     await expect(reopened.runExclusive(new AbortController().signal, async (page) => {

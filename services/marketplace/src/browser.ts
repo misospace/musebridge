@@ -585,27 +585,39 @@ export class BrowserSessionManager {
    * cleanup and shutdown must continue regardless. The termination seam is also awaited under
    * the configured settle deadline: the built-in terminator is internally bounded, but a
    * custom injected implementation is untrusted, so a never-settling promise cannot hang
-   * close().
+   * close(). Abandoning that wait only stops the waiting, never the sweep: a terminator that
+   * settles after the deadline still has its final outcome logged.
    */
   private async terminateOwnedBrowserProcesses(): Promise<void> {
     try {
-      const termination = await this.settle(this.terminateOwnedProcesses(this.profileDir), this.settleTimeoutMs);
+      const ownedTermination = this.terminateOwnedProcesses(this.profileDir);
+      const termination = await this.settle(ownedTermination, this.settleTimeoutMs);
       if (!termination.settled) {
         this.logCloseFailure(`Owned browser process termination did not settle within ${this.settleTimeoutMs} ms; abandoning it without waiting`);
+        // Abandoning the wait must not abandon the accounting: the terminator keeps running,
+        // and when it finally reports, its outcome is recorded under the same guards as a
+        // timely one, so a sweep that only landed late still leaves its diagnostic trail.
+        void ownedTermination.then(
+          (result) => { this.reportTerminationResult(result); },
+          () => undefined
+        );
         return;
       }
-      const result = termination.value;
-      if (!result.platformSupported) {
-        this.logCloseFailure('Could not terminate owned browser processes: process inspection is unavailable on this platform');
-        return;
-      }
-      if (result.failedPids.length > 0) {
-        this.logCloseFailure(`Owned browser processes survived termination for ${result.failedPids.length} process(es); the profile lock may persist`);
-      } else if (result.terminatedPids.length > 0) {
-        this.logCloseFailure(`Terminated ${result.terminatedPids.length} orphaned browser process(es) after graceful close failed`);
-      }
+      this.reportTerminationResult(termination.value);
     } catch {
       this.logCloseFailure('Owned browser process termination failed unexpectedly');
+    }
+  }
+
+  private reportTerminationResult(result: OwnedBrowserTerminationResult): void {
+    if (!result.platformSupported) {
+      this.logCloseFailure('Could not terminate owned browser processes: process inspection is unavailable on this platform');
+      return;
+    }
+    if (result.failedPids.length > 0) {
+      this.logCloseFailure(`Owned browser processes survived termination for ${result.failedPids.length} process(es); the profile lock may persist`);
+    } else if (result.terminatedPids.length > 0) {
+      this.logCloseFailure(`Terminated ${result.terminatedPids.length} orphaned browser process(es) after graceful close failed`);
     }
   }
 
