@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Synthetic inbox with an unparseable GraphQL request</title></head>
+<body>
+  <main role="main">
+    <header><a href="/logout/">Log out</a><span aria-label="Your account">Synthetic account</span></header>
+    <section aria-label="Recent activity"><p>Welcome back to your account.</p></section>
+  </main>
+  <script>
+    // The #226 opaque-request drift repro: an authenticated inbox page whose GraphQL request
+    // carries no parseable operation name at all (neither operationName nor
+    // fb_api_req_friendly_name, in JSON or form encoding). The request classifies as unverified
+    // with no known inbox operation, so only a recognized connection payload could set
+    // `recognized`; the harness pairs it with a drifted payload to pin the combined-drift
+    // signature (observed=1, no known requests, no unrelated requests, recognized=false).
+    fetch('/api/graphql/inbox', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ variables: { count: 12 } }) });
+  </script>
+</body>
+</html>

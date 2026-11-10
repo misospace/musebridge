@@ -29,6 +29,7 @@ import {
   classifyMessengerThreadPage,
   interpretMessengerInboxPage,
   interpretMessengerThreadPage,
+  MESSENGER_INBOX_LAYOUT_UNRECOGNIZED,
   MESSENGER_INBOX_PAGINATION_UNVERIFIED
 } from './facebook-messenger-parse.js';
 import {
@@ -185,6 +186,11 @@ export class FacebookMessengerBackend implements ConversationBackend {
                 // request cursor it cannot contribute to a verified pagination chain.
               }
               const requestObservation = parseMessengerInboxGraphQLRequest({ body: postData, url: request.url() });
+              // Count every same-origin GraphQL response in the window by its request-side
+              // classification (#226), before the unrelated early return: the counters must
+              // measure the whole window — including traffic the connection parser never sees —
+              // so a deployed run can tell "no traffic" from "unrecognizable requests".
+              collector.observeGraphqlRequest(requestObservation);
               if (requestObservation.kind === 'unrelated') return;
               potentiallyRelevant = true;
               if (!isJsonContentType(response.headers()['content-type'])) {
@@ -266,6 +272,29 @@ export class FacebookMessengerBackend implements ConversationBackend {
       // candidate inbox shapes apart without another opaque refusal.
       if (outcome.message === MESSENGER_INBOX_PAGINATION_UNVERIFIED) {
         this.logger.error(`Facebook Messenger inbox pagination could not be verified (reason: ${graphql.incompleteReason ?? 'unknown'})`);
+      }
+      // When the read failed closed on an unrecognized layout with no recognizable inbox GraphQL
+      // traffic (#226), `incompleteReason` cannot fire (`incomplete` requires `recognized`), so
+      // record the window counters and the DOM's structural signals instead: one static line of
+      // counts and booleans only — never request/response content — whose signature distinguishes
+      // "no traffic reached the listener" (timing or page state) from "traffic whose requests
+      // were not recognizable as inbox operations" (provider request-side drift), with the DOM
+      // booleans separating a changed authenticated layout from other page states.
+      if (outcome.message === MESSENGER_INBOX_LAYOUT_UNRECOGNIZED) {
+        const counters = graphql.counters;
+        const value = (counter: number | undefined): number | string => counter ?? 'unknown';
+        this.logger.error(
+          'Facebook Messenger inbox page layout was not recognized'
+          + ` (graphql observed=${value(counters?.observedResponses)}`
+          + ` knownOperationRequests=${value(counters?.knownOperationRequests)}`
+          + ` unrelatedRequests=${value(counters?.unrelatedRequests)}`
+          + ` unreadBodies=${value(counters?.unreadBodies)}`
+          + ` recognizedPayloads=${value(counters?.recognizedPayloads)}`
+          + `; dom landmark=${extracted.signals.hasMainLandmark}`
+          + ` authenticatedMarker=${extracted.signals.hasAuthenticatedMarker}`
+          + ` threads=${extracted.threads.length}`
+          + ` emptyState=${extracted.hasEmptyStateMarker})`
+        );
       }
       this.recordObservedAuthFailure(outcome.code);
       throw new MarketplaceProviderError(outcome.code, outcome.message);
