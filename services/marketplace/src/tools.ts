@@ -618,8 +618,7 @@ export function registerMarketplaceTools(
           );
           output = { ok: true, backend: backendName, matches: page.matches, truncated: page.truncated, coverage: page.coverage };
         } else if (name === 'messenger_meta_threads_list') {
-          const meta = options.metaConversations;
-          if (!meta) throw new ProviderError('UPSTREAM_ERROR', 'The mautrix-meta Messenger transport is not configured on this deployment.');
+          const meta = requireBackend(options.metaConversations, 'The mautrix-meta Messenger transport is not configured on this deployment.');
           const listing = await runBackendOperation(
             (signal) => meta.listThreads(parsed.data as z.infer<typeof threadsListInputSchema>, signal),
             backendTimeoutMs,
@@ -628,8 +627,7 @@ export function registerMarketplaceTools(
           );
           output = { ok: true, backend: meta.name, threads: listing.threads, truncated: listing.truncated };
         } else if (name === 'messenger_meta_thread_read') {
-          const meta = options.metaConversations;
-          if (!meta) throw new ProviderError('UPSTREAM_ERROR', 'The mautrix-meta Messenger transport is not configured on this deployment.');
+          const meta = requireBackend(options.metaConversations, 'The mautrix-meta Messenger transport is not configured on this deployment.');
           const thread = await runBackendOperation(
             (signal) => meta.readThread(parsed.data as z.infer<typeof threadReadInputSchema>, signal),
             backendTimeoutMs,
@@ -646,8 +644,7 @@ export function registerMarketplaceTools(
               ...(thread.coverage ? { coverage: thread.coverage } : {})
             };
         } else if (name === 'messenger_meta_thread_backfill') {
-          const meta = options.metaConversations;
-          if (!meta) throw new ProviderError('UPSTREAM_ERROR', 'The mautrix-meta Messenger transport is not configured on this deployment.');
+          const meta = requireBackend(options.metaConversations, 'The mautrix-meta Messenger transport is not configured on this deployment.');
           const backfillInput = parsed.data as z.infer<typeof threadBackfillInputSchema>;
           const page = await runBackendOperation(
             (signal) => meta.backfillThread(backfillInput, signal),
