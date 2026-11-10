@@ -161,14 +161,15 @@ export class MautrixMetaApiBackend implements MautrixMetaBackend {
       const window = Math.min(input.limit, MAX_BACKFILL_MESSAGE_COUNT);
       const droppedByCap = Math.max(page.messages.length - window, 0);
       const messages = droppedByCap > 0 ? page.messages.slice(droppedByCap) : page.messages;
+      const hasMoreBefore = page.coverage.has_more_before || droppedByCap > 0;
       return {
         messages,
         coverage: {
           window: 'backfill',
           before: input.before,
           scanned_rows: page.coverage.scanned_rows,
-          has_more_before: page.coverage.has_more_before || droppedByCap > 0,
-          truncated: page.coverage.has_more_before || droppedByCap > 0
+          has_more_before: hasMoreBefore,
+          truncated: hasMoreBefore
         }
       };
     } catch (error) {
