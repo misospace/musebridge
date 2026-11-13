@@ -135,7 +135,8 @@ describe('Messenger inbox GraphQL pagination coverage', () => {
       empty: false,
       incomplete: false,
       truncated: false,
-      threadIds: [...firstPageIds, ...secondPageIds]
+      threadIds: [...firstPageIds, ...secondPageIds],
+      counters: { observedResponses: 0, knownOperationRequests: 0, unrelatedRequests: 0, unreadBodies: 0, recognizedPayloads: 2 }
     });
   });
 
@@ -205,7 +206,8 @@ describe('Messenger inbox GraphQL pagination coverage', () => {
     const collector = new MessengerInboxGraphQLCollector();
     observe(collector, response(edges(['12345678'])), 'cursor-one');
     expect(collector.snapshot()).toEqual({
-      recognized: true, malformed: false, empty: false, incomplete: true, incompleteReason: 'incomplete_chain', truncated: false, threadIds: []
+      recognized: true, malformed: false, empty: false, incomplete: true, incompleteReason: 'incomplete_chain', truncated: false, threadIds: [],
+      counters: { observedResponses: 0, knownOperationRequests: 0, unrelatedRequests: 0, unreadBodies: 0, recognizedPayloads: 1 }
     });
   });
 
@@ -214,7 +216,8 @@ describe('Messenger inbox GraphQL pagination coverage', () => {
     observe(collector, response(edges(['12345678']), { has_next_page: true, end_cursor: 'cursor-one' }), null);
     observe(collector, response(edges(['12345680'])), 'cursor-two');
     expect(collector.snapshot()).toEqual({
-      recognized: true, malformed: false, empty: false, incomplete: true, incompleteReason: 'incomplete_chain', truncated: false, threadIds: ['12345678']
+      recognized: true, malformed: false, empty: false, incomplete: true, incompleteReason: 'incomplete_chain', truncated: false, threadIds: ['12345678'],
+      counters: { observedResponses: 0, knownOperationRequests: 0, unrelatedRequests: 0, unreadBodies: 0, recognizedPayloads: 2 }
     });
   });
 
@@ -232,7 +235,8 @@ describe('Messenger inbox GraphQL pagination coverage', () => {
     const collector = new MessengerInboxGraphQLCollector();
     observe(collector, { errors: [{ message: 'unavailable' }] });
     expect(collector.snapshot()).toEqual({
-      recognized: true, malformed: false, empty: false, incomplete: true, incompleteReason: 'unverified_page', truncated: false, threadIds: []
+      recognized: true, malformed: false, empty: false, incomplete: true, incompleteReason: 'unverified_page', truncated: false, threadIds: [],
+      counters: { observedResponses: 0, knownOperationRequests: 0, unrelatedRequests: 0, unreadBodies: 0, recognizedPayloads: 0 }
     });
   });
 
@@ -243,7 +247,8 @@ describe('Messenger inbox GraphQL pagination coverage', () => {
     });
     collector.observe({ errors: [{ message: 'unavailable' }] }, request);
     expect(collector.snapshot()).toEqual({
-      recognized: true, malformed: false, empty: false, incomplete: true, incompleteReason: 'unverified_page', truncated: false, threadIds: []
+      recognized: true, malformed: false, empty: false, incomplete: true, incompleteReason: 'unverified_page', truncated: false, threadIds: [],
+      counters: { observedResponses: 0, knownOperationRequests: 0, unrelatedRequests: 0, unreadBodies: 0, recognizedPayloads: 0 }
     });
   });
 
@@ -271,7 +276,8 @@ describe('Messenger inbox deployed fail-closed classification (#204)', () => {
     observe(collector, response(edges(ids(1, 20)), terminal), null);
     expect(collector.snapshot()).toEqual({
       recognized: true, malformed: false, empty: false, incomplete: false, truncated: false,
-      threadIds: ids(1, 20)
+      threadIds: ids(1, 20),
+      counters: { observedResponses: 0, knownOperationRequests: 0, unrelatedRequests: 0, unreadBodies: 0, recognizedPayloads: 1 }
     });
   });
 
@@ -334,6 +340,104 @@ describe('Messenger inbox deployed fail-closed classification (#204)', () => {
     }
     expect(collector.snapshot()).toMatchObject({
       recognized: true, malformed: false, incomplete: true, incompleteReason: 'response_limit'
+    });
+  });
+});
+
+// #226: the 2026-11-10 deployed run reached a verified authenticated inbox and returned the
+// unrecognized-layout refusal with `recognized === false` — the collector observed no
+// recognizable inbox GraphQL traffic, and `incompleteReason` cannot fire on that path. The
+// window counters are the only structural evidence such a run carries, so each test here pins
+// one candidate live cause to the exact counter signature it would leave, making a single
+// operator-authorized re-validation conclusive without loosening the #97 contract.
+describe('Messenger inbox observed-window counters (#226)', () => {
+  const zeroCounters = { observedResponses: 0, knownOperationRequests: 0, unrelatedRequests: 0, unreadBodies: 0, recognizedPayloads: 0 };
+
+  it('counts every same-origin response by its request-side classification', () => {
+    const collector = new MessengerInboxGraphQLCollector();
+    // The initial page request: a known inbox operation.
+    collector.observeGraphqlRequest({ kind: 'page', cursor: null });
+    // A continuation request whose name is known but whose cursor is unusable.
+    collector.observeGraphqlRequest({ kind: 'unverified', knownInboxOperation: true });
+    // A request with a parseable operation name that is not an inbox operation.
+    collector.observeGraphqlRequest({ kind: 'unrelated' });
+    // A request with no parseable operation name at all.
+    collector.observeGraphqlRequest({ kind: 'unverified' });
+
+    expect(collector.snapshot()).toEqual({
+      recognized: false, malformed: false, empty: false, incomplete: false, truncated: false, threadIds: [],
+      counters: { observedResponses: 4, knownOperationRequests: 2, unrelatedRequests: 1, unreadBodies: 0, recognizedPayloads: 0 }
+    });
+  });
+
+  it('leaves every counter zero when the listener window saw no GraphQL traffic', () => {
+    // The settle-timing / page-issued-no-GraphQL / listener-attachment signature: the collector
+    // snapshot is the deployed run's only record, and it cannot distinguish those three — the
+    // synthetic suite excludes the third on deployed code by pinning the listener attachment.
+    const collector = new MessengerInboxGraphQLCollector();
+    expect(collector.snapshot()).toEqual({
+      recognized: false, malformed: false, empty: false, incomplete: false, truncated: false, threadIds: [],
+      counters: zeroCounters
+    });
+  });
+
+  it('records the operation-rename drift signature with no connection evidence', () => {
+    // Every observed request carries a parseable operation name that is not an inbox operation,
+    // so the handler never feeds a payload to the connection parser: `recognized` stays false.
+    const collector = new MessengerInboxGraphQLCollector();
+    collector.observeGraphqlRequest({ kind: 'unrelated' });
+    expect(collector.snapshot()).toEqual({
+      recognized: false, malformed: false, empty: false, incomplete: false, truncated: false, threadIds: [],
+      counters: { observedResponses: 1, knownOperationRequests: 0, unrelatedRequests: 1, unreadBodies: 0, recognizedPayloads: 0 }
+    });
+  });
+
+  it('records the opaque-request drift signature when no request name is parseable and no payload is recognized', () => {
+    // Unnamed requests reach the connection parser only through an observed body; a payload that
+    // is not the verified envelope records nothing on an unnamed request, so `recognized` stays
+    // false while the window demonstrably carried traffic.
+    const collector = new MessengerInboxGraphQLCollector();
+    collector.observeGraphqlRequest({ kind: 'unverified' });
+    collector.observe({ data: { viewer: { marketplaceInboxThreads: { edges: [] } } } }, { kind: 'unverified' });
+    expect(collector.snapshot()).toEqual({
+      recognized: false, malformed: false, empty: false, incomplete: false, truncated: false, threadIds: [],
+      counters: { observedResponses: 1, knownOperationRequests: 0, unrelatedRequests: 0, unreadBodies: 0, recognizedPayloads: 0 }
+    });
+  });
+
+  it('marks unread request-relevant bodies and keeps them out of the recognized-payload count', () => {
+    const collector = new MessengerInboxGraphQLCollector();
+    collector.observeGraphqlRequest({ kind: 'page', cursor: null });
+    collector.markUnobservedResponse();
+    const snapshot = collector.snapshot();
+    // An unread body is itself evidence of inbox-relevant traffic (`recognized` true), so an
+    // unreadBodies value above zero can never stand beside the unrecognized-layout outcome: the
+    // deployed log would expose such a snapshot as a collector-state inconsistency.
+    expect(snapshot).toMatchObject({
+      recognized: true, incomplete: true, incompleteReason: 'unverified_page',
+      counters: { observedResponses: 1, knownOperationRequests: 1, unrelatedRequests: 0, unreadBodies: 1, recognizedPayloads: 0 }
+    });
+  });
+
+  it('cannot produce the unrecognized-layout outcome from a request-side-recognized window', () => {
+    // The structural exclusion the classification relies on: with a known inbox request and a
+    // read body, either the payload is the verified envelope (`recognizedPayloads` counts it) or
+    // it is not (an unrelated payload on a known request still sets `recognized`). Both leave
+    // `recognized` true, so the deployed signature observed=positive beside knownOperationRequests
+    // positive on an unrecognized-layout run would mean collector state loss, not provider drift.
+    const driftedPayloadCollector = new MessengerInboxGraphQLCollector();
+    driftedPayloadCollector.observeGraphqlRequest({ kind: 'page', cursor: null });
+    driftedPayloadCollector.observe({ data: { viewer: { marketplaceInboxThreads: { edges: [] } } } }, { kind: 'page', cursor: null });
+    expect(driftedPayloadCollector.snapshot()).toMatchObject({
+      recognized: true, incomplete: true, incompleteReason: 'unverified_page',
+      counters: { observedResponses: 1, knownOperationRequests: 1, unrelatedRequests: 0, unreadBodies: 0, recognizedPayloads: 0 }
+    });
+
+    const unreadBodyCollector = new MessengerInboxGraphQLCollector();
+    unreadBodyCollector.observeGraphqlRequest({ kind: 'page', cursor: null });
+    unreadBodyCollector.markUnobservedResponse();
+    expect(unreadBodyCollector.snapshot()).toMatchObject({
+      recognized: true, counters: { knownOperationRequests: 1, unreadBodies: 1 }
     });
   });
 });
