@@ -3,7 +3,7 @@ import { PROVIDER_SESSION_ASSESSMENTS } from './browser.js';
 import { THREADS_MENTIONS_MIN_SINCE_UNIX, mentionsSinceUnixSeconds } from './threads.js';
 
 export const SCHEMA_VERSION = '1.11.0';
-export const SERVICE_VERSION = '0.1.0'; // x-release-please-version
+export const SERVICE_VERSION = '0.1.1'; // x-release-please-version
 export const MAX_QUERY_LENGTH = 256;
 export const MAX_LOCATION_LENGTH = 256;
 export const MAX_LISTING_ID_LENGTH = 128;
