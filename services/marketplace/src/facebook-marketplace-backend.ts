@@ -1,11 +1,10 @@
 import { marketplaceSearchDiagnostic, marketplaceSearchParseDiagnostic } from './facebook-marketplace-diagnostics.js';
-import { BrowserSessionManager, BrowserUnavailableError, sleepUntilAbort } from './browser.js';
+import { BrowserSessionManager, sleepUntilAbort } from './browser.js';
 import { mapBrowserOperationError } from './browser-error-mapping.js';
 import {
   fetchInputSchema,
   searchInputSchema,
   type Listing,
-  type ProviderErrorCode
 } from './domain.js';
 import { ProviderError, type MarketplaceBackend } from './backend.js';
 import {
@@ -31,10 +30,11 @@ import {
   resolveMarketplaceItemInput,
   type FacebookMarket
 } from './facebook-marketplace-url.js';
-import { assertFacebookOrigin, FacebookSessionProbe, isFacebookAuthClassCode, type FacebookProbeCode } from './facebook.js';
+import { assertFacebookOrigin, FacebookSessionProbe } from './facebook.js';
 import { FacebookCredentialLogin } from './facebook-login.js';
-import { FacebookLoginCircuitBreaker, type FacebookLoginAttemptPermit, type FacebookLoginScope } from './facebook-login-circuit-breaker.js';
-import { validateTimeout, waitForRequestBudget } from './timeout.js';
+import { FacebookLoginCircuitBreaker, type FacebookLoginScope } from './facebook-login-circuit-breaker.js';
+import { FacebookCredentialRecovery } from './facebook-credential-recovery.js';
+import { validateTimeout } from './timeout.js';
 
 /**
  * The scope this backend owns in the shared account-level login gate. The Marketplace profile is
@@ -70,9 +70,7 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
   private readonly settleTimeoutMs: number;
   private readonly maxCards: number;
   private readonly logger: Pick<Console, 'error'>;
-  private readonly loginController = new AbortController();
-  private credentialRecovery: Promise<{ recovered: boolean; code?: FacebookProbeCode }> | undefined;
-  private closePromise: Promise<void> | undefined;
+  private readonly credentialRecovery: FacebookCredentialRecovery;
 
   constructor(options: FacebookMarketplaceBackendOptions) {
     if (!options || typeof options !== 'object' || Array.isArray(options)) {
@@ -110,15 +108,18 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     // Validate during construction, with the same rules a configured markets file is held to, so
     // a bad map fails at startup instead of resolving ambiguously on every search.
     validateFacebookMarkets(this.markets);
+    this.credentialRecovery = new FacebookCredentialRecovery({
+      browser: this.browser,
+      probe: this.probe,
+      scope: LOGIN_SCOPE,
+      loginGate: this.loginGate,
+      ...(this.login !== undefined ? { login: this.login } : {}),
+      messages: { shutdown: 'Facebook backend is shutting down', loginRequired: 'Facebook Marketplace requires login.' }
+    });
   }
 
   close(): Promise<void> {
-    if (this.closePromise) return this.closePromise;
-    this.loginController.abort(new Error('Facebook backend is shutting down'));
-    this.closePromise = (async () => {
-      await this.credentialRecovery?.catch(() => undefined);
-    })();
-    return this.closePromise;
+    return this.credentialRecovery.close();
   }
 
   async search(input: ReturnType<typeof searchInputSchema.parse>, signal: AbortSignal): Promise<Listing[]> {
@@ -198,30 +199,13 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
       ...(input.max_price !== undefined ? { maxPrice: input.max_price } : {})
     });
     if (outcome.kind === 'error') {
-      this.recordObservedAuthFailure(outcome.code);
+      this.credentialRecovery.recordObservedAuthFailure(outcome.code);
       throw new ProviderError(outcome.code, outcome.message);
     }
     // Structural parse evidence for the search (#182): counts only, never card text or prices.
     this.logger.error('Facebook Marketplace search parse diagnostics:', marketplaceSearchParseDiagnostic(outcome.stats));
     if (outcome.kind === 'empty') return [];
     return [...outcome.listings];
-  }
-
-  /**
-   * A result page that itself shows a login, captcha, or checkpoint means the session this
-   * profile holds has expired or been challenged, even when the last probe assessed it usable.
-   * Downgrade the cached assessment so `marketplace_status` stops reporting the stale verdict
-   * until a probe or re-auth records a fresh one (#147).
-   */
-  private recordObservedAuthFailure(code: ProviderErrorCode): void {
-    if (!isFacebookAuthClassCode(code)) return;
-    this.browser.assessSession('session_needs_reauth');
-    // A captcha or checkpoint a page observed is a challenge only a human can clear, so it
-    // hard-opens the shared gate for every scope exactly like the probe path does (issue #144):
-    // the scope that first observes the challenge owns that open, so no other scope's request
-    // may submit credentials while it stands. A plain login requirement stays the recoverable
-    // credential path's business and never hard-opens the gate.
-    if (code !== 'LOGIN_REQUIRED') this.loginGate.recordChallenge(LOGIN_SCOPE);
   }
 
   private async ensureUsableSession(signal: AbortSignal): Promise<void> {
@@ -245,7 +229,7 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
       // Credentials are submitted only for a plain login requirement. A captcha or checkpoint
       // already means a human is needed, and re-submitting credentials there is exactly the loop
       // the manual re-auth flow exists to avoid.
-      const recovery = await this.waitForCredentialLogin(session.code, signal);
+      const recovery = await this.credentialRecovery.waitForCredentialLogin(session.code, signal);
       if (!recovery.recovered) {
         const code = recovery.code ?? session.code ?? 'SESSION_INVALID';
         const messages = {
@@ -255,7 +239,7 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
         } as const;
         throw new ProviderError(code, messages[code]);
       }
-      session = await this.confirmCredentialLogin(signal);
+      session = await this.credentialRecovery.confirmCredentialLogin(signal);
       if (session.status !== 'session_usable') {
         // A captcha or checkpoint the confirming probe observed is a challenge only a human can
         // clear, so it hard-opens the shared gate for every scope: a challenge is a fact about
@@ -278,116 +262,6 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     if (session.status === 'session_unknown') {
       // The frozen error contract has no "unverified" code; SESSION_INVALID points an operator at the re-auth console, and the message states plainly that verification failed.
       throw new ProviderError('SESSION_INVALID', 'The Facebook session could not be verified, so the request was not attempted.');
-    }
-  }
-
-  /**
-   * Submits optional credentials when the probe reported a plain login requirement, then confirms
-   * the outcome with the probe rather than trusting the login attempt's own classification.
-   *
-   * Returns the code to surface when recovery did not happen, so a challenge encountered during
-   * the attempt is reported as itself rather than as the original login requirement.
-   */
-  private async waitForCredentialLogin(
-    code: FacebookProbeCode | undefined,
-    signal: AbortSignal
-  ): Promise<{ recovered: boolean; code?: FacebookProbeCode; ownsAttempt?: boolean }> {
-    if (!this.login || code !== 'LOGIN_REQUIRED') return { recovered: false };
-    if (this.closePromise || this.loginController.signal.aborted) {
-      throw this.loginController.signal.reason ?? new Error('Facebook backend is shutting down');
-    }
-
-    let ownsAttempt = false;
-    let recovery = this.credentialRecovery;
-    if (!recovery) {
-      const permit = this.loginGate.beginAttempt(LOGIN_SCOPE);
-      if (!permit) return { recovered: false };
-      ownsAttempt = true;
-      recovery = this.startCredentialLogin(permit);
-    }
-    let outcome: { recovered: boolean; code?: FacebookProbeCode } | undefined;
-    try {
-      outcome = await waitForRequestBudget(recovery, signal);
-    } catch (error) {
-      if (signal.aborted) return { recovered: false, code: 'LOGIN_REQUIRED' };
-      throw error;
-    }
-    if (outcome === undefined) return { recovered: false, code: 'LOGIN_REQUIRED' };
-    return ownsAttempt ? { ...outcome, ownsAttempt: true } : outcome;
-  }
-
-  private async confirmCredentialLogin(signal: AbortSignal): Promise<Awaited<ReturnType<FacebookSessionProbe['probeSession']>>> {
-    try {
-      const session = await this.probe.probeSession(signal);
-      if (session.status === 'session_usable') this.loginGate.recordSuccess(LOGIN_SCOPE);
-      return session;
-    } catch (error) {
-      mapBrowserOperationError(error, signal, { fallbackMessage: 'The Facebook session could not be verified.' });
-    }
-  }
-
-  private startCredentialLogin(permit: FacebookLoginAttemptPermit): Promise<{ recovered: boolean; code?: FacebookProbeCode }> {
-    const attempt = Promise.resolve().then(() => this.performCredentialLogin(permit));
-    this.credentialRecovery = attempt;
-    void attempt.finally(() => {
-      if (this.credentialRecovery === attempt) this.credentialRecovery = undefined;
-    }).catch(() => undefined);
-    return attempt;
-  }
-
-  private async performCredentialLogin(permit: FacebookLoginAttemptPermit): Promise<{ recovered: boolean; code?: FacebookProbeCode }> {
-    // The gate arms the revocation of this attempt together with the grant, so a challenge
-    // recorded while the attempt is in flight aborts it before it can submit any further
-    // credentials. The challenge is a fact about the account, so the other scope's probe can
-    // revoke this scope's attempt too. A manual re-auth lease takes the browser profile over,
-    // so it ends the attempt the same way: the lease owns the profile from that moment, and the
-    // attempt must not submit a credential into it.
-    const attemptSignal = AbortSignal.any([this.loginController.signal, permit.signal, this.browser.profileTakeoverSignal]);
-    // A challenge recorded between the grant and this point already revoked the permit, so the
-    // attempt must not start at all: no credential is submitted.
-    if (permit.signal.aborted) {
-      this.loginGate.settleAttempt(permit, 'abandoned');
-      throw new ProviderError('LOGIN_REQUIRED', 'Facebook Marketplace requires login.');
-    }
-    // A lease that took the profile over between the grant and this point ended the attempt's
-    // access to it, so the attempt must not start at all: no credential is submitted. A takeover
-    // is not a challenge, so the attempt is abandoned and the scope spends no retry budget on it.
-    if (this.browser.profileTakeoverSignal.aborted) {
-      this.loginGate.settleAttempt(permit, 'abandoned');
-      throw new ProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
-    }
-    try {
-      const outcome = await this.login!.attempt(attemptSignal);
-      // A challenge recorded while this attempt was running revoked it, so a revoked attempt that
-      // failed is abandoned rather than counted as a failure: the scope spends no retry budget on
-      // an attempt the challenge cut short. A challenge the attempt itself hit still counts as a
-      // failed cycle for its scope, and a self-reported success still leaves an unverified claim.
-      this.loginGate.settleAttempt(permit, outcome.outcome === 'challenge'
-        ? 'challenge'
-        : outcome.outcome === 'authenticated' ? 'accepted'
-          : permit.signal.aborted ? 'abandoned' : 'failure');
-      if (outcome.outcome !== 'authenticated') {
-        return { recovered: false, ...(outcome.code !== undefined ? { code: outcome.code } : {}) };
-      }
-      return { recovered: true };
-    } catch (error) {
-      if (this.loginController.signal.aborted) {
-        this.loginGate.settleAttempt(permit, 'abandoned');
-        throw this.loginController.signal.reason ?? error;
-      }
-      if (permit.signal.aborted) {
-        // The attempt was revoked by a challenge, not by a login failure: it is abandoned, so the
-        // scope spends no retry budget on it, and the request reports the plain login requirement.
-        this.loginGate.settleAttempt(permit, 'abandoned');
-        throw new ProviderError('LOGIN_REQUIRED', 'Facebook Marketplace requires login.');
-      }
-      if (error instanceof BrowserUnavailableError) {
-        this.loginGate.settleAttempt(permit, 'abandoned');
-        throw new ProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
-      }
-      this.loginGate.settleAttempt(permit, 'failure');
-      if (error instanceof ProviderError) throw error;
-      throw new ProviderError('UPSTREAM_ERROR', 'The Facebook session could not be established.');
     }
   }
 
@@ -442,7 +316,7 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
       ...(locationMarket?.ok ? { fallbackCurrency: locationMarket.market.currency } : {})
     });
     if (outcome.kind === 'error') {
-      this.recordObservedAuthFailure(outcome.code);
+      this.credentialRecovery.recordObservedAuthFailure(outcome.code);
       throw new ProviderError(outcome.code, outcome.message);
     }
     if (outcome.kind === 'unavailable') return null;
