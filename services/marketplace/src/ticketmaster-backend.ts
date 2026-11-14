@@ -31,7 +31,12 @@ export class TicketmasterEventsBackend implements EventsBackend {
           const events: EventAvailability[] = [];
           for (const item of embedded) {
             const event = mapEvent(item);
-            if (event) events.push(event);
+            // An unmappable row is schema drift, not a result to skip: silently dropping rows
+            // turns a nonempty provider page into a partial or empty success indistinguishable
+            // from a genuine no-results search, hiding provider drift from availability
+            // decisions (#235). Mirror the fetch path, which rejects an unmappable event.
+            if (!event) throw new ProviderError('UPSTREAM_ERROR', 'The Ticketmaster search response contained an unmappable event row.');
+            events.push(event);
             if (events.length >= input.limit) break;
           }
           return events;

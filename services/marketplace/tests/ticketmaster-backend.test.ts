@@ -65,6 +65,13 @@ function coercionPayload() {
   ] } };
 }
 
+const searchPayload = (events: unknown[]) => ({ _embedded: { events }, page: { totalElements: events.length } });
+const fetchBackend = (payload: unknown) => new TicketmasterEventsBackend({
+  apiKey: 'synthetic',
+  fetchImpl: async () => Response.json(payload)
+});
+const VALID_ROW = { id: 'ok1', name: 'Synthetic Valid', url: 'https://www.ticketmaster.com/event/ok1' };
+
 describe('TicketmasterEventsBackend', () => {
   it('maps a full search event into a valid EventAvailability record', async () => {
     mode = 'normal';
@@ -229,5 +236,30 @@ describe('TicketmasterEventsBackend requestTimeoutMs validation', () => {
   });
   it.each([0, -1, 1.5, Number.NaN])('keeps rejecting invalid %s', (requestTimeoutMs) => {
     expect(() => new TicketmasterEventsBackend(options(), { requestTimeoutMs })).toThrow(RangeError);
+  });
+});
+
+describe('TicketmasterEventsBackend unmappable search rows (#235)', () => {
+  const drift = { code: 'UPSTREAM_ERROR', message: 'The Ticketmaster search response contained an unmappable event row.' };
+  it.each([
+    ['a null row', [null]],
+    ['a row missing required fields', [{ id: 'broken', name: 'Missing URL' }]],
+    ['a row rejected by the availability schema (a non-URL url string)', [{ id: 'broken', name: 'Bad URL', url: 'not-a-url' }]],
+    ['an all-invalid nonempty page', [null, { id: 'broken', name: 'Missing URL' }]],
+    ['a mixed valid/invalid page', [VALID_ROW, { id: 'broken', name: 'Missing URL' }]]
+  ])('rejects %s as a typed upstream error instead of a successful omission', async (_label, events) => {
+    await expect(fetchBackend(searchPayload(events)).search(searchInput, signal())).rejects.toMatchObject(drift);
+  });
+
+  it('still returns legitimate empty and valid search pages', async () => {
+    await expect(fetchBackend(searchPayload([])).search(searchInput, signal())).resolves.toEqual([]);
+    const events = await fetchBackend(searchPayload([VALID_ROW, { ...VALID_ROW, id: 'ok2', url: 'https://www.ticketmaster.com/event/ok2' }])).search(searchInput, signal());
+    expect(events.map((event) => event.id)).toEqual(['ok1', 'ok2']);
+  });
+
+  it('stops at the limit and never inspects rows past it', async () => {
+    const limited = eventsSearchInputSchema.parse({ query: 'synthetic', limit: 1 });
+    // The limit break precedes the second row, so only the examined prefix must map.
+    await expect(fetchBackend(searchPayload([VALID_ROW, null])).search(limited, signal())).resolves.toEqual([expect.objectContaining({ id: 'ok1' })]);
   });
 });
