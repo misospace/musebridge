@@ -18,19 +18,26 @@ export class EbayShoppingBackend implements ShoppingBackend {
     return runWithDeadline(signal, this.requestTimeoutMs, 'eBay', async (requestSignal) => {
       try {
         const payload = await this.client.searchItems(input.query, { limit: input.limit, minPrice: input.min_price, maxPrice: input.max_price }, requestSignal) as { itemSummaries?: unknown; total?: unknown };
-        if (!Array.isArray(payload?.itemSummaries)) {
-          // eBay omits itemSummaries on legitimate zero-result responses (total: 0). An absent
-          // array with no zero total is schema drift — a typed error, never a silent empty page.
-          if (payload?.total === 0) return [];
-          throw new ProviderError('UPSTREAM_ERROR', 'The eBay search response was not recognized.');
+        if (Array.isArray(payload?.itemSummaries) && payload.itemSummaries.length > 0) {
+          const offers: ProductOffer[] = [];
+          for (const item of payload.itemSummaries) {
+            const offer = mapOffer(item, false);
+            // An unmappable row is schema drift, not a result to skip: silently dropping rows
+            // turns a nonempty provider page into a partial or empty success indistinguishable
+            // from a genuine zero-result search, hiding provider drift from shopping
+            // decisions (#236). Mirror the fetch path, which rejects an unmappable item.
+            if (!offer) throw new ProviderError('UPSTREAM_ERROR', 'The eBay search response contained an unmappable item row.');
+            offers.push(offer);
+            if (offers.length >= input.limit) break;
+          }
+          return offers;
         }
-        const offers: ProductOffer[] = [];
-        for (const item of payload.itemSummaries) {
-          const offer = mapOffer(item, false);
-          if (offer) offers.push(offer);
-          if (offers.length >= input.limit) break;
-        }
-        return offers;
+        // eBay omits itemSummaries, or serves it empty, on legitimate zero-result responses
+        // (total: 0). An empty array carrying a non-zero or absent total is the same
+        // zero-item-success trap as a dropped row, so it falls through here too. An absent
+        // array with no zero total is schema drift — a typed error, never a silent empty page.
+        if (payload?.total === 0) return [];
+        throw new ProviderError('UPSTREAM_ERROR', 'The eBay search response was not recognized.');
       } catch (error) { throw mapError(error); }
     });
   }
