@@ -251,8 +251,11 @@ describe('TicketmasterEventsBackend unmappable search rows (#235)', () => {
     await expect(stubBackend(searchPayload(events)).search(searchInput, signal())).rejects.toMatchObject(drift);
   });
 
-  it('rejects an empty events array paired with a non-zero total as schema drift', async () => {
-    await expect(stubBackend({ _embedded: { events: [] }, page: { totalElements: 3 } }).search(searchInput, signal())).rejects.toMatchObject({
+  it.each([
+    ['a non-zero total', { _embedded: { events: [] }, page: { totalElements: 3 } }],
+    ['no page container at all', { _embedded: { events: [] } }]
+  ])('rejects an empty events array carrying %s as schema drift', async (_label, payload) => {
+    await expect(stubBackend(payload).search(searchInput, signal())).rejects.toMatchObject({
       code: 'UPSTREAM_ERROR', message: 'The Ticketmaster search response was not recognized.'
     });
   });
