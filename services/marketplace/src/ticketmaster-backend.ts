@@ -27,17 +27,24 @@ export class TicketmasterEventsBackend implements EventsBackend {
           limit: input.limit
         }, requestSignal) as { _embedded?: { events?: unknown }; page?: { totalElements?: unknown } };
         const embedded = payload?._embedded?.events;
-        if (Array.isArray(embedded)) {
+        if (Array.isArray(embedded) && embedded.length > 0) {
           const events: EventAvailability[] = [];
           for (const item of embedded) {
             const event = mapEvent(item);
-            if (event) events.push(event);
+            // An unmappable row is schema drift, not a result to skip: silently dropping rows
+            // turns a nonempty provider page into a partial or empty success indistinguishable
+            // from a genuine no-results search, hiding provider drift from availability
+            // decisions (#235). Mirror the fetch path, which rejects an unmappable event.
+            if (!event) throw new ProviderError('UPSTREAM_ERROR', 'The Ticketmaster search response contained an unmappable event row.');
+            events.push(event);
             if (events.length >= input.limit) break;
           }
           return events;
         }
-        // Discovery omits `_embedded.events` on legitimate zero-result responses
-        // (page.totalElements: 0). Anything else is schema drift — a typed error.
+        // Discovery omits `_embedded.events`, or serves it empty, on legitimate zero-result
+        // responses (page.totalElements: 0). An empty array with a non-zero total is the same
+        // zero-event-success trap as a dropped row, so it falls through here too. Anything
+        // else is schema drift — a typed error.
         if (payload?.page?.totalElements === 0) return [];
         throw new ProviderError('UPSTREAM_ERROR', 'The Ticketmaster search response was not recognized.');
       } catch (error) { throw mapError(error); }
