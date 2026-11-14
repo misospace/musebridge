@@ -66,7 +66,7 @@ function coercionPayload() {
 }
 
 const searchPayload = (events: unknown[]) => ({ _embedded: { events }, page: { totalElements: events.length } });
-const fetchBackend = (payload: unknown) => new TicketmasterEventsBackend({
+const stubBackend = (payload: unknown) => new TicketmasterEventsBackend({
   apiKey: 'synthetic',
   fetchImpl: async () => Response.json(payload)
 });
@@ -248,18 +248,24 @@ describe('TicketmasterEventsBackend unmappable search rows (#235)', () => {
     ['an all-invalid nonempty page', [null, { id: 'broken', name: 'Missing URL' }]],
     ['a mixed valid/invalid page', [VALID_ROW, { id: 'broken', name: 'Missing URL' }]]
   ])('rejects %s as a typed upstream error instead of a successful omission', async (_label, events) => {
-    await expect(fetchBackend(searchPayload(events)).search(searchInput, signal())).rejects.toMatchObject(drift);
+    await expect(stubBackend(searchPayload(events)).search(searchInput, signal())).rejects.toMatchObject(drift);
+  });
+
+  it('rejects an empty events array paired with a non-zero total as schema drift', async () => {
+    await expect(stubBackend({ _embedded: { events: [] }, page: { totalElements: 3 } }).search(searchInput, signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The Ticketmaster search response was not recognized.'
+    });
   });
 
   it('still returns legitimate empty and valid search pages', async () => {
-    await expect(fetchBackend(searchPayload([])).search(searchInput, signal())).resolves.toEqual([]);
-    const events = await fetchBackend(searchPayload([VALID_ROW, { ...VALID_ROW, id: 'ok2', url: 'https://www.ticketmaster.com/event/ok2' }])).search(searchInput, signal());
+    await expect(stubBackend(searchPayload([])).search(searchInput, signal())).resolves.toEqual([]);
+    const events = await stubBackend(searchPayload([VALID_ROW, { ...VALID_ROW, id: 'ok2', url: 'https://www.ticketmaster.com/event/ok2' }])).search(searchInput, signal());
     expect(events.map((event) => event.id)).toEqual(['ok1', 'ok2']);
   });
 
   it('stops at the limit and never inspects rows past it', async () => {
     const limited = eventsSearchInputSchema.parse({ query: 'synthetic', limit: 1 });
     // The limit break precedes the second row, so only the examined prefix must map.
-    await expect(fetchBackend(searchPayload([VALID_ROW, null])).search(limited, signal())).resolves.toEqual([expect.objectContaining({ id: 'ok1' })]);
+    await expect(stubBackend(searchPayload([VALID_ROW, null])).search(limited, signal())).resolves.toEqual([expect.objectContaining({ id: 'ok1' })]);
   });
 });
