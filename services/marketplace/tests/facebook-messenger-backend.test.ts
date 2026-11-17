@@ -21,7 +21,7 @@ const fixtureDir = new URL('./fixtures/facebook-messenger/', import.meta.url);
 const fixtures = new Map([
   'inbox-normal.html', 'inbox-empty.html', 'inbox-login.html', 'inbox-checkpoint.html', 'inbox-layout-changed.html',
   'inbox-buttons-graphql.html', 'inbox-buttons-graphql-delayed.html', 'inbox-buttons-graphql-paginated.html', 'inbox-buttons-graphql-stalled.html',
-  'inbox-graphql-error-dom.html',
+  'inbox-graphql-error-dom.html', 'inbox-graphql-renamed-operation.html', 'inbox-graphql-opaque-request.html',
   'thread-normal.html', 'thread-layout-changed.html', 'thread-articles-unattributed.html', 'thread-empty.html', 'thread-token-bounds.html',
   'thread-composer.html', 'thread-no-composer.html', 'thread-two-composers.html', 'thread-undated.html',
   'thread-unavailable.html', 'thread-nonexistent.html', 'thread-article-notice.html'
@@ -465,6 +465,81 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
       'UPSTREAM_ERROR',
       'The Facebook Marketplace inbox page layout was not recognized.'
     );
+  });
+
+  // The #226 deployed repro (2026-11-10): an authenticated Messenger profile, one bounded
+  // messenger_threads_list call, and the unrecognized-layout refusal — the listener window
+  // observed no recognizable inbox GraphQL traffic (`recognized === false`, so the #204
+  // incompleteReason line cannot fire) and the DOM fallback was unrecognized too. Each test
+  // drives the real collector/parser/backend over one candidate live cause and pins the exact
+  // sanitized log line a single operator-authorized re-validation would record, so its outcome
+  // is diagnostic without loosening the #97 contract. The log carries counts and booleans only.
+  describe('deployed unrecognized-layout repro (#226)', () => {
+    const layoutError = 'The Facebook Marketplace inbox page layout was not recognized.';
+
+    it('records an all-zero window when no GraphQL traffic reached the listener', async () => {
+      // The timing / page-issued-no-traffic signature: an authenticated inbox page that issues
+      // no same-origin GraphQL inside the window (or whose responses land after it — the two
+      // leave identical evidence), over a DOM the extractor cannot recognize.
+      configure('inbox-layout-changed.html');
+      const backend = createBackend({ settleTimeoutMs: 200 });
+      await expectProviderError(backend.listThreads(listInput(), new AbortController().signal), 'UPSTREAM_ERROR', layoutError);
+      expect(backendLogLines).toEqual([
+        'Facebook Messenger inbox page layout was not recognized'
+        + ' (graphql observed=0 knownOperationRequests=0 unrelatedRequests=0 unreadBodies=0 recognizedPayloads=0'
+        + '; dom landmark=true authenticatedMarker=true threads=0 emptyState=false)'
+      ]);
+    }, 15_000);
+
+    it('records the operation-rename drift signature when requests carry no inbox operation', async () => {
+      // Provider request-side drift: the page's GraphQL request no longer names an inbox
+      // operation, so even a response in the verified #64 envelope is never parsed — the
+      // request name alone keeps it out of the collector. `recognized` stays false and the
+      // counters name the window as the drift signature.
+      configure('inbox-graphql-renamed-operation.html');
+      const backend = createBackend({ settleTimeoutMs: 200 });
+      await expectProviderError(backend.listThreads(listInput(), new AbortController().signal), 'UPSTREAM_ERROR', layoutError);
+      expect(backendLogLines).toEqual([
+        'Facebook Messenger inbox page layout was not recognized'
+        + ' (graphql observed=1 knownOperationRequests=0 unrelatedRequests=1 unreadBodies=0 recognizedPayloads=0'
+        + '; dom landmark=true authenticatedMarker=true threads=0 emptyState=false)'
+      ]);
+    }, 15_000);
+
+    it('records the opaque-request signature when no request name is parseable and the payload drifted', async () => {
+      // Combined request+response drift: requests carry no parseable operation name and the
+      // response is not the verified connection shape, so nothing is recognized on either side
+      // while the window demonstrably carried one same-origin GraphQL response.
+      configure('inbox-graphql-opaque-request.html');
+      graphqlPayload = { data: { viewer: { marketplaceInboxThreads: { edges: [] } } } };
+      const backend = createBackend({ settleTimeoutMs: 200 });
+      await expectProviderError(backend.listThreads(listInput(), new AbortController().signal), 'UPSTREAM_ERROR', layoutError);
+      expect(backendLogLines).toEqual([
+        'Facebook Messenger inbox page layout was not recognized'
+        + ' (graphql observed=1 knownOperationRequests=0 unrelatedRequests=0 unreadBodies=0 recognizedPayloads=0'
+        + '; dom landmark=true authenticatedMarker=true threads=0 emptyState=false)'
+      ]);
+    }, 15_000);
+
+    it('cannot produce the layout wording from response-only envelope drift', async () => {
+      // The exclusion that makes the 2026-11-10 classification conclusive: with requests still
+      // naming the known inbox operation, a drifted response envelope is itself evidence — the
+      // collector sets `recognized` and the read fails closed through the #97 pagination refusal
+      // (the 2026-11-06 outcome), never the unrecognized-layout wording.
+      configure('inbox-buttons-graphql.html');
+      graphqlPayload = { data: { viewer: { marketplaceInboxThreads: { edges: [
+        { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654321' } } }
+      ] } } } };
+      const backend = createBackend({ settleTimeoutMs: 200 });
+      await expectProviderError(
+        backend.listThreads(listInput(), new AbortController().signal),
+        'UPSTREAM_ERROR',
+        'The Facebook Marketplace inbox pagination could not be verified; a complete thread list cannot be returned.'
+      );
+      expect(backendLogLines).toEqual([
+        'Facebook Messenger inbox pagination could not be verified (reason: unverified_page)'
+      ]);
+    }, 15_000);
   });
 
   it('requires login when the Messenger probe sees a login form and no credentials are configured', async () => {

@@ -4,6 +4,7 @@ import {
   classifyMessengerThreadPage,
   interpretMessengerInboxPage,
   interpretMessengerThreadPage,
+  MESSENGER_INBOX_LAYOUT_UNRECOGNIZED,
   MESSENGER_INBOX_PAGINATION_UNVERIFIED
 } from '../src/facebook-messenger-parse.js';
 import { MessengerInboxGraphQLCollector } from '../src/facebook-messenger-inbox-graphql.js';
@@ -755,5 +756,80 @@ describe('Deployed inbox pagination fail-closed repro (#204)', () => {
       limit: 20,
       graphql: collector.snapshot()
     })).toEqual({ kind: 'threads', threads: expectedIds.map((thread_id) => ({ thread_id })), truncated: false });
+  });
+});
+
+// The #226 deployed repro (2026-11-10): a verified authenticated session, one bounded
+// messenger_threads_list call, and the unrecognized-layout refusal — the collector observed no
+// recognizable inbox GraphQL traffic (`recognized === false`, so no `incompleteReason` exists)
+// and the authenticated DOM fallback was not recognized either. These tests pin the outcome and
+// the load-bearing classification: a response-only envelope drift cannot produce this wording.
+describe('Deployed inbox unrecognized-layout repro (#226)', () => {
+  const observedOutcome = {
+    kind: 'error',
+    code: 'UPSTREAM_ERROR',
+    message: MESSENGER_INBOX_LAYOUT_UNRECOGNIZED
+  } as const;
+
+  it('reports the observed wording for an authenticated unknown layout with no recognized traffic', () => {
+    // The 2026-11-10 shape: zero recognizable inbox GraphQL responses in the window (the
+    // collector's snapshot carries `recognized` false and no `incompleteReason`) over an
+    // authenticated DOM the extractor cannot recognize, at the expected inbox address.
+    const collector = new MessengerInboxGraphQLCollector();
+    const observation = collector.snapshot();
+    expect(observation.recognized).toBe(false);
+    expect(observation).not.toHaveProperty('incompleteReason');
+    expect(interpretMessengerInboxPage({
+      page: inbox(),
+      baseUrl: 'https://www.facebook.com',
+      inboxPath: '/marketplace/inbox/',
+      limit: 20,
+      graphql: observation
+    })).toEqual(observedOutcome);
+  });
+
+  it('reports the pagination refusal — not the layout wording — for response-only envelope drift', () => {
+    // The exclusion that makes the 2026-11-10 classification conclusive: if the requests were
+    // still recognizable inbox operations and only the response envelope drifted, the collector
+    // would set `recognized` (an unrecognized payload on a known request is itself evidence),
+    // and the read fails closed through the #97 pagination refusal instead — the 2026-11-06
+    // outcome, never the unrecognized-layout wording.
+    const collector = new MessengerInboxGraphQLCollector();
+    collector.observeGraphqlRequest({ kind: 'page', cursor: null });
+    collector.observe(
+      // The #64 request shape with a drifted response envelope: the connection field renamed.
+      { data: { viewer: { marketplaceInboxThreads: { edges: [
+        { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654321' } } }
+      ] } } } },
+      { kind: 'page', cursor: null }
+    );
+    const observation = collector.snapshot();
+    expect(observation.recognized).toBe(true);
+    expect(interpretMessengerInboxPage({
+      page: inbox(),
+      baseUrl: 'https://www.facebook.com',
+      inboxPath: '/marketplace/inbox/',
+      limit: 20,
+      graphql: observation
+    })).toEqual({
+      kind: 'error',
+      code: 'UPSTREAM_ERROR',
+      message: MESSENGER_INBOX_PAGINATION_UNVERIFIED
+    });
+  });
+
+  it('still reports the layout wording when the window carried only unrecognizable traffic', () => {
+    // The request-side drift signature end to end: renamed operations leave `recognized` false,
+    // so the authenticated-but-unrecognized DOM keeps the read on the unrecognized-layout
+    // outcome regardless of how much unrelated GraphQL traffic the window carried.
+    const collector = new MessengerInboxGraphQLCollector();
+    collector.observeGraphqlRequest({ kind: 'unrelated' });
+    expect(interpretMessengerInboxPage({
+      page: inbox(),
+      baseUrl: 'https://www.facebook.com',
+      inboxPath: '/marketplace/inbox/',
+      limit: 20,
+      graphql: collector.snapshot()
+    })).toEqual(observedOutcome);
   });
 });
