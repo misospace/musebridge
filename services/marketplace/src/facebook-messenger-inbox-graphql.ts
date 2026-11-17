@@ -37,6 +37,50 @@ export interface MessengerInboxGraphQLObservation {
   // unverifiable chains stay `incomplete`, which fails closed before any listing is returned.
   truncated: boolean;
   threadIds: string[];
+  /**
+   * Sanitized structural counters for the observed GraphQL window (#226), present on every
+   * collector snapshot. They never carry request or response content: counts only, so a deployed
+   * fail-closed read can record how much traffic the listener window saw and where recognition
+   * stopped. On the unrecognized-layout path (`recognized` false) these are the only evidence the
+   * snapshot carries — `incompleteReason` does not fire there — and they are what distinguishes
+   * "no traffic reached the listener" from "traffic whose requests were not recognizable as inbox
+   * operations".
+   */
+  counters?: MessengerInboxGraphQLWindowCounters;
+}
+
+/**
+ * The observed-traffic shape of one bounded read window (#226). Counted per same-origin
+ * `/api/graphql/` response the backend listener observed:
+ *
+ * - `observedResponses`: responses in the window at all. Zero means the listener saw no
+ *   same-origin GraphQL traffic — settle-timing variance (responses after the window), a page
+ *   that issued none, or a listener that never attached; these three leave identical counters.
+ * - `knownOperationRequests`: responses whose request referenced a known inbox operation
+ *   (the initial page request, or a continuation carrying a known name). Zero with traffic
+ *   present means no request was recognizable as an inbox operation — provider request-side
+ *   drift (a renamed operation, or request bodies that no longer carry a parseable name).
+ * - `unrelatedRequests`: responses whose request carried a parseable operation name that is not
+ *   an inbox operation. Traffic with `knownOperationRequests` zero and these nonzero is the
+ *   operation-rename drift signature.
+ * - `unreadBodies`: request-relevant responses whose body never reached the connection parser
+ *   (non-JSON content type, the read bound, a stalled or failed body read). Any nonzero value
+ *   sets `recognized`, so a snapshot with `recognized` false always has zero here — a nonzero
+ *   value beside `recognized` false would be a collector-state inconsistency.
+ * - `recognizedPayloads`: read payloads that parsed as the verified inbox connection envelope.
+ *
+ * The response-side counterpart of `knownOperationRequests`: a request-side-recognized window
+ * with `recognizedPayloads` zero cannot produce the unrecognized-layout outcome (an unrecognized
+ * payload on a known request sets `recognized`), so that signature live would indicate collector
+ * state loss rather than provider drift — the synthetic suite excludes the former on deployed
+ * code, which is what makes the drift reading conclusive.
+ */
+export interface MessengerInboxGraphQLWindowCounters {
+  observedResponses: number;
+  knownOperationRequests: number;
+  unrelatedRequests: number;
+  unreadBodies: number;
+  recognizedPayloads: number;
 }
 
 export type MessengerInboxGraphQLRequestObservation =
@@ -286,10 +330,31 @@ export class MessengerInboxGraphQLCollector {
   private unverifiedPage = false;
   private responseLimitExceeded = false;
   private recognizedResponses = 0;
+  private readonly windowCounters: MessengerInboxGraphQLWindowCounters = {
+    observedResponses: 0,
+    knownOperationRequests: 0,
+    unrelatedRequests: 0,
+    unreadBodies: 0,
+    recognizedPayloads: 0
+  };
 
   constructor(options: { maxThreads?: number; maxResponses?: number } = {}) {
     this.maxThreads = options.maxThreads ?? 20;
     this.maxResponses = options.maxResponses ?? 40;
+  }
+
+  /**
+   * Records one same-origin `/api/graphql/` response the listener observed, by its request-side
+   * classification (#226). The backend calls this for every same-origin GraphQL response in the
+   * window — including unrelated ones the connection parser must never see — before any body
+   * read, so the counters measure the window itself rather than the subset whose bodies were
+   * read. Counts only; the observation never carries request or response content.
+   */
+  observeGraphqlRequest(request: MessengerInboxGraphQLRequestObservation): void {
+    this.windowCounters.observedResponses += 1;
+    if (request.kind === 'page') this.windowCounters.knownOperationRequests += 1;
+    else if (request.kind === 'unrelated') this.windowCounters.unrelatedRequests += 1;
+    else if (request.knownInboxOperation) this.windowCounters.knownOperationRequests += 1;
   }
 
   observe(payload: unknown, request: MessengerInboxGraphQLRequestObservation = { kind: 'unverified' }): void {
@@ -304,6 +369,7 @@ export class MessengerInboxGraphQLCollector {
         return;
       }
       this.recognized = true;
+      this.windowCounters.recognizedPayloads += 1;
       if (this.recognizedResponses >= this.maxResponses) {
         this.responseLimitExceeded = true;
         return;
@@ -335,6 +401,7 @@ export class MessengerInboxGraphQLCollector {
   markUnobservedResponse(): void {
     this.recognized = true;
     this.unverifiedPage = true;
+    this.windowCounters.unreadBodies += 1;
   }
 
   snapshot(): MessengerInboxGraphQLObservation {
@@ -367,7 +434,10 @@ export class MessengerInboxGraphQLCollector {
       // can name the completeness condition that fired without logging any page data (#204).
       ...(incomplete ? { incompleteReason: this.incompleteReason() } : {}),
       truncated,
-      threadIds
+      threadIds,
+      // The window counters ride every snapshot (#226): on the unrecognized-layout path they are
+      // the only evidence the snapshot carries, and they are what the deployed log records.
+      counters: { ...this.windowCounters }
     };
   }
 

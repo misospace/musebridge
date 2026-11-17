@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Synthetic inbox with a renamed GraphQL operation</title></head>
+<body>
+  <main role="main">
+    <header><a href="/logout/">Log out</a><span aria-label="Your account">Synthetic account</span></header>
+    <section aria-label="Recent activity"><p>Welcome back to your account.</p></section>
+  </main>
+  <script>
+    // The #226 request-side drift repro: an authenticated inbox page whose GraphQL request no
+    // longer carries a known inbox operation name. The response the server pairs with this
+    // request is decided by the test harness; the request name alone keeps it out of the
+    // connection parser, so the collector's window counters record unrelatedRequests=1 while
+    // recognized stays false.
+    fetch('/api/graphql/inbox', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ operationName: 'CometMarketplaceInboxRenamedQuery', variables: { count: 12 } }) });
+  </script>
+</body>
+</html>

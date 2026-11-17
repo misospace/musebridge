@@ -57,6 +57,16 @@ export type MessengerInboxOutcome =
  */
 export const MESSENGER_INBOX_PAGINATION_UNVERIFIED = 'The Facebook Marketplace inbox pagination could not be verified; a complete thread list cannot be returned.';
 
+/**
+ * The fail-closed outcome when neither the GraphQL collector observed recognizable inbox traffic
+ * (`recognized` false) nor the DOM extraction recognized the page (#226). Shared as a constant so
+ * the backend can recognize this exact outcome when it records the sanitized window counters,
+ * the same way the pagination refusal shares its message for the #204 reason record. On this
+ * path `incompleteReason` never fires (`incomplete` requires `recognized`), so the counters are
+ * the only structural evidence the deployed run carries.
+ */
+export const MESSENGER_INBOX_LAYOUT_UNRECOGNIZED = 'The Facebook Marketplace inbox page layout was not recognized.';
+
 export function interpretMessengerInboxPage(input: {
   page: ExtractedInboxPage;
   baseUrl: string;
@@ -76,7 +86,7 @@ export function interpretMessengerInboxPage(input: {
   // read fails closed with a typed error even when the GraphQL collector verified a chain —
   // a page still carrying captcha-shaped markup never becomes a success outcome.
   if (kind === 'unknown' && (input.page.signals.hasCaptchaFrame || input.page.signals.mentionsCaptcha) && input.page.signals.captchaVisible === false) {
-    return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox page layout was not recognized.' };
+    return { kind: 'error', code: 'UPSTREAM_ERROR', message: MESSENGER_INBOX_LAYOUT_UNRECOGNIZED };
   }
   // Navigation follows redirects, so the page that rendered may not be the page that was asked
   // for. Content is only trusted from the configured inbox address; anything else is a typed
@@ -116,7 +126,7 @@ export function interpretMessengerInboxPage(input: {
   if (graphql?.recognized) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox threads could not be parsed.' };
   // Without a verified GraphQL connection the DOM anchors are the only remaining signal, and they
   // are trusted only when the page is a recognized authenticated inbox (never on an unknown layout).
-  if (kind === 'unknown') return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox page layout was not recognized.' };
+  if (kind === 'unknown') return { kind: 'error', code: 'UPSTREAM_ERROR', message: MESSENGER_INBOX_LAYOUT_UNRECOGNIZED };
   if (kind === 'empty') return { kind: 'empty' };
 
   const threads: ConversationThread[] = [];

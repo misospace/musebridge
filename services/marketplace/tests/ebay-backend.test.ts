@@ -80,8 +80,6 @@ function coercionTrapPayload() {
     // Null price value must stay null (Number(null) is 0); renewed is refurbished; the
     // FREE shipping marker is shippingCostType on the option, not a field on the cost.
     { itemId: 'v1|2001|0', itemWebUrl: 'https://www.ebay.com/itm/2001', title: 'Synthetic Null Price', price: { value: null, currency: 'USD' }, condition: 'Renewed', shippingOptions: [{ shippingCostType: 'FREE', shippingCost: { value: '0.00', currency: 'USD' } }] },
-    // A numeric price with no currency marker is unattributable and must be dropped.
-    { itemId: 'v1|2002|0', itemWebUrl: 'https://www.ebay.com/itm/2002', title: 'Synthetic No Currency', price: { value: '12.50' } },
     // An unspecified shipping value is not free (Number('') is 0).
     { itemId: 'v1|2003|0', itemWebUrl: 'https://www.ebay.com/itm/2003', title: 'Synthetic Empty Shipping', price: { value: '5.00', currency: 'USD' }, shippingOptions: [{ shippingCostType: 'FIXED', shippingCost: { value: '', currency: 'USD' } }] }
   ] };
@@ -113,9 +111,11 @@ describe('EbayShoppingBackend', () => {
     await backend().search(searchInput, signal());
     expect(lastMarketplaceId).toBe('EBAY_US');
   });
-  it('skips unmappable search rows and fails closed on a fetch without URL', async () => {
+  it('rejects a mixed valid/invalid search page and fails closed on a fetch without URL', async () => {
     mode = 'unmappable';
-    expect(await backend().search(searchInput, signal())).toHaveLength(1);
+    await expect(backend().search(searchInput, signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The eBay search response contained an unmappable item row.'
+    });
     mode = 'missing-url';
     await expect(backend().fetch(shoppingFetchInputSchema.parse({ id: '123' }), signal())).rejects.toMatchObject({ code: 'UPSTREAM_ERROR' });
   });
@@ -206,6 +206,55 @@ describe('EbayShoppingBackend', () => {
     expect(error.code).toBe('RATE_LIMITED');
     expect(error.metadata.retry_after).toBeUndefined();
     expect('retry_after' in error.metadata).toBe(false);
+  });
+});
+
+describe('EbayShoppingBackend unmappable search rows (#236)', () => {
+  const VALID_ROW = { itemId: 'v1|7001|0', itemWebUrl: 'https://www.ebay.com/itm/7001', title: 'Synthetic Valid', price: { value: '5.00', currency: 'USD' } };
+  const NO_CURRENCY_ROW = { itemId: 'v1|2002|0', itemWebUrl: 'https://www.ebay.com/itm/2002', title: 'Synthetic No Currency', price: { value: '12.50' } };
+  const drift = { code: 'UPSTREAM_ERROR', message: 'The eBay search response contained an unmappable item row.' };
+  const searchPayload = (itemSummaries: unknown[]) => ({ itemSummaries, total: itemSummaries.length });
+  const stubBackend = (payload: unknown) => new EbayShoppingBackend({
+    clientId: 'synthetic',
+    clientSecret: 'synthetic',
+    baseUrl: 'http://127.0.0.1:1',
+    fetchImpl: async (input) => Response.json(
+      String(input).includes('/oauth2/token') ? { access_token: 'synthetic', expires_in: 3600 } : payload
+    )
+  });
+
+  it.each([
+    ['a null row', [null]],
+    ['a row missing required fields', [{ itemId: 'broken', title: 'Missing URL' }]],
+    ['a row rejected by the public offer schema (a non-URL itemWebUrl string)', [{ itemId: 'broken', itemWebUrl: 'not-a-url', title: 'Bad URL' }]],
+    ['a numeric price with no currency marker (unattributable, never a fabricated currency)', [NO_CURRENCY_ROW]],
+    ['an all-invalid nonempty page', [null, { itemId: 'broken', title: 'Missing URL' }]],
+    ['a mixed valid/invalid page', [VALID_ROW, { itemId: 'broken', title: 'Missing URL' }]]
+  ])('rejects %s as a typed upstream error instead of a successful omission', async (_label, itemSummaries) => {
+    await expect(stubBackend(searchPayload(itemSummaries)).search(searchInput, signal())).rejects.toMatchObject(drift);
+  });
+
+  it.each([
+    ['a non-zero total', { itemSummaries: [], total: 3 }],
+    ['no total at all', { itemSummaries: [] }]
+  ])('rejects an empty itemSummaries array carrying %s as schema drift', async (_label, payload) => {
+    await expect(stubBackend(payload).search(searchInput, signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The eBay search response was not recognized.'
+    });
+  });
+
+  it('still returns legitimate empty and valid search pages', async () => {
+    // eBay omits itemSummaries on zero-result responses, and may serve it empty with total: 0.
+    await expect(stubBackend({ total: 0 }).search(searchInput, signal())).resolves.toEqual([]);
+    await expect(stubBackend({ itemSummaries: [], total: 0 }).search(searchInput, signal())).resolves.toEqual([]);
+    const offers = await stubBackend(searchPayload([VALID_ROW, { ...VALID_ROW, itemId: 'v1|7002|0', itemWebUrl: 'https://www.ebay.com/itm/7002' }])).search(searchInput, signal());
+    expect(offers.map((offer) => offer.id)).toEqual(['v1|7001|0', 'v1|7002|0']);
+  });
+
+  it('stops at the limit and never inspects rows past it', async () => {
+    const limited = shoppingSearchInputSchema.parse({ query: 'synthetic', limit: 1 });
+    // The limit break precedes the second row, so only the examined prefix must map.
+    await expect(stubBackend(searchPayload([VALID_ROW, null])).search(limited, signal())).resolves.toEqual([expect.objectContaining({ id: 'v1|7001|0' })]);
   });
 });
 
