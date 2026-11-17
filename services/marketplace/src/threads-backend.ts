@@ -25,43 +25,17 @@ export class ThreadsApiBackend implements ThreadsBackend {
   async listOwnPosts(input: Parameters<ThreadsBackend['listOwnPosts']>[0], signal: AbortSignal): Promise<ThreadsPostPage> {
     return runWithDeadline(signal, this.requestTimeoutMs, 'Threads', async (requestSignal) => {
       try {
-        const seen = new Set<string>();
-        const posts: ThreadsPost[] = [];
-        let after: string | undefined;
-        let truncated = false;
-        for (let page = 0; page < MAX_THREADS_PAGES; page++) {
-          const payload = await this.client.listOwnPosts({
+        const { items: posts, truncated } = await collectCursorPages({
+          fetchPage: (after, requestSignal) => this.client.listOwnPosts({
             limit: input.limit,
             ...(input.since !== undefined ? { since: input.since } : {}),
             ...(after !== undefined ? { after } : {})
-          }, requestSignal);
-          const data = requireDataArray(payload);
-          // A non-array `data` is schema drift, never a silent empty page; `{data: []}` is
-          // the documented legitimate zero-result page and returns [].
-          if (data === null) throw new ProviderError('UPSTREAM_ERROR', 'The Threads posts response was not recognized.');
-          const next = cursorAfter(payload);
-          // Only unconsumed items in *this* page (or a live cursor) mean more results may
-          // exist; hitting the limit on the final item of an exhausted page is complete.
-          let moreInPage = false;
-          for (let index = 0; index < data.length; index++) {
-            const post = mapPost(data[index]);
-            if (!post) throw new ProviderError('UPSTREAM_ERROR', 'The Threads posts response was not recognized.');
-            if (seen.has(post.id)) continue;
-            seen.add(post.id);
-            posts.push(post);
-            if (posts.length >= input.limit) { moreInPage = index < data.length - 1; break; }
-          }
-          if (posts.length >= input.limit) {
-            truncated = moreInPage || next !== undefined;
-            break;
-          }
-          if (next === undefined) {
-            truncated = false;
-            break;
-          }
-          after = next;
-          if (page === MAX_THREADS_PAGES - 1) truncated = true;
-        }
+          }, requestSignal),
+          mapItem: mapPost,
+          cap: input.limit,
+          unrecognizedMessage: 'The Threads posts response was not recognized.',
+          signal: requestSignal
+        });
         return { posts, truncated };
       } catch (error) { throw mapError(error); }
     });
@@ -70,41 +44,17 @@ export class ThreadsApiBackend implements ThreadsBackend {
   async listMentions(input: Parameters<ThreadsBackend['listMentions']>[0], signal: AbortSignal): Promise<ThreadsMentionPage> {
     return runWithDeadline(signal, this.requestTimeoutMs, 'Threads', async (requestSignal) => {
       try {
-        const seen = new Set<string>();
-        const mentions: ThreadsPost[] = [];
-        let after: string | undefined;
-        let truncated = false;
-        for (let page = 0; page < MAX_THREADS_PAGES; page++) {
-          const payload = await this.client.listMentions({
+        const { items: mentions, truncated } = await collectCursorPages({
+          fetchPage: (after, requestSignal) => this.client.listMentions({
             limit: input.limit,
             ...(input.since !== undefined ? { since: input.since } : {}),
             ...(after !== undefined ? { after } : {})
-          }, requestSignal);
-          const data = requireDataArray(payload);
-          // Same fail-closed rule as posts: a non-array `data` is schema drift, never a
-          // silent empty page; `{data: []}` is the legitimate zero-result page.
-          if (data === null) throw new ProviderError('UPSTREAM_ERROR', 'The Threads mentions response was not recognized.');
-          const next = cursorAfter(payload);
-          let moreInPage = false;
-          for (let index = 0; index < data.length; index++) {
-            const mention = mapPost(data[index]);
-            if (!mention) throw new ProviderError('UPSTREAM_ERROR', 'The Threads mentions response was not recognized.');
-            if (seen.has(mention.id)) continue;
-            seen.add(mention.id);
-            mentions.push(mention);
-            if (mentions.length >= input.limit) { moreInPage = index < data.length - 1; break; }
-          }
-          if (mentions.length >= input.limit) {
-            truncated = moreInPage || next !== undefined;
-            break;
-          }
-          if (next === undefined) {
-            truncated = false;
-            break;
-          }
-          after = next;
-          if (page === MAX_THREADS_PAGES - 1) truncated = true;
-        }
+          }, requestSignal),
+          mapItem: mapPost,
+          cap: input.limit,
+          unrecognizedMessage: 'The Threads mentions response was not recognized.',
+          signal: requestSignal
+        });
         return { mentions, truncated };
       } catch (error) { throw mapError(error); }
     });
@@ -113,40 +63,16 @@ export class ThreadsApiBackend implements ThreadsBackend {
   async listReplies(input: Parameters<ThreadsBackend['listReplies']>[0], signal: AbortSignal): Promise<ThreadsReplyPage | null> {
     return runWithDeadline(signal, this.requestTimeoutMs, 'Threads', async (requestSignal) => {
       try {
-        const seen = new Set<string>();
-        const replies: ThreadsReply[] = [];
-        let after: string | undefined;
-        let truncated = false;
-        for (let page = 0; page < MAX_THREADS_PAGES; page++) {
-          const payload = await this.client.listReplies({
+        const { items: replies, truncated } = await collectCursorPages({
+          fetchPage: (after, requestSignal) => this.client.listReplies({
             mediaId: input.media_id,
             ...(after !== undefined ? { after } : {})
-          }, requestSignal);
-          const data = requireDataArray(payload);
-          if (data === null) throw new ProviderError('UPSTREAM_ERROR', 'The Threads replies response was not recognized.');
-          const next = cursorAfter(payload);
-          // Only unconsumed items in *this* page (or a live cursor) mean more results may
-          // exist; hitting the cap on the final item of an exhausted page is complete.
-          let moreInPage = false;
-          for (let index = 0; index < data.length; index++) {
-            const reply = mapReply(data[index], input.media_id);
-            if (!reply) throw new ProviderError('UPSTREAM_ERROR', 'The Threads replies response was not recognized.');
-            if (seen.has(reply.id)) continue;
-            seen.add(reply.id);
-            replies.push(reply);
-            if (replies.length >= MAX_THREADS_REPLY_COUNT) { moreInPage = index < data.length - 1; break; }
-          }
-          if (replies.length >= MAX_THREADS_REPLY_COUNT) {
-            truncated = moreInPage || next !== undefined;
-            break;
-          }
-          if (next === undefined) {
-            truncated = false;
-            break;
-          }
-          after = next;
-          if (page === MAX_THREADS_PAGES - 1) truncated = true;
-        }
+          }, requestSignal),
+          mapItem: (value) => mapReply(value, input.media_id),
+          cap: MAX_THREADS_REPLY_COUNT,
+          unrecognizedMessage: 'The Threads replies response was not recognized.',
+          signal: requestSignal
+        });
         return { replies, truncated };
       } catch (error) {
         // A missing media is the house "no result" case: return null and let the tool layer
@@ -157,6 +83,51 @@ export class ThreadsApiBackend implements ThreadsBackend {
     });
   }
 
+}
+
+// The one bounded cursor walk behind listOwnPosts, listMentions, and listReplies: follow at
+// most MAX_THREADS_PAGES upstream pages, mapping each row and dropping duplicates by id, and
+// stop at `cap` collected items. A non-array `data` page and an unmappable row are schema
+// drift reported with the surface's own message — never a silent empty page. Only unconsumed
+// items in *this* page (or a live cursor) mean more results may exist: hitting the cap on the
+// final item of an exhausted page is complete.
+async function collectCursorPages<T extends { readonly id: string }>(input: {
+  fetchPage: (after: string | undefined, signal: AbortSignal) => Promise<unknown>;
+  mapItem: (value: unknown) => T | null;
+  cap: number;
+  unrecognizedMessage: string;
+  signal: AbortSignal;
+}): Promise<{ items: T[]; truncated: boolean }> {
+  const seen = new Set<string>();
+  const items: T[] = [];
+  let after: string | undefined;
+  let truncated = false;
+  for (let page = 0; page < MAX_THREADS_PAGES; page++) {
+    const payload = await input.fetchPage(after, input.signal);
+    const data = requireDataArray(payload);
+    if (data === null) throw new ProviderError('UPSTREAM_ERROR', input.unrecognizedMessage);
+    const next = cursorAfter(payload);
+    let moreInPage = false;
+    for (let index = 0; index < data.length; index++) {
+      const item = input.mapItem(data[index]);
+      if (!item) throw new ProviderError('UPSTREAM_ERROR', input.unrecognizedMessage);
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      items.push(item);
+      if (items.length >= input.cap) { moreInPage = index < data.length - 1; break; }
+    }
+    if (items.length >= input.cap) {
+      truncated = moreInPage || next !== undefined;
+      break;
+    }
+    if (next === undefined) {
+      truncated = false;
+      break;
+    }
+    after = next;
+    if (page === MAX_THREADS_PAGES - 1) truncated = true;
+  }
+  return { items, truncated };
 }
 
 function mapError(error: unknown): ProviderError {
