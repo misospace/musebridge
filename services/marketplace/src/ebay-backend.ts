@@ -144,35 +144,40 @@ function legacyIdFromUrl(value: string): string | null {
 // deliberately limited: "Like New" contains "new" but eBay defines it as an opened,
 // potentially used condition, so anything not recognized here or by the unambiguous family
 // fallbacks below maps to 'unknown' rather than guessed newness.
-const CONDITION_EXACT: Readonly<Record<string, ProductOffer['condition']>> = {
-  'new': 'new',
-  'brand new': 'new',
-  'new other (see details)': 'new',
-  'new with defects': 'new',
-  'new in box': 'new',
-  'new without box': 'new',
-  'like new': 'used',
-  'like_new': 'used',
-  'used - like new': 'used',
-  'certified refurbished': 'refurbished',
-  'excellent - refurbished': 'refurbished',
-  'very good - refurbished': 'refurbished',
-  'good - refurbished': 'refurbished',
-  'seller refurbished': 'refurbished',
-  'used': 'used',
-  'excellent - used': 'used',
-  'very good - used': 'used',
-  'good - used': 'used',
-  'acceptable - used': 'used',
-  'pre-owned': 'used',
-  'open box': 'used',
-  'for parts or not working': 'unknown'
-};
+// The lookup is a Map, not a plain object: a plain-object index resolved inherited
+// prototype keys like `constructor` and `__proto__` to truthy members, so they short-circuited
+// the fallback chain instead of mapping to 'unknown' (#248). A Map only answers with the
+// explicit documented keys.
+const CONDITION_EXACT = new Map<string, ProductOffer['condition']>([
+  ['new', 'new'],
+  ['brand new', 'new'],
+  ['new other (see details)', 'new'],
+  ['new with defects', 'new'],
+  ['new in box', 'new'],
+  ['new without box', 'new'],
+  ['like new', 'used'],
+  ['like_new', 'used'],
+  ['used - like new', 'used'],
+  ['certified refurbished', 'refurbished'],
+  ['excellent - refurbished', 'refurbished'],
+  ['very good - refurbished', 'refurbished'],
+  ['good - refurbished', 'refurbished'],
+  ['seller refurbished', 'refurbished'],
+  ['used', 'used'],
+  ['excellent - used', 'used'],
+  ['very good - used', 'used'],
+  ['good - used', 'used'],
+  ['acceptable - used', 'used'],
+  ['pre-owned', 'used'],
+  ['open box', 'used'],
+  ['for parts or not working', 'unknown']
+]);
 
 function condition(value: unknown): ProductOffer['condition'] {
   if (typeof value !== 'string') return 'unknown';
-  const exact = CONDITION_EXACT[value.trim().toLowerCase()];
-  if (exact) return exact;
+  const exact = CONDITION_EXACT.get(value.trim().toLowerCase());
+  // Presence, not truthiness: 'for parts or not working' maps to an explicit 'unknown'.
+  if (exact !== undefined) return exact;
   const lower = value.toLowerCase();
   // Only unambiguous families fall back to substring matching; 'new' is not one of them.
   if (lower.includes('refurb') || lower.includes('renewed')) return 'refurbished';

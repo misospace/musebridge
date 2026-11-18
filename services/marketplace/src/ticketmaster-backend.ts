@@ -176,17 +176,21 @@ function mapEvent(value: unknown): EventAvailability | null {
 
 // Discovery exposes event-level on-sale state, not seat-level inventory, so it can never
 // prove `sold_out`; that status is fixture-only. Unrecognized codes stay `unknown`.
-const EVENT_STATUS: Readonly<Record<string, EventAvailability['status']>> = {
-  onsale: 'on_sale',
-  offsale: 'off_sale',
-  cancelled: 'cancelled',
-  postponed: 'postponed',
-  rescheduled: 'rescheduled'
-};
+// The lookup is a Map, not a plain object: a plain-object index resolved inherited
+// prototype keys like `constructor` and `__proto__` to truthy members, so `?? 'unknown'`
+// never fired and such a code mapped to a prototype value instead of the documented
+// fallback (#248). A Map only answers with the explicit documented codes.
+const EVENT_STATUS = new Map<string, EventAvailability['status']>([
+  ['onsale', 'on_sale'],
+  ['offsale', 'off_sale'],
+  ['cancelled', 'cancelled'],
+  ['postponed', 'postponed'],
+  ['rescheduled', 'rescheduled']
+]);
 
 function statusFromCode(value: unknown): EventAvailability['status'] {
   if (typeof value !== 'string') return 'unknown';
-  return EVENT_STATUS[value.trim().toLowerCase()] ?? 'unknown';
+  return EVENT_STATUS.get(value.trim().toLowerCase()) ?? 'unknown';
 }
 
 function finiteOrNull(value: unknown): number | null {

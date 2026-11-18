@@ -36,6 +36,7 @@ beforeAll(async () => {
         : mode === 'coercion' ? coercionTrapPayload()
         : mode === 'variations' ? variationsPayload()
         : mode === 'conditions' ? conditionsPayload()
+        : mode === 'conditions-prototype' ? prototypeConditionsPayload()
         : mode === 'malformed' ? { total: 3, warnings: [] }
         : fixture('search-success.json')));
       return;
@@ -72,6 +73,19 @@ function conditionsPayload() {
     row('v1|6005|0', 'Excellent - Refurbished'),
     row('v1|6006|0', 'For parts or not working'),
     row('v1|6007|0', 'Mystery Condition')
+  ] };
+}
+
+function prototypeConditionsPayload() {
+  // `constructor` and `__proto__` are inherited by every plain object and must map to
+  // 'unknown' while keeping the row; known labels keep their exact mapping (#248). The
+  // condition is a data VALUE here, so a plain literal is enough for `__proto__`.
+  const row = (itemId: string, condition: string) => ({ itemId, itemWebUrl: `https://www.ebay.com/itm/${itemId.split('|')[1]}`, title: `Synthetic ${condition}`, price: { value: '5.00', currency: 'USD' }, condition });
+  return { itemSummaries: [
+    row('v1|6101|0', 'constructor'),
+    row('v1|6102|0', '__proto__'),
+    row('v1|6103|0', 'Brand New'),
+    row('v1|6104|0', 'Used - Like New')
   ] };
 }
 
@@ -139,6 +153,18 @@ describe('EbayShoppingBackend', () => {
       'Synthetic For parts or not working': 'unknown',
       'Synthetic Mystery Condition': 'unknown'
     });
+  });
+  it('keeps prototype-inherited condition keys unknown without dropping the row (#248)', async () => {
+    mode = 'conditions-prototype';
+    const offers = await backend().search(searchInput, signal());
+    expect(offers).toHaveLength(4);
+    expect(Object.fromEntries(offers.map((offer) => [offer.title, offer.condition]))).toEqual({
+      'Synthetic constructor': 'unknown',
+      'Synthetic __proto__': 'unknown',
+      'Synthetic Brand New': 'new',
+      'Synthetic Used - Like New': 'used'
+    });
+    for (const offer of offers) productOfferSchema.parse(offer);
   });
   it('rejects a search response with no itemSummaries and no zero total as schema drift', async () => {
     mode = 'malformed';

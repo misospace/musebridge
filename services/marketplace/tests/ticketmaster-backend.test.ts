@@ -23,7 +23,8 @@ beforeAll(async () => {
         mode === 'empty' ? fixture('search-empty.json')
           : mode === 'malformed' ? fixture('search-malformed.json')
             : mode === 'statuses' ? statusPayload()
-              : mode === 'coercion' ? coercionPayload()
+              : mode === 'prototype-statuses' ? prototypeStatusPayload()
+                : mode === 'coercion' ? coercionPayload()
                 : fixture('search-success.json')
       ));
       return;
@@ -51,6 +52,19 @@ function statusPayload() {
     row('s4', 'postponed'),
     row('s5', 'rescheduled'),
     row('s6', 'MysteryCode')
+  ] } };
+}
+
+function prototypeStatusPayload() {
+  // `constructor` and `__proto__` are inherited by every plain object; `weird_code` is
+  // undocumented. Each must map to `unknown` and keep its row (#248). The code is a data
+  // VALUE here, so a plain literal is enough for `__proto__`.
+  const row = (id: string, code: string) => ({ id, name: `Synthetic ${code}`, url: `https://www.ticketmaster.com/event/${id}`, dates: { status: { code } } });
+  return { _embedded: { events: [
+    row('p1', 'constructor'),
+    row('p2', '__proto__'),
+    row('p3', 'weird_code'),
+    row('p4', 'onsale')
   ] } };
 }
 
@@ -92,6 +106,18 @@ describe('TicketmasterEventsBackend', () => {
     mode = 'statuses';
     const events = await backend().search(searchInput, signal());
     expect(events.map((event) => event.status)).toEqual(['on_sale', 'off_sale', 'cancelled', 'postponed', 'rescheduled', 'unknown']);
+  });
+
+  it('keeps prototype-inherited and undocumented status codes unknown without dropping the row (#248)', async () => {
+    mode = 'prototype-statuses';
+    const events = await backend().search(searchInput, signal());
+    expect(events.map((event) => [event.id, event.status])).toEqual([
+      ['p1', 'unknown'],
+      ['p2', 'unknown'],
+      ['p3', 'unknown'],
+      ['p4', 'on_sale']
+    ]);
+    for (const event of events) eventAvailabilitySchema.parse(event);
   });
 
   it('refuses the null/empty price coercion trap and drops an unattributable range', async () => {
