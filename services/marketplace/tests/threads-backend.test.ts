@@ -137,6 +137,14 @@ beforeAll(async () => {
         return json(res, after === 'replies-cursor-2' ? repliesPageTwo : repliesPageOne);
       }
       if (mode === 'not-found') { json(res, fixture('replies-404.json'), 404); return; }
+      if (mode === 'replies-404-on-continuation') {
+        // A valid first page with a live cursor, then a 404 on the continuation request: the
+        // media exists, so the page walk failed rather than the resource being absent.
+        const after = url.searchParams.get('after');
+        seenAfters.push(after);
+        if (after === null) return json(res, repliesPageOne);
+        json(res, fixture('replies-404.json'), 404); return;
+      }
       return json(res, fixture('replies-success.json'));
     }
     if (pathname.endsWith('/mentions')) {
@@ -361,6 +369,18 @@ describe('ThreadsApiBackend', () => {
   it('maps a 404 replies response to the house no-result case so the tool layer reports NOT_FOUND', async () => {
     mode = 'not-found';
     await expect(backend().listReplies(repliesInput, signal())).resolves.toBeNull();
+  });
+
+  it('reports a typed UPSTREAM_ERROR when a replies continuation 404s after a valid first page', async () => {
+    // NOT_FOUND is reserved for a 404 on the initial request: after a valid first page the
+    // media exists, so a continuation 404 is a failed page walk — never null (NOT_FOUND) and
+    // never a successful incomplete window built from the first page alone.
+    mode = 'replies-404-on-continuation';
+    seenAfters.length = 0;
+    await expect(backend().listReplies(repliesInput, signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The Threads request failed.'
+    });
+    expect(seenAfters).toEqual([null, 'replies-cursor-2']);
   });
 
   it('rejects a replies response without an array data field as schema drift', async () => {
