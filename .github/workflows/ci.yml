@@ -82,6 +82,10 @@ jobs:
         run: >-
           docker run --rm --network none --entrypoint node marketplace:ci
           --check /app/scripts/marketplace-search-smoke.mjs
+      - name: Verify packaged Shopping search smoke script
+        run: >-
+          docker run --rm --network none --entrypoint node marketplace:ci
+          --check /app/scripts/shopping-search-smoke.mjs
       - name: Verify Chromium in the image
         run: >-
           docker run --rm --entrypoint node marketplace:ci --input-type=module -e
