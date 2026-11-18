@@ -199,18 +199,22 @@ function cursorAfter(payload: unknown): string | undefined {
 
 // The documented media_type enum. Anything else maps to `UNKNOWN` rather than guessed;
 // the schema's strict() then rejects anything the API returns that we cannot promise to
-// interpret (#46: the load-bearing facts).
-const MEDIA_TYPE: Readonly<Record<string, ThreadsPost['media_type']>> = {
-  TEXT_POST: 'TEXT_POST',
-  IMAGE: 'IMAGE',
-  VIDEO: 'VIDEO',
-  CAROUSEL_ALBUM: 'CAROUSEL_ALBUM',
-  REPOST_FACADE: 'REPOST_FACADE'
-};
+// interpret (#46: the load-bearing facts). The lookup is a Map, not a plain object: a
+// plain-object index resolved inherited prototype keys like `constructor` and `__proto__`
+// to truthy values, so `?? 'UNKNOWN'` never fired, the enum check failed, and one such
+// row rejected the whole upstream page (#243). A Map only answers with the explicit
+// documented keys.
+const MEDIA_TYPE = new Map<string, ThreadsPost['media_type']>([
+  ['TEXT_POST', 'TEXT_POST'],
+  ['IMAGE', 'IMAGE'],
+  ['VIDEO', 'VIDEO'],
+  ['CAROUSEL_ALBUM', 'CAROUSEL_ALBUM'],
+  ['REPOST_FACADE', 'REPOST_FACADE']
+]);
 
 function mediaTypeFromCode(value: unknown): ThreadsPost['media_type'] {
   if (typeof value !== 'string') return 'UNKNOWN';
-  return MEDIA_TYPE[value] ?? 'UNKNOWN';
+  return MEDIA_TYPE.get(value) ?? 'UNKNOWN';
 }
 
 function isoWithOffset(value: unknown): string | null {
