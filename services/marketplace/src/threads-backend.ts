@@ -62,12 +62,18 @@ export class ThreadsApiBackend implements ThreadsBackend {
 
   async listReplies(input: Parameters<ThreadsBackend['listReplies']>[0], signal: AbortSignal): Promise<ThreadsReplyPage | null> {
     return runWithDeadline(signal, this.requestTimeoutMs, 'Threads', async (requestSignal) => {
+      // Counts upstream replies requests so the catch below can tell a 404 on the initial
+      // request from a 404 that kills a continuation after a valid first page.
+      let requestsIssued = 0;
       try {
         const { items: replies, truncated } = await collectCursorPages({
-          fetchPage: (after, requestSignal) => this.client.listReplies({
-            mediaId: input.media_id,
-            ...(after !== undefined ? { after } : {})
-          }, requestSignal),
+          fetchPage: (after, requestSignal) => {
+            requestsIssued++;
+            return this.client.listReplies({
+              mediaId: input.media_id,
+              ...(after !== undefined ? { after } : {})
+            }, requestSignal);
+          },
           mapItem: (value) => mapReply(value, input.media_id),
           cap: MAX_THREADS_REPLY_COUNT,
           unrecognizedMessage: 'The Threads replies response was not recognized.',
@@ -75,9 +81,12 @@ export class ThreadsApiBackend implements ThreadsBackend {
         });
         return { replies, truncated };
       } catch (error) {
-        // A missing media is the house "no result" case: return null and let the tool layer
-        // report NOT_FOUND, mirroring the other backends.
-        if (error instanceof ThreadsHttpError && error.status === 404) return null;
+        // Only a 404 on the *initial* replies request is the house "no result" case: return
+        // null and let the tool layer report NOT_FOUND, mirroring the other backends. Once a
+        // valid first page has been fetched the media exists, so a later 404 is a failed page
+        // walk: it maps to UPSTREAM_ERROR, never NOT_FOUND and never a successful incomplete
+        // window built from the pages that did arrive.
+        if (error instanceof ThreadsHttpError && error.status === 404 && requestsIssued <= 1) return null;
         throw mapError(error);
       }
     });
