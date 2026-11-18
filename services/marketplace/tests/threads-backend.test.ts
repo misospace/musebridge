@@ -82,6 +82,17 @@ beforeAll(async () => {
       if (mode === 'posts-owner-id') return json(res, fixture('posts-owner-id.json'));
       if (mode === 'posts-media-cdn-hosts') return json(res, fixture('posts-media-cdn-hosts.json'));
       if (mode === 'posts-media-http-cdn') return json(res, fixture('posts-media-http-cdn.json'));
+      if (mode === 'posts-prototype-media-type') {
+        // `constructor` and `__proto__` are inherited by every plain object, and `STORY` is
+        // an undocumented code: each must map to `UNKNOWN` and keep its row (#243).
+        return json(res, {
+          data: [
+            { id: 'synth-mt-ctor-001', media_type: 'constructor', permalink: 'https://www.threads.net/@synth_user/post/synth-mt-ctor-001', text: 'Synthetic constructor-coded post.', timestamp: '2025-04-04T09:30:00.000Z', username: 'synth_user', reply_count: 2, like_count: 3 },
+            { id: 'synth-mt-proto-002', media_type: '__proto__', permalink: 'https://www.threads.net/@synth_user/post/synth-mt-proto-002', username: 'synth_user' },
+            { id: 'synth-mt-story-003', media_type: 'STORY', permalink: 'https://www.threads.net/@synth_user/post/synth-mt-story-003', username: 'synth_user' }
+          ]
+        });
+      }
       if (mode === 'posts-lookalike-permalink') {
         // A captionless item whose permalink is a lookalike host: still schema drift, so the
         // permalink allowlist is not weakened by the captionless-text rule.
@@ -125,6 +136,11 @@ beforeAll(async () => {
       if (mode === 'replies-malformed') return json(res, fixture('replies-malformed.json'));
       if (mode === 'replies-malformed-item') return json(res, { data: [{}] });
       if (mode === 'replies-mixed-captionless') return json(res, fixture('replies-mixed-captionless.json'));
+      if (mode === 'replies-prototype-media-type') {
+        return json(res, {
+          data: [{ id: 'synth-reply-mt-ctor-001', media_type: 'constructor', permalink: 'https://www.threads.net/@synth_friend/post/synth-reply-mt-ctor-001', text: 'Synthetic constructor-coded reply.', timestamp: '2025-04-04T10:00:00.000Z', username: 'synth_friend' }]
+        });
+      }
       if (mode === 'replies-paging-container') {
         return json(res, {
           data: [{ id: 'synth-reply-pc-001', media_type: 'TEXT_POST', permalink: 'https://www.threads.net/@synth_friend/post/synth-reply-pc-001', text: 'Synthetic reply.', username: 'synth_friend' }],
@@ -242,6 +258,21 @@ describe('ThreadsApiBackend', () => {
     await expect(backend().listOwnPosts(postsInput, signal())).rejects.toMatchObject({
       code: 'UPSTREAM_ERROR', message: 'The Threads posts response was not recognized.'
     });
+  });
+
+  it('keeps posts with an unrecognized or prototype-inherited media type as UNKNOWN', async () => {
+    // An unrecognized code is a display-enum fallback, never drift: `constructor` and
+    // `__proto__` resolve to inherited plain-object members, and one such row must not
+    // reject the page (#243).
+    mode = 'posts-prototype-media-type';
+    const { posts, truncated } = await backend().listOwnPosts(postsInput, signal());
+    expect(truncated).toBe(false);
+    expect(posts.map((post) => post.id)).toEqual(['synth-mt-ctor-001', 'synth-mt-proto-002', 'synth-mt-story-003']);
+    for (const post of posts) {
+      threadsPostSchema.parse(post);
+      expect(post.media_type).toBe('UNKNOWN');
+    }
+    expect(posts[0]).toMatchObject({ reply_count: 2, like_count: 3 });
   });
 
   it('rejects an unresolvable paging cursor as schema drift instead of claiming completeness', async () => {
@@ -395,6 +426,15 @@ describe('ThreadsApiBackend', () => {
     await expect(backend().listReplies(repliesInput, signal())).rejects.toMatchObject({
       code: 'UPSTREAM_ERROR', message: 'The Threads replies response was not recognized.'
     });
+  });
+
+  it('keeps a reply with a prototype-inherited media type as UNKNOWN', async () => {
+    mode = 'replies-prototype-media-type';
+    const result = await backend().listReplies(repliesInput, signal());
+    expect(result).not.toBeNull();
+    expect(result!.replies).toHaveLength(1);
+    threadsReplySchema.parse(result!.replies[0]);
+    expect(result!.replies[0]).toMatchObject({ id: 'synth-reply-mt-ctor-001', media_id: 'synth-thread-001', media_type: 'UNKNOWN' });
   });
 
   it('maps 401 and 403 to AUTH_EXPIRED', async () => {
