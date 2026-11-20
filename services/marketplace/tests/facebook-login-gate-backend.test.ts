@@ -97,7 +97,8 @@ function messengerSession(messenger: FacebookMessengerBackend) {
  * Runs the Marketplace session gate alone, the Marketplace counterpart of `messengerSession`.
  */
 function marketplaceSession(marketplace: FacebookMarketplaceBackend) {
-  return (marketplace as unknown as { ensureUsableSession(signal: AbortSignal): Promise<void> }).ensureUsableSession(signal());
+  return (marketplace as unknown as { credentialRecovery: { ensureUsableSession(signal: AbortSignal): Promise<void> } })
+    .credentialRecovery.ensureUsableSession(signal());
 }
 
 async function expectLoginRequired(promise: Promise<unknown>, message: string) {
@@ -140,10 +141,12 @@ describe('Facebook backend login gate', () => {
     const state = setup();
     mockProbe(state.marketplaceProbe, [loginRequired, usable, loginRequired, loginRequired]);
     const attempt = mockLogin(state.marketplaceLogin, ['authenticated', 'timeout']);
-    const first = (state.marketplace as unknown as { ensureUsableSession(signal: AbortSignal): Promise<void> }).ensureUsableSession(signal());
+    const first = (state.marketplace as unknown as { credentialRecovery: { ensureUsableSession(signal: AbortSignal): Promise<void> } })
+      .credentialRecovery.ensureUsableSession(signal());
     while (attempt.mock.calls.length < 1) await new Promise((resolve) => setTimeout(resolve, 0));
     await expect(first).resolves.toBeUndefined();
-    const second = (state.marketplace as unknown as { ensureUsableSession(signal: AbortSignal): Promise<void> }).ensureUsableSession(signal());
+    const second = (state.marketplace as unknown as { credentialRecovery: { ensureUsableSession(signal: AbortSignal): Promise<void> } })
+      .credentialRecovery.ensureUsableSession(signal());
     await expect(second).rejects.toMatchObject({ code: 'LOGIN_REQUIRED' });
     expect(attempt).toHaveBeenCalledTimes(2);
     expect(state.gate.snapshot().status).toBe('cooldown');

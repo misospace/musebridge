@@ -1,7 +1,7 @@
 import { errors } from 'playwright';
 import { BrowserSessionManager, sleepUntilAbort } from './browser.js';
 import type { ConversationBackend, ConversationThreadListPage, ConsumerThreadListPage, ConsumerThreadSearchPage } from './backend.js';
-import { ProviderError as MarketplaceProviderError, SurfaceDisabledError, renderDeliveredMessage } from './backend.js';
+import { ProviderError as MarketplaceProviderError, renderDeliveredMessage } from './backend.js';
 import { validateTimeout } from './timeout.js';
 import {
   threadsListInputSchema,
@@ -52,7 +52,7 @@ import {
 } from './facebook-consumer-parse.js';
 import { searchConsumerThreads } from './consumer-thread-search.js';
 import { mapBrowserOperationError } from './browser-error-mapping.js';
-import { assertFacebookOrigin, FacebookSessionProbe, type FacebookProbeCode } from './facebook.js';
+import { assertFacebookOrigin, FacebookSessionProbe } from './facebook.js';
 import { FacebookCredentialLogin } from './facebook-login.js';
 import { FacebookLoginCircuitBreaker, type FacebookLoginScope } from './facebook-login-circuit-breaker.js';
 import { FacebookCredentialRecovery } from './facebook-credential-recovery.js';
@@ -71,6 +71,10 @@ const LOGIN_SCOPE: FacebookLoginScope = 'messenger';
 
 /** The menu-window label the consumer coverage contract uses (#79): one observed homepage load. */
 const CONSUMER_MENU_WINDOW = 'recent-load' as const;
+
+/** The probe-only diagnostics run reports this scope-owned disabled surface through the shared gate. */
+const MESSENGER_PROBE_ONLY_DISABLED_MESSAGE =
+  'Messenger probe-only diagnostics are enabled; conversation access is disabled.';
 
 export interface FacebookMessengerBackendOptions {
   browser: BrowserSessionManager;
@@ -147,7 +151,8 @@ export class FacebookMessengerBackend implements ConversationBackend {
       ...(this.login !== undefined ? { login: this.login } : {}),
       messages: {
         shutdown: 'Facebook Messenger backend is shutting down',
-        loginRequired: messengerSessionMessage('LOGIN_REQUIRED')
+        loginRequired: 'Facebook login is required to read Marketplace conversations.',
+        captcha: 'Facebook requires a captcha challenge.'
       }
     });
   }
@@ -629,65 +634,14 @@ export class FacebookMessengerBackend implements ConversationBackend {
     }
   }
 
-  private async ensureUsableSession(signal: AbortSignal): Promise<void> {
-    let session: Awaited<ReturnType<FacebookSessionProbe['probeSession']>>;
-    try {
-      session = await this.probe.probeSession(signal);
-    } catch (error) {
-      mapBrowserOperationError(error, signal, { fallbackMessage: 'The Facebook session could not be verified.' });
-    }
-
-    if (session.status === 'session_usable') this.loginGate.recordSuccess(LOGIN_SCOPE);
-
-    // A captcha or checkpoint the probe observed is a challenge only a human can clear, so it
-    // hard-opens the shared gate for every scope: the scope that first observes the challenge
-    // owns that open, so no request may submit credentials while the challenge stands (issue
-    // #144). The probe-only diagnostics run observes the same states, so it arms the gate before
-    // it reports the disabled surface.
-    if (session.status === 'session_needs_reauth' && session.code !== 'LOGIN_REQUIRED') {
-      this.loginGate.recordChallenge(LOGIN_SCOPE);
-    }
-
-    if (this.probeOnly) {
-      if (session.code) {
-        throw new MarketplaceProviderError(session.code, messengerSessionMessage(session.code));
-      }
-      throw new SurfaceDisabledError('Messenger probe-only diagnostics are enabled; conversation access is disabled.');
-    }
-    if (session.status === 'session_needs_reauth') {
-      const recovery = await this.credentialRecovery.waitForCredentialLogin(session.code, signal);
-      if (!recovery.recovered) {
-        const code = recovery.code ?? session.code ?? 'SESSION_INVALID';
-        throw new MarketplaceProviderError(code, messengerSessionMessage(code));
-      }
-      session = await this.credentialRecovery.confirmCredentialLogin(signal);
-      if (session.status !== 'session_usable') {
-        // A captcha or checkpoint the confirming probe observed is a challenge only a human can
-        // clear, so it hard-opens the shared gate for every scope: a challenge is a fact about
-        // the profile, whoever noticed it, and the scope that first observes it owns that open
-        // (issue #144).
-        if (session.status === 'session_needs_reauth' && session.code !== 'LOGIN_REQUIRED') {
-          this.loginGate.recordChallenge(LOGIN_SCOPE);
-        } else if (recovery.ownsAttempt) {
-          this.loginGate.recordCycleFailure(LOGIN_SCOPE);
-        }
-        const code = session.code ?? 'SESSION_INVALID';
-        throw new MarketplaceProviderError(code, messengerSessionMessage(code));
-      }
-    }
-    if (session.status === 'session_unknown') {
-      throw new MarketplaceProviderError('SESSION_INVALID', 'The Facebook session could not be verified, so the request was not attempted.');
-    }
+  // The gate is the recovery class's shared probe-and-recover ladder; the probe-only diagnostics
+  // run reports its disabled surface through it, with this scope's wording.
+  private ensureUsableSession(signal: AbortSignal): Promise<void> {
+    return this.credentialRecovery.ensureUsableSession(
+      signal,
+      this.probeOnly ? MESSENGER_PROBE_ONLY_DISABLED_MESSAGE : undefined
+    );
   }
-}
-
-function messengerSessionMessage(code: FacebookProbeCode): string {
-  const messages = {
-    LOGIN_REQUIRED: 'Facebook login is required to read Marketplace conversations.',
-    CAPTCHA_REQUIRED: 'Facebook requires a captcha challenge.',
-    SESSION_INVALID: 'The Facebook session requires a security check.'
-  } as const;
-  return messages[code];
 }
 
 /**
