@@ -1,6 +1,6 @@
 import { mapBrowserOperationError } from './browser-error-mapping.js';
 import { BrowserSessionManager, BrowserUnavailableError } from './browser.js';
-import { ProviderError } from './backend.js';
+import { ProviderError, SurfaceDisabledError } from './backend.js';
 import {
   isFacebookAuthClassCode,
   type FacebookProbeCode,
@@ -20,6 +20,8 @@ export interface FacebookCredentialRecoveryMessages {
   readonly shutdown: string;
   /** The plain LOGIN_REQUIRED failure the owning scope reports. */
   readonly loginRequired: string;
+  /** The CAPTCHA_REQUIRED failure the owning scope reports. */
+  readonly captcha: string;
 }
 
 /**
@@ -66,6 +68,82 @@ export class FacebookCredentialRecovery {
   }
 
   /**
+   * Probes the session and runs the shared usable-session gate both Facebook scopes are held to
+   * before every surface read: a usable probe records the scope's verified success; a captcha or
+   * checkpoint hard-opens the shared gate (a challenge is a fact about the account); a plain
+   * login requirement may submit credentials once through the single-attempt ladder and must
+   * confirm the outcome with a probe rather than the login's own classification; anything the
+   * probe cannot verify fails closed as SESSION_INVALID. Throws a typed ProviderError unless the
+   * session ends usable.
+   *
+   * `probeOnlyDisabledMessage` runs the same gate in diagnostics-only mode: it arms the gate
+   * exactly like a normal probe — the probe-only run observes the same states — then reports the
+   * scope's disabled surface instead of attempting credential recovery. The wording is
+   * scope-owned.
+   */
+  async ensureUsableSession(signal: AbortSignal, probeOnlyDisabledMessage?: string): Promise<void> {
+    let session: FacebookSessionProbeResult;
+    try {
+      session = await this.probe.probeSession(signal);
+    } catch (error) {
+      mapBrowserOperationError(error, signal, { fallbackMessage: 'The Facebook session could not be verified.' });
+    }
+
+    if (session.status === 'session_usable') this.loginGate.recordSuccess(this.scope);
+
+    // A captcha or checkpoint the probe observed is a challenge only a human can clear, so it
+    // hard-opens the shared gate for every scope: the scope that first observes the challenge
+    // owns that open, so no request may submit credentials while the challenge stands (issue
+    // #144). The probe-only diagnostics run observes the same states, so it arms the gate before
+    // it reports the disabled surface.
+    if (session.status === 'session_needs_reauth' && session.code !== 'LOGIN_REQUIRED') {
+      this.loginGate.recordChallenge(this.scope);
+    }
+
+    if (probeOnlyDisabledMessage !== undefined) {
+      if (session.code) throw new ProviderError(session.code, this.sessionMessage(session.code));
+      throw new SurfaceDisabledError(probeOnlyDisabledMessage);
+    }
+
+    if (session.status === 'session_needs_reauth') {
+      // Credentials are submitted only for a plain login requirement. A captcha or checkpoint
+      // already means a human is needed, and re-submitting credentials there is exactly the loop
+      // the manual re-auth flow exists to avoid.
+      const recovery = await this.waitForCredentialLogin(session.code, signal);
+      if (!recovery.recovered) {
+        const code = recovery.code ?? session.code ?? 'SESSION_INVALID';
+        throw new ProviderError(code, this.sessionMessage(code));
+      }
+      session = await this.confirmCredentialLogin(signal);
+      if (session.status !== 'session_usable') {
+        // A captcha or checkpoint the confirming probe observed is a challenge only a human can
+        // clear, so it hard-opens the shared gate for every scope: a challenge is a fact about
+        // the profile, whoever noticed it, and the scope that first observes it owns that open
+        // (issue #144).
+        if (session.status === 'session_needs_reauth' && session.code !== 'LOGIN_REQUIRED') {
+          this.loginGate.recordChallenge(this.scope);
+        } else if (recovery.ownsAttempt) {
+          this.loginGate.recordCycleFailure(this.scope);
+        }
+        const code = session.code ?? 'SESSION_INVALID';
+        throw new ProviderError(code, this.sessionMessage(code));
+      }
+    }
+    if (session.status === 'session_unknown') {
+      // The frozen error contract has no "unverified" code; SESSION_INVALID points an operator at
+      // the re-auth console, and the message states plainly that verification failed.
+      throw new ProviderError('SESSION_INVALID', 'The Facebook session could not be verified, so the request was not attempted.');
+    }
+  }
+
+  /** The scope-owned wording for an auth-class failure code. */
+  private sessionMessage(code: FacebookProbeCode): string {
+    return code === 'LOGIN_REQUIRED'
+      ? this.messages.loginRequired
+      : code === 'CAPTCHA_REQUIRED' ? this.messages.captcha : 'The Facebook session requires a security check.';
+  }
+
+  /**
    * A result page that itself shows a login, captcha, or checkpoint means the session this
    * profile holds has expired or been challenged, even when the last probe assessed it usable.
    * Downgrade the cached assessment so `marketplace_status` stops reporting the stale verdict
@@ -89,7 +167,7 @@ export class FacebookCredentialRecovery {
    * Returns the code to surface when recovery did not happen, so a challenge encountered during
    * the attempt is reported as itself rather than as the original login requirement.
    */
-  async waitForCredentialLogin(
+  private async waitForCredentialLogin(
     code: FacebookProbeCode | undefined,
     signal: AbortSignal
   ): Promise<RecoveryOutcome & { ownsAttempt?: boolean }> {
@@ -117,7 +195,7 @@ export class FacebookCredentialRecovery {
     return ownsAttempt ? { ...outcome, ownsAttempt: true } : outcome;
   }
 
-  async confirmCredentialLogin(signal: AbortSignal): Promise<FacebookSessionProbeResult> {
+  private async confirmCredentialLogin(signal: AbortSignal): Promise<FacebookSessionProbeResult> {
     try {
       const session = await this.probe.probeSession(signal);
       if (session.status === 'session_usable') this.loginGate.recordSuccess(this.scope);

@@ -114,7 +114,11 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
       scope: LOGIN_SCOPE,
       loginGate: this.loginGate,
       ...(this.login !== undefined ? { login: this.login } : {}),
-      messages: { shutdown: 'Facebook backend is shutting down', loginRequired: 'Facebook Marketplace requires login.' }
+      messages: {
+        shutdown: 'Facebook backend is shutting down',
+        loginRequired: 'Facebook Marketplace requires login.',
+        captcha: 'Facebook Marketplace requires a captcha challenge.'
+      }
     });
   }
 
@@ -131,7 +135,7 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     }
     const market = resolution.market;
 
-    await this.ensureUsableSession(signal);
+    await this.credentialRecovery.ensureUsableSession(signal);
 
     const searchUrl = assertFacebookOrigin(buildMarketplaceSearchUrl({
       baseUrl: this.probe.baseUrl,
@@ -208,70 +212,13 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     return [...outcome.listings];
   }
 
-  private async ensureUsableSession(signal: AbortSignal): Promise<void> {
-    let session: Awaited<ReturnType<FacebookSessionProbe['probeSession']>>;
-    try {
-      session = await this.probe.probeSession(signal);
-    } catch (error) {
-      mapBrowserOperationError(error, signal, { fallbackMessage: 'The Facebook session could not be verified.' });
-    }
-
-    if (session.status === 'session_usable') this.loginGate.recordSuccess(LOGIN_SCOPE);
-
-    if (session.status === 'session_needs_reauth') {
-      // A captcha or checkpoint the probe observed is a challenge only a human can clear, so it
-      // hard-opens the shared gate for every scope: the scope that first observes the challenge
-      // owns that open, so no request may submit credentials while the challenge stands
-      // (issue #144).
-      if (session.code !== 'LOGIN_REQUIRED') {
-        this.loginGate.recordChallenge(LOGIN_SCOPE);
-      }
-      // Credentials are submitted only for a plain login requirement. A captcha or checkpoint
-      // already means a human is needed, and re-submitting credentials there is exactly the loop
-      // the manual re-auth flow exists to avoid.
-      const recovery = await this.credentialRecovery.waitForCredentialLogin(session.code, signal);
-      if (!recovery.recovered) {
-        const code = recovery.code ?? session.code ?? 'SESSION_INVALID';
-        const messages = {
-          LOGIN_REQUIRED: 'Facebook Marketplace requires login.',
-          CAPTCHA_REQUIRED: 'Facebook Marketplace requires a captcha challenge.',
-          SESSION_INVALID: 'The Facebook session requires a security check.'
-        } as const;
-        throw new ProviderError(code, messages[code]);
-      }
-      session = await this.credentialRecovery.confirmCredentialLogin(signal);
-      if (session.status !== 'session_usable') {
-        // A captcha or checkpoint the confirming probe observed is a challenge only a human can
-        // clear, so it hard-opens the shared gate for every scope: a challenge is a fact about
-        // the profile, whoever noticed it, and the scope that first observes it owns that open
-        // (issue #144).
-        if (session.status === 'session_needs_reauth' && session.code !== 'LOGIN_REQUIRED') {
-          this.loginGate.recordChallenge(LOGIN_SCOPE);
-        } else if (recovery.ownsAttempt) {
-          this.loginGate.recordCycleFailure(LOGIN_SCOPE);
-        }
-        const code = session.code ?? 'SESSION_INVALID';
-        const messages = {
-          LOGIN_REQUIRED: 'Facebook Marketplace requires login.',
-          CAPTCHA_REQUIRED: 'Facebook Marketplace requires a captcha challenge.',
-          SESSION_INVALID: 'The Facebook session requires a security check.'
-        } as const;
-        throw new ProviderError(code, messages[code]);
-      }
-    }
-    if (session.status === 'session_unknown') {
-      // The frozen error contract has no "unverified" code; SESSION_INVALID points an operator at the re-auth console, and the message states plainly that verification failed.
-      throw new ProviderError('SESSION_INVALID', 'The Facebook session could not be verified, so the request was not attempted.');
-    }
-  }
-
   async fetch(input: ReturnType<typeof fetchInputSchema.parse>, signal: AbortSignal): Promise<Listing | null> {
     if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
 
     const resolved = resolveMarketplaceItemInput(input, this.probe.baseUrl);
     if (!resolved) return null;
 
-    await this.ensureUsableSession(signal);
+    await this.credentialRecovery.ensureUsableSession(signal);
 
     let extracted: ExtractedMarketplaceItem;
     try {
