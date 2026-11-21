@@ -53,6 +53,15 @@ describe('EbayClient', () => {
     expect(errorResponse?.bodyUsed).toBe(true);
   });
 
+  it('still throws the typed HTTP error when the error body itself fails', async () => {
+    const broken = new ReadableStream({ start(controller) { controller.error(new Error('synthetic body failure')); } });
+    const client = new EbayClient({ ...options, fetchImpl: async (input) => {
+      if (String(input).includes('/oauth2/token')) return ok({ access_token: 'synthetic', expires_in: 3600 });
+      return new Response(broken, { status: 503 });
+    } });
+    await expect(client.getItemByLegacyId('123')).rejects.toMatchObject({ name: 'EbayHttpError', status: 503 });
+  });
+
   it('consumes the token exchange error body before throwing', async () => {
     let errorResponse: Response | undefined;
     const client = new EbayClient({ ...options, fetchImpl: async (input) => {
@@ -85,19 +94,28 @@ describe('EbayClient', () => {
 
   it('abandons a token exchange stalled on the error body and recovers on a later call', async () => {
     let tokenCalls = 0;
+    let drainStarted = false;
     const client = new EbayClient({ ...options, tokenRequestTimeoutMs: 100, fetchImpl: async (input) => {
       if (String(input).includes('/oauth2/token')) {
         tokenCalls++;
         // Headers say 503, the failure body never finishes: the exchange deadline has to
         // cover the error-body drain too, or the poisoned shared refresh would outlive every
         // later caller exactly like a stalled success body (#115).
-        if (tokenCalls === 1) return new Response(new ReadableStream({ start() {} }), { status: 503, headers: { 'retry-after': '5' } });
+        if (tokenCalls === 1) {
+          const response = new Response(new ReadableStream({ start() {} }), { status: 503, headers: { 'retry-after': '5' } });
+          const readText = response.text.bind(response);
+          response.text = () => { drainStarted = true; return readText(); };
+          return response;
+        }
         return ok({ access_token: 'synthetic-recovered', expires_in: 3600 });
       }
       return ok({ itemSummaries: [] });
     } });
     await expect(client.searchItems('synthetic', { limit: 1 })).rejects.toThrow(/timed out/);
     expect(tokenCalls).toBe(1);
+    // The stall was in the failure body and the drain was already racing the deadline when
+    // it fired — that is the window the fix has to keep covered.
+    expect(drainStarted).toBe(true);
     // The poisoned in-flight promise was cleared: the next call performs a fresh OAuth fetch.
     await expect(client.searchItems('synthetic', { limit: 1 })).resolves.toBeDefined();
     expect(tokenCalls).toBe(2);

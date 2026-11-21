@@ -103,6 +103,8 @@ export class EbayClient {
       if (response.status === 401 && attempt === 0) {
         // The discarded 401 also gets its body consumed before the retry, or the dropped
         // response would pin its connection exactly like an undrained thrown one (#258).
+        // The read has no client-internal timer of its own, exactly like the success-path
+        // json() below: it is bounded by the caller's signal and the backend deadline.
         await drainErrorBody(response);
         token = await this.getToken(signal, true);
         continue;

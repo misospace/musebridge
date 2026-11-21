@@ -18,6 +18,12 @@ describe('drainErrorBody', () => {
     await expect(drainErrorBody(response)).resolves.toBeUndefined();
   });
 
+  it('resolves when the body is locked by a reader', async () => {
+    const response = new Response('synthetic', { status: 503 });
+    response.body?.getReader();
+    await expect(drainErrorBody(response)).resolves.toBeUndefined();
+  });
+
   it('resolves when the body stream errors instead of masking the caller typed error', async () => {
     const broken = new ReadableStream({ start(controller) { controller.error(new Error('synthetic body failure')); } });
     await expect(drainErrorBody(new Response(broken, { status: 503 }))).resolves.toBeUndefined();

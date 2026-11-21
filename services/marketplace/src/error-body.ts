@@ -12,6 +12,9 @@
 // (caller signal, backend deadline, or the eBay token-exchange deadline the error race covers).
 export async function drainErrorBody(response: Response): Promise<void> {
   try {
+    // Read-to-completion buffers the whole body before discarding it. That matches the
+    // success-path `json()` exposure these clients already accept, and any size cap would
+    // need `cancel()` — which releases the pin but destroys the socket instead of reusing it.
     await response.text();
   } catch {
     // Already-consumed, locked, or stream-erroring body: still a failed response, and the
