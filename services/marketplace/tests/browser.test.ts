@@ -1,10 +1,9 @@
 import { EventEmitter } from 'node:events';
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { chromium } from 'playwright';
 import type { BrowserSessionManager, BrowserSessionOptions } from '../src/browser.js';
 import { BrowserSessionManager as BrowserManager, BrowserUnavailableError, canonicalProfileDirIdentity } from '../src/browser.js';
 import type { OwnedBrowserTerminationResult } from '../src/browser-process-terminator.js';
@@ -14,11 +13,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createFakePlaywrightHarness } from './helpers/fake-browser-playwright.js';
 import { symlinkOrSkip } from './helpers/symlink-or-skip.js';
-
-const browserAvailable = existsSync(chromium.executablePath());
-if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
-  throw new Error('Chromium is required for browser tests at ' + chromium.executablePath());
-}
+import { browserAvailable } from './helpers/browser-availability.js';
 
 type SyntheticServer = {
   server: Server;
