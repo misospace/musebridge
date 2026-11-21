@@ -1,19 +1,14 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server } from 'node:http';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { chromium } from 'playwright';
 import { BrowserSessionManager } from '../src/browser.js';
 import { ProviderError, SurfaceDisabledError } from '../src/backend.js';
 import { FacebookSessionProbe } from '../src/facebook.js';
 import { FacebookMessengerBackend } from '../src/facebook-messenger-backend.js';
 import { consumerThreadsListInputSchema, consumerThreadsSearchInputSchema } from '../src/domain.js';
-
-const browserAvailable = existsSync(chromium.executablePath());
-if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
-  throw new Error('Chromium is required for browser tests at ' + chromium.executablePath());
-}
+import { browserAvailable } from './helpers/browser-availability.js';
 
 // The homepage shell mounts the menu variant only after a real click on the Messenger control,
 // exactly the runtime shape the backend must drive: navigation to the root, trusted click,

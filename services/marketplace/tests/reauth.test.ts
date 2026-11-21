@@ -5,18 +5,13 @@ import { networkInterfaces, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createConnection } from 'node:net';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { chromium } from 'playwright';
 import { BrowserSessionManager, BrowserUnavailableError, type BrowserSessionOptions } from '../src/browser.js';
 import { createReauthAdminServer } from '../src/admin.js';
 import { assertFacebookOrigin } from '../src/facebook.js';
 import { parseDisplayNumber, ReauthManager } from '../src/reauth.js';
 import { FakeReauthRuntime } from './helpers/fake-reauth-runtime.js';
 import { createFakePlaywrightHarness } from './helpers/fake-browser-playwright.js';
-
-const browserAvailable = existsSync(chromium.executablePath());
-if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
-  throw new Error('Chromium is required for browser tests at ' + chromium.executablePath());
-}
+import { browserAvailable } from './helpers/browser-availability.js';
 
 type SyntheticServer = {
   server: Server;

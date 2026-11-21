@@ -1,13 +1,9 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 import { extractConsumerMenuPage, CONSUMER_EXTRACT_LIMITS, type ExtractedConsumerMenuPage } from '../src/facebook-consumer-extract.js';
 import { classifyConsumerMenuPage, interpretConsumerMenuPage } from '../src/facebook-consumer-parse.js';
-
-const browserAvailable = existsSync(chromium.executablePath());
-if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
-  throw new Error('Chromium is required for browser tests at ' + chromium.executablePath());
-}
+import { browserAvailable } from './helpers/browser-availability.js';
 
 let browser: Browser;
 let page: Page;

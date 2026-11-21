@@ -1,9 +1,9 @@
-import { existsSync, mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { chromium, errors } from 'playwright';
+import { errors } from 'playwright';
 import type { Page } from 'playwright';
 import { BrowserSessionManager } from '../src/browser.js';
 import { ProviderError } from '../src/backend.js';
@@ -11,11 +11,7 @@ import { FacebookSessionProbe } from '../src/facebook.js';
 import { FacebookCredentialLogin } from '../src/facebook-login.js';
 import { FacebookMessengerBackend } from '../src/facebook-messenger-backend.js';
 import { threadsListInputSchema, threadReadInputSchema, threadSendInputSchema } from '../src/domain.js';
-
-const browserAvailable = existsSync(chromium.executablePath());
-if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
-  throw new Error('Chromium is required for browser tests at ' + chromium.executablePath());
-}
+import { browserAvailable } from './helpers/browser-availability.js';
 
 const fixtureDir = new URL('./fixtures/facebook-messenger/', import.meta.url);
 const fixtures = new Map([
