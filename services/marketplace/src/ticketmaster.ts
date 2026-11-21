@@ -1,3 +1,4 @@
+import { drainErrorBody } from './error-body.js';
 import { normalizeRetryAfterHeader } from './retry-after.js';
 import { resolveCredentialBaseUrl } from './credential-url.js';
 
@@ -70,6 +71,9 @@ export class TicketmasterClient {
 }
 
 async function responseError(response: Response): Promise<TicketmasterHttpError> {
+  // Consume the error body before throwing so the keep-alive connection is released and
+  // reused instead of pinned until GC (#258).
+  await drainErrorBody(response);
   // Normalization (blank/negative/nonnumeric/out-of-range → no hint, fraction truncated) is
   // shared with the other provider clients in retry-after.ts.
   return new TicketmasterHttpError(response.status, normalizeRetryAfterHeader(response.headers.get('retry-after')));

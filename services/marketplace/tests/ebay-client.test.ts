@@ -40,6 +40,69 @@ describe('EbayClient', () => {
     expect(apiCalls).toBe(2);
   });
 
+  it('consumes the API error response body before throwing so the connection is released', async () => {
+    let errorResponse: Response | undefined;
+    const client = new EbayClient({ ...options, fetchImpl: async (input) => {
+      if (String(input).includes('/oauth2/token')) return ok({ access_token: 'synthetic', expires_in: 3600 });
+      errorResponse = new Response('synthetic upstream failure', { status: 429, headers: { 'retry-after': '7' } });
+      return errorResponse;
+    } });
+    await expect(client.getItemByLegacyId('123')).rejects.toMatchObject({ name: 'EbayHttpError', status: 429, retryAfter: 7 });
+    // An undrained error body pins the keep-alive socket until GC (#258); bodyUsed proves
+    // the error path read it.
+    expect(errorResponse?.bodyUsed).toBe(true);
+  });
+
+  it('consumes the token exchange error body before throwing', async () => {
+    let errorResponse: Response | undefined;
+    const client = new EbayClient({ ...options, fetchImpl: async (input) => {
+      if (String(input).includes('/oauth2/token')) {
+        errorResponse = new Response('{"error":"unauthorized_client"}', { status: 400 });
+        return errorResponse;
+      }
+      return ok({ itemSummaries: [] });
+    } });
+    await expect(client.getItemByLegacyId('123')).rejects.toMatchObject({ name: 'EbayHttpError', status: 400 });
+    // The Basic-credential token exchange drops its failure response too; an undrained body
+    // pins its socket exactly like an API failure (#258).
+    expect(errorResponse?.bodyUsed).toBe(true);
+  });
+
+  it('consumes the discarded 401 body on the token-refresh retry path', async () => {
+    const apiResponses: Response[] = [];
+    const client = new EbayClient({ ...options, fetchImpl: async (input) => {
+      if (String(input).includes('/oauth2/token')) return ok({ access_token: 'synthetic', expires_in: 3600 });
+      // Every API answer is a 401: the first is discarded on the retry path, the second throws.
+      const response = new Response('expired token', { status: 401 });
+      apiResponses.push(response);
+      return response;
+    } });
+    await expect(client.getItemByLegacyId('123')).rejects.toMatchObject({ name: 'EbayHttpError', status: 401 });
+    // The retried-away 401 never throws, so it needs the same drain or it pins its socket.
+    expect(apiResponses).toHaveLength(2);
+    expect(apiResponses.every((response) => response.bodyUsed)).toBe(true);
+  });
+
+  it('abandons a token exchange stalled on the error body and recovers on a later call', async () => {
+    let tokenCalls = 0;
+    const client = new EbayClient({ ...options, tokenRequestTimeoutMs: 100, fetchImpl: async (input) => {
+      if (String(input).includes('/oauth2/token')) {
+        tokenCalls++;
+        // Headers say 503, the failure body never finishes: the exchange deadline has to
+        // cover the error-body drain too, or the poisoned shared refresh would outlive every
+        // later caller exactly like a stalled success body (#115).
+        if (tokenCalls === 1) return new Response(new ReadableStream({ start() {} }), { status: 503, headers: { 'retry-after': '5' } });
+        return ok({ access_token: 'synthetic-recovered', expires_in: 3600 });
+      }
+      return ok({ itemSummaries: [] });
+    } });
+    await expect(client.searchItems('synthetic', { limit: 1 })).rejects.toThrow(/timed out/);
+    expect(tokenCalls).toBe(1);
+    // The poisoned in-flight promise was cleared: the next call performs a fresh OAuth fetch.
+    await expect(client.searchItems('synthetic', { limit: 1 })).resolves.toBeDefined();
+    expect(tokenCalls).toBe(2);
+  });
+
   it('preserves numeric retry-after on 429', async () => {
     const client = new EbayClient({ ...options, fetchImpl: async (input) => String(input).includes('/oauth2/token')
       ? ok({ access_token: 'synthetic', expires_in: 3600 }) : new Response('', { status: 429, headers: { 'retry-after': '7' } }) });

@@ -1,3 +1,4 @@
+import { drainErrorBody } from './error-body.js';
 import { normalizeRetryAfterHeader } from './retry-after.js';
 import { resolveCredentialBaseUrl } from './credential-url.js';
 
@@ -100,6 +101,9 @@ export class EbayClient {
         headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US' }, signal
       });
       if (response.status === 401 && attempt === 0) {
+        // The discarded 401 also gets its body consumed before the retry, or the dropped
+        // response would pin its connection exactly like an undrained thrown one (#258).
+        await drainErrorBody(response);
         token = await this.getToken(signal, true);
         continue;
       }
@@ -149,7 +153,10 @@ export class EbayClient {
             body: 'grant_type=client_credentials&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope',
             signal: controller.signal
           }), deadline]);
-          if (!response.ok) throw await responseError(response);
+          // responseError now consumes the error body, so the same deadline races it here:
+          // a stalled error body must not poison the shared refresh any more than a stalled
+          // success body can — that is what the json() await below already covers (#115).
+          if (!response.ok) throw await Promise.race([responseError(response), deadline]);
           const payload = await Promise.race([response.json() as Promise<TokenResponse>, deadline]);
           if (typeof payload.access_token !== 'string' || !payload.access_token || typeof payload.expires_in !== 'number' || !Number.isFinite(payload.expires_in)) {
             throw new Error('Invalid eBay OAuth token response');
@@ -187,5 +194,8 @@ function raceWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T>
 }
 
 async function responseError(response: Response): Promise<EbayHttpError> {
+  // Consume the error body before throwing so the keep-alive connection is released and
+  // reused instead of pinned until GC (#258).
+  await drainErrorBody(response);
   return new EbayHttpError(response.status, normalizeRetryAfterHeader(response.headers.get('retry-after')));
 }

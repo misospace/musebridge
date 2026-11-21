@@ -63,6 +63,24 @@ describe('TicketmasterClient', () => {
     await expect(client.searchEvents('synthetic', { limit: 1 })).rejects.toMatchObject({ name: 'TicketmasterHttpError', status: 401 });
   });
 
+  it('consumes the error response body before throwing so the connection is released', async () => {
+    let errorResponse: Response | undefined;
+    const client = new TicketmasterClient({ ...options, fetchImpl: async () => {
+      errorResponse = new Response('synthetic upstream failure', { status: 503, headers: { 'retry-after': '7' } });
+      return errorResponse;
+    } });
+    await expect(client.getEvent('synthetic')).rejects.toMatchObject({ name: 'TicketmasterHttpError', status: 503, retryAfter: 7 });
+    // An undrained error body pins the keep-alive socket until GC (#258); bodyUsed proves
+    // the error path read it.
+    expect(errorResponse?.bodyUsed).toBe(true);
+  });
+
+  it('still throws the typed HTTP error when the error body itself fails', async () => {
+    const broken = new ReadableStream({ start(controller) { controller.error(new Error('synthetic body failure')); } });
+    const client = new TicketmasterClient({ ...options, fetchImpl: async () => new Response(broken, { status: 503 }) });
+    await expect(client.getEvent('synthetic')).rejects.toMatchObject({ name: 'TicketmasterHttpError', status: 503 });
+  });
+
   it('preserves a numeric retry-after on 429', async () => {
     const client = new TicketmasterClient({ ...options, fetchImpl: async () => new Response('', { status: 429, headers: { 'retry-after': '7' } }) });
     await expect(client.getEvent('synthetic')).rejects.toMatchObject({ status: 429, retryAfter: 7 });
