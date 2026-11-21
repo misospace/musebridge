@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
@@ -18,12 +18,12 @@ import { chromium } from 'playwright';
  * failure instead of a skip.
  *
  * vitest evaluates modules per test file, so a raw probe would launch Chromium once per importing file.
- * The outcome is therefore shared across test-file processes through a short-TTL cache file in the OS
- * temp directory: within the TTL the first probe result is reused, cutting a full suite run from one
- * launch per file to roughly one launch per TTL window. The cache is strictly best-effort — any cache
- * read or write error falls back to a live probe, and a stale cache costs at most one extra launch.
- * Set `MARKETPLACE_BROWSER_PROBE_CACHE` to a path to relocate the cache file or to `off` to disable
- * sharing (this helper's own unit tests use `off`).
+ * The outcome is therefore shared across test-file processes through a short-TTL cache file under a
+ * per-user directory in the OS temp directory: within the TTL the first probe result is reused, cutting
+ * a full suite run from one launch per file to roughly one launch per TTL window. The cache is strictly
+ * best-effort — any cache read or write error falls back to a live probe, and a stale cache costs at
+ * most one extra launch. Set `MARKETPLACE_BROWSER_PROBE_CACHE` to a path to relocate the cache file or
+ * to `off` to disable sharing (this helper's own unit tests use `off`).
  */
 export type BrowserAvailability =
   | { available: true }
@@ -87,11 +87,24 @@ function probeCachePath(): string | undefined {
   const setting = process.env.MARKETPLACE_BROWSER_PROBE_CACHE;
   if (setting === 'off') return undefined;
   if (setting) return setting;
+  // Per-user directory (created 0700, and on POSIX trusted only when we own it) so another local
+  // user cannot pre-create the shared file in world-visible tmp and pin the verdict: a planted
+  // "available" would run doomed browser tests, a planted skip would hide them.
+  const user = typeof process.getuid === 'function'
+    ? String(process.getuid())
+    : (process.env.USER || process.env.USERNAME || 'user');
+  const dir = join(tmpdir(), `musebridge-marketplace-tests-${user}`);
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (typeof process.getuid === 'function' && statSync(dir).uid !== process.getuid()) return undefined;
+  } catch {
+    return undefined; // tmp unusable for sharing: every file pays its own live probe.
+  }
   // Key the shared default by the probed binary's path (which embeds the Playwright browsers root and
   // the browser build revision), so concurrent runs of checkouts pinned to different Playwright builds
   // or browsers paths never inherit each other's verdict.
   const key = createHash('sha256').update(chromium.executablePath()).digest('hex').slice(0, 16);
-  return join(tmpdir(), `musebridge-marketplace-browser-availability-${key}.json`);
+  return join(dir, `browser-availability-${key}.json`);
 }
 
 type ProbeCacheEntry = { checkedAtMs: number; available: boolean; reason?: string };
