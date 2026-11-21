@@ -20,16 +20,24 @@ import { chromium } from 'playwright';
  * vitest evaluates modules per test file, so a raw probe would launch Chromium once per importing file.
  * The outcome is therefore shared across test-file processes through a short-TTL cache file under a
  * per-user directory in the OS temp directory: within the TTL the first probe result is reused, cutting
- * a full suite run from one launch per file to roughly one launch per TTL window. The cache is strictly
- * best-effort — any cache read or write error falls back to a live probe, and a stale cache costs at
- * most one extra launch. Set `MARKETPLACE_BROWSER_PROBE_CACHE` to a path to relocate the cache file or
- * to `off` to disable sharing (this helper's own unit tests use `off`).
+ * a full suite run from one launch per file to roughly one launch per TTL window. Available verdicts
+ * keep the longer TTL; unavailable verdicts expire quickly, so an immediate re-run after fixing the
+ * environment (e.g. `npx playwright install-deps chromium`) re-probes instead of inheriting the skip.
+ * The cache is strictly best-effort — any cache read or write error falls back to a live probe, and a
+ * stale cache costs at most one extra launch. The file is written mode 0600 and, on POSIX, read only
+ * when owned by our uid, so a file planted by another local user never pins the verdict. Set
+ * `MARKETPLACE_BROWSER_PROBE_CACHE` to a path to relocate the cache file or to `off` to disable
+ * sharing (this helper's own unit tests use `off`).
  */
 export type BrowserAvailability =
   | { available: true }
   | { available: false; reason: string };
 
 const PROBE_CACHE_TTL_MS = 30_000;
+// A working launch is expensive to re-prove, but a failed one is cheap (the launch attempt gives up on
+// its own), so unavailable verdicts expire quickly: a re-run right after repairing the environment
+// must not sit out the full available-TTL still skipping browser tests.
+const UNAVAILABLE_PROBE_CACHE_TTL_MS = 5_000;
 
 export function summarizeLaunchFailure(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
@@ -110,6 +118,16 @@ function probeCachePath(): string | undefined {
 type ProbeCacheEntry = { checkedAtMs: number; available: boolean; reason?: string };
 
 function readProbeCache(path: string): BrowserAvailability | undefined {
+  // Trust the file only when we own it (POSIX), whether it is the default per-user path or an explicit
+  // `MARKETPLACE_BROWSER_PROBE_CACHE` location: a world-writable directory must not let another local
+  // user pin the verdict with a planted `available`/`unavailable` entry.
+  if (typeof process.getuid === 'function') {
+    try {
+      if (statSync(path).uid !== process.getuid()) return undefined;
+    } catch {
+      return undefined; // unreadable stat (missing file or no permission): probe live.
+    }
+  }
   let entry: ProbeCacheEntry | null;
   try {
     entry = JSON.parse(readFileSync(path, 'utf8')) as ProbeCacheEntry | null;
@@ -117,9 +135,10 @@ function readProbeCache(path: string): BrowserAvailability | undefined {
     return undefined; // missing, unreadable, or corrupt cache: probe live.
   }
   const now = Date.now();
+  const ttl = entry?.available === true ? PROBE_CACHE_TTL_MS : UNAVAILABLE_PROBE_CACHE_TTL_MS;
   // A future-dated entry (written by an ahead clock that was later corrected) must not stay fresh
   // forever; treat it like a stale entry and probe live.
-  if (!entry || typeof entry.checkedAtMs !== 'number' || entry.checkedAtMs > now || now - entry.checkedAtMs > PROBE_CACHE_TTL_MS) {
+  if (!entry || typeof entry.checkedAtMs !== 'number' || entry.checkedAtMs > now || now - entry.checkedAtMs > ttl) {
     return undefined; // malformed, future-dated, or stale: probe live.
   }
   if (entry.available === true) return { available: true };
@@ -133,7 +152,7 @@ function writeProbeCache(path: string, availability: BrowserAvailability): void 
   const tempPath = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
   try {
     const entry: ProbeCacheEntry = { checkedAtMs: Date.now(), ...availability };
-    writeFileSync(tempPath, JSON.stringify(entry));
+    writeFileSync(tempPath, JSON.stringify(entry), { mode: 0o600 });
     renameSync(tempPath, path); // atomic swap; concurrent probes from parallel workers simply overwrite.
   } catch {
     // Caching is an optimization; an unwritable cache just means every file pays its own probe.

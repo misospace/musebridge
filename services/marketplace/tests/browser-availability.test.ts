@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -272,6 +272,90 @@ describe('resolveBrowserAvailability shared probe cache', () => {
     writeFileSync(cachePath, JSON.stringify({ checkedAtMs: Date.now() + 3_600_000, available: true }));
     await expect(resolveBrowserAvailability()).resolves.toEqual({ available: true });
     expect(probes.launch).toHaveBeenCalledTimes(1);
+  });
+
+  it('probes live when a cached unavailable entry is future-dated', async () => {
+    const cachePath = freshCachePath();
+    process.env.MARKETPLACE_BROWSER_PROBE_CACHE = cachePath;
+    writeFileSync(cachePath, JSON.stringify({
+      checkedAtMs: Date.now() + 3_600_000,
+      available: false,
+      reason: 'future-dated skip',
+    }));
+    await expect(resolveBrowserAvailability()).resolves.toEqual({ available: true });
+    expect(probes.launch).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps an available entry fresh past the short unavailable TTL', async () => {
+    const cachePath = freshCachePath();
+    process.env.MARKETPLACE_BROWSER_PROBE_CACHE = cachePath;
+    writeFileSync(cachePath, JSON.stringify({ checkedAtMs: Date.now() - 20_000, available: true }));
+    await expect(resolveBrowserAvailability()).resolves.toEqual({ available: true });
+    expect(probes.launch).not.toHaveBeenCalled();
+  });
+
+  it('expires a cached unavailable verdict quickly so a post-fix re-run probes live', async () => {
+    const cachePath = freshCachePath();
+    process.env.MARKETPLACE_BROWSER_PROBE_CACHE = cachePath;
+    writeFileSync(cachePath, JSON.stringify({
+      checkedAtMs: Date.now() - 6_000,
+      available: false,
+      reason: 'stale skip from before the environment fix',
+    }));
+    await expect(resolveBrowserAvailability()).resolves.toEqual({ available: true });
+    expect(probes.launch).toHaveBeenCalledTimes(1);
+    expect(readFileSync(cachePath, 'utf8')).toContain('"available":true');
+  });
+
+  it('still reuses an unavailable entry inside its short TTL', async () => {
+    const cachePath = freshCachePath();
+    process.env.MARKETPLACE_BROWSER_PROBE_CACHE = cachePath;
+    writeFileSync(cachePath, JSON.stringify({
+      checkedAtMs: Date.now() - 1_000,
+      available: false,
+      reason: 'fresh skip',
+    }));
+    await expect(resolveBrowserAvailability()).resolves.toEqual({ available: false, reason: 'fresh skip' });
+    expect(probes.launch).not.toHaveBeenCalled();
+  });
+
+  // Mode bits and the uid trust check are POSIX-only; skip both on platforms without process.getuid.
+  const posix = typeof process.getuid === 'function';
+
+  it.runIf(posix)('writes the cache file mode 0600 so no other user can read or race it', async () => {
+    const cachePath = freshCachePath();
+    process.env.MARKETPLACE_BROWSER_PROBE_CACHE = cachePath;
+    await resolveBrowserAvailability();
+    expect(statSync(cachePath).mode & 0o777).toBe(0o600);
+  });
+
+  it.runIf(posix)('ignores a shared cache file owned by another uid, even at an explicit path', async () => {
+    // A planted "available" entry in a world-writable MARKETPLACE_BROWSER_PROBE_CACHE location must
+    // not pin the verdict: the file fails the ownership check, so the module pays a live probe.
+    const cachePath = freshCachePath();
+    writeFileSync(cachePath, JSON.stringify({ checkedAtMs: Date.now(), available: true }));
+    process.env.MARKETPLACE_BROWSER_PROBE_CACHE = cachePath;
+    const otherUid = (process.getuid?.() ?? 0) + 1;
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      const originalStatSync = actual.statSync;
+      const statSyncMock = ((...args: Parameters<typeof originalStatSync>) => {
+        if (String(args[0]) === cachePath) {
+          return { uid: otherUid } as unknown as ReturnType<typeof originalStatSync>;
+        }
+        return originalStatSync(...(args as [never, never]));
+      }) as unknown as typeof actual.statSync;
+      return { ...actual, statSync: statSyncMock };
+    });
+    try {
+      const module = await import('./helpers/browser-availability.js');
+      expect(module.browserAvailable).toBe(true); // from the live probe, not the planted entry
+      expect(probes.launch).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+    }
   });
 
   it('falls back to a live probe on a corrupt cache file and rewrites it', async () => {
