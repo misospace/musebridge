@@ -1,9 +1,9 @@
 import { createServer, type Server } from 'node:http';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { chromium, type Page } from 'playwright';
+import { type Page } from 'playwright';
 import { BrowserSessionManager } from '../src/browser.js';
 import { FACEBOOK_ORIGIN, FacebookSessionProbe } from '../src/facebook.js';
 import {
@@ -14,11 +14,7 @@ import {
 import { FacebookMarketplaceBackend } from '../src/facebook-marketplace-backend.js';
 import { ProviderError } from '../src/backend.js';
 import { runBackendOperation } from '../src/tools.js';
-
-const browserAvailable = existsSync(chromium.executablePath());
-if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
-  throw new Error('Chromium is required for browser tests at ' + chromium.executablePath());
-}
+import { browserAvailable } from './helpers/browser-availability.js';
 
 /**
  * A real Chromium launch plus the login wait window runs well past vitest's 5s default, so every

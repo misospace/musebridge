@@ -1,19 +1,14 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { chromium } from 'playwright';
 import { BrowserSessionManager } from '../src/browser.js';
 import { ProviderError } from '../src/backend.js';
 import { FacebookSessionProbe } from '../src/facebook.js';
 import { FacebookMarketplaceBackend } from '../src/facebook-marketplace-backend.js';
 import { searchInputSchema } from '../src/domain.js';
 import { startSyntheticServer, waitForRequest, type SyntheticServer } from './helpers/synthetic-facebook-server.js';
-
-const browserAvailable = existsSync(chromium.executablePath());
-if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
-  throw new Error('Chromium is required for browser tests at ' + chromium.executablePath());
-}
+import { browserAvailable } from './helpers/browser-availability.js';
 
 let synthetic: SyntheticServer;
 const managers: BrowserSessionManager[] = [];

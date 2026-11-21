@@ -3,7 +3,6 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { chromium } from 'playwright';
 import { BrowserSessionManager as BrowserManager, BrowserUnavailableError, type BrowserSessionOptions } from '../src/browser.js';
 import { ProviderError } from '../src/backend.js';
 import { runBackendOperation } from '../src/tools.js';
@@ -16,11 +15,7 @@ import {
   type FacebookPageSnapshot,
   type FacebookSessionProbeOptions
 } from '../src/facebook.js';
-
-const browserAvailable = existsSync(chromium.executablePath());
-if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
-  throw new Error('Chromium is required for browser tests at ' + chromium.executablePath());
-}
+import { browserAvailable } from './helpers/browser-availability.js';
 
 type SyntheticMode = 'authenticated' | 'logged-out-shell' | 'login' | 'login-page' | 'checkpoint' | 'captcha' | 'captcha-listing-text' | 'captcha-dormant' | 'ambiguous' | 'slow';
 

@@ -1,14 +1,10 @@
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 import { MARKETPLACE_ITEM_PATH } from '../src/facebook-marketplace-url.js';
 import { extractMarketplaceItem, extractMarketplacePage, MARKETPLACE_EXTRACT_LIMITS, MARKETPLACE_ITEM_EXTRACT_LIMITS } from '../src/facebook-marketplace-extract.js';
 import { classifyMarketplaceItem, classifyMarketplacePage, interpretMarketplaceItem, interpretMarketplacePage, parseMarketplacePage, parseMarketplacePrice } from '../src/facebook-marketplace-parse.js';
-
-const browserAvailable = existsSync(chromium.executablePath());
-if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
-  throw new Error('Chromium is required for browser tests at ' + chromium.executablePath());
-}
+import { browserAvailable } from './helpers/browser-availability.js';
 
 const fixtureCases = [
   { file: 'results-normal.html', kind: 'results', outcome: 'listings', count: 3 },

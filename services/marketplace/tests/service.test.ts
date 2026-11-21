@@ -1,6 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { createServer as createHttpServer, request as httpRequest } from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -10,7 +10,6 @@ import { CallToolResultSchema, ErrorCode } from '@modelcontextprotocol/sdk/types
 import { z } from 'zod';
 import { FIXTURE_CONVERSATIONS, FIXTURE_LISTINGS, FIXTURE_OFFERS } from '../src/fixtures.js';
 import type { ConversationBackend, MarketplaceBackend } from '../src/backend.js';
-import { chromium } from 'playwright';
 import { BrowserSessionManager } from '../src/browser.js';
 import { FACEBOOK_MESSENGER_INBOX_PATH } from '../src/facebook.js';
 import { ProviderError } from '../src/index.js';
@@ -22,6 +21,7 @@ import { threadsListInputSchema, threadReadInputSchema } from '../src/domain.js'
 import { FakeReauthRuntime } from './helpers/fake-reauth-runtime.js';
 import { UnverifiedGrantAuthorizer } from './helpers/unverified-grant-authorizer.js';
 import { symlinkOrSkip } from './helpers/symlink-or-skip.js';
+import { browserAvailable } from './helpers/browser-availability.js';
 import { InMemoryGrantConsumptionStore } from '../src/grant-state.js';
 import { canonicalActionInput, type ActionRequest, type ApprovalGrant, type SignedGrantEnvelope } from '../src/authorization.js';
 
@@ -41,7 +41,6 @@ it('validates the Messenger probe-only switch without silently enabling login on
 let service: MarketplaceService;
 let baseUrl: string;
 const originalFetch = globalThis.fetch;
-const browserAvailable = existsSync(chromium.executablePath());
 const clients: Client[] = [];
 let reauthTargetUrl = 'https://www.facebook.com/marketplace/';
 let syntheticReauthServer: ReturnType<typeof createHttpServer>;
