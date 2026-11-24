@@ -1,4 +1,4 @@
-FROM node:26-bookworm-slim@sha256:5df79989ed685e09f0a98019db4cebfb22fb9df1a53c0161664a011f7ff6b0f1 AS base
+FROM node:26-bookworm-slim@sha256:3fcc4609776fc12c0079831ca6020e250ca109b8d46243d504625d0af7efda93 AS base
 WORKDIR /app
 
 FROM base AS dependencies
