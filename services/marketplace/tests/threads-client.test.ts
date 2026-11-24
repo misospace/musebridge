@@ -135,6 +135,24 @@ describe('ThreadsClient', () => {
     await expect(client.listOwnPosts({ limit: 1 })).rejects.toMatchObject({ name: 'ThreadsHttpError', status: 401 });
   });
 
+  it('consumes the error response body before throwing so the connection is released', async () => {
+    let errorResponse: Response | undefined;
+    const client = new ThreadsClient({ ...options, fetchImpl: async () => {
+      errorResponse = new Response('synthetic upstream failure', { status: 429, headers: { 'retry-after': '9' } });
+      return errorResponse;
+    } });
+    await expect(client.listOwnPosts({ limit: 1 })).rejects.toMatchObject({ name: 'ThreadsHttpError', status: 429, retryAfter: 9 });
+    // An undrained error body pins the keep-alive socket until GC (#258); bodyUsed proves
+    // the error path read it.
+    expect(errorResponse?.bodyUsed).toBe(true);
+  });
+
+  it('still throws the typed HTTP error when the error body itself fails', async () => {
+    const broken = new ReadableStream({ start(controller) { controller.error(new Error('synthetic body failure')); } });
+    const client = new ThreadsClient({ ...options, fetchImpl: async () => new Response(broken, { status: 429 }) });
+    await expect(client.listReplies({ mediaId: 'synth-thread-001' })).rejects.toMatchObject({ name: 'ThreadsHttpError', status: 429 });
+  });
+
   it('preserves a numeric retry-after on 429', async () => {
     const client = new ThreadsClient({ ...options, fetchImpl: async () => new Response('', { status: 429, headers: { 'retry-after': '9' } }) });
     await expect(client.listReplies({ mediaId: 'synth-thread-001' })).rejects.toMatchObject({ status: 429, retryAfter: 9 });
