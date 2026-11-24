@@ -102,10 +102,10 @@ describe('EbayClient', () => {
         // cover the error-body drain too, or the poisoned shared refresh would outlive every
         // later caller exactly like a stalled success body (#115).
         if (tokenCalls === 1) {
-          const response = new Response(new ReadableStream({ start() {} }), { status: 503, headers: { 'retry-after': '5' } });
-          const readText = response.text.bind(response);
-          response.text = () => { drainStarted = true; return readText(); };
-          return response;
+          // The body never produces or ends; `pull` records that the drain actually began
+          // reading it, so the deadline raced a real in-flight body read.
+          const stalled = new ReadableStream({ pull() { drainStarted = true; } });
+          return new Response(stalled, { status: 503, headers: { 'retry-after': '5' } });
         }
         return ok({ access_token: 'synthetic-recovered', expires_in: 3600 });
       }

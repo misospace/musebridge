@@ -12,10 +12,12 @@
 // (caller signal, backend deadline, or the eBay token-exchange deadline the error race covers).
 export async function drainErrorBody(response: Response): Promise<void> {
   try {
-    // Read-to-completion buffers the whole body before discarding it. That matches the
-    // success-path `json()` exposure these clients already accept, and any size cap would
-    // need `cancel()` — which releases the pin but destroys the socket instead of reusing it.
-    await response.text();
+    // Stream the body through a sink that discards each chunk as it arrives, so an unexpected
+    // large upstream error body is never accumulated in memory: a 429/5xx storm hits this path
+    // on every failed request, and buffering there would add memory pressure exactly when the
+    // service is already under load. Reading to completion (rather than `cancel()`) is what
+    // returns the kept-alive socket to the pool for reuse instead of destroying it.
+    await response.body?.pipeTo(new WritableStream({ write() {} }));
   } catch {
     // Already-consumed, locked, or stream-erroring body: still a failed response, and the
     // caller throws its typed error regardless.
