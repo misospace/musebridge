@@ -484,34 +484,25 @@ export function registerMarketplaceTools(
       // does not depend on each tool's success-oriented output schema.
       validatedOutput = runtimeFailureSchema.parse({ ok: false, error: { code: decision.code, message: decision.message } });
     } else {
+      // Every dispatch branch runs its backend operation under the same per-request context: the
+      // configured backend timeout, the MCP request's own cancellation, and the service shutdown
+      // signal. Binding it once here means a branch cannot thread a different timeout or drop one
+      // of the two aborts, and the branch itself reads as the operation it performs.
+      const runOperation = <T>(operation: (signal: AbortSignal) => T | Promise<T>): Promise<T> =>
+        runBackendOperation(operation, backendTimeoutMs, extra.signal, shutdownSignal);
       try {
         let output: unknown;
         if (name === 'marketplace_search') {
-          const listings = await runBackendOperation(
-            (signal) => backend.search(parsed.data as z.infer<typeof searchInputSchema>, signal),
-            backendTimeoutMs,
-            extra.signal,
-            shutdownSignal
-          );
+          const listings = await runOperation((signal) => backend.search(parsed.data as z.infer<typeof searchInputSchema>, signal));
           output = { ok: true, backend: backendName, listings };
         } else if (name === 'marketplace_fetch') {
-          const listing = await runBackendOperation(
-            (signal) => backend.fetch(parsed.data as z.infer<typeof fetchInputSchema>, signal),
-            backendTimeoutMs,
-            extra.signal,
-            shutdownSignal
-          );
+          const listing = await runOperation((signal) => backend.fetch(parsed.data as z.infer<typeof fetchInputSchema>, signal));
           output = listing === null
             ? runtimeFailure('NOT_FOUND', 'No listing matched the supplied identifier.')
             : { ok: true, backend: backendName, listing };
         } else if (name === 'messenger_threads_list') {
           const conversations = requireBackend(options.conversations, 'The messenger surface is not configured on this deployment.');
-          const listing = await runBackendOperation(
-            (signal) => conversations.listThreads(parsed.data as z.infer<typeof threadsListInputSchema>, signal),
-            backendTimeoutMs,
-            extra.signal,
-            shutdownSignal
-          );
+          const listing = await runOperation((signal) => conversations.listThreads(parsed.data as z.infer<typeof threadsListInputSchema>, signal));
           // A page-carrying backend reports its coverage; a host-injected backend that predates
           // #151 returns a bare array, and its listing omits `truncated` rather than inheriting a
           // completeness claim the backend never made.
@@ -520,12 +511,7 @@ export function registerMarketplaceTools(
             : { ok: true, backend: backendName, threads: listing.threads, truncated: listing.truncated };
         } else if (name === 'messenger_thread_read') {
           const conversations = requireBackend(options.conversations, 'The messenger surface is not configured on this deployment.');
-          const thread = await runBackendOperation(
-            (signal) => conversations.readThread(parsed.data as z.infer<typeof threadReadInputSchema>, signal),
-            backendTimeoutMs,
-            extra.signal,
-            shutdownSignal
-          );
+          const thread = await runOperation((signal) => conversations.readThread(parsed.data as z.infer<typeof threadReadInputSchema>, signal));
           output = thread === null
             ? runtimeFailure('NOT_FOUND', 'No conversation thread matched the supplied identifier.')
             : {
@@ -542,7 +528,7 @@ export function registerMarketplaceTools(
           // authorizeAction later checks for messenger_send against the same send_input. Digesting
           // the smaller prepare input instead would mismatch every legitimate later send.
           const sendInput = threadSendInputSchema.parse({ ...(parsed.data as z.infer<typeof threadPrepareInputSchema>), idempotency_token: randomUUID() });
-          const draft = await runBackendOperation((signal) => conversations.prepareDraft(sendInput, signal), backendTimeoutMs, extra.signal, shutdownSignal);
+          const draft = await runOperation((signal) => conversations.prepareDraft(sendInput, signal));
           if (draft === null) {
             // No thread means no draft: report the same NOT_FOUND messenger_thread_read reports for
             // this thread id rather than a digest no later send could ever be authorized against.
@@ -578,7 +564,7 @@ export function registerMarketplaceTools(
           // never reported 'sent' directly; a failure whose submit was already dispatched is
           // likewise never reported as unsent. Both are reconciled with one thread read.
           try {
-            await runBackendOperation((signal) => conversations.sendThread(sendInput, signal), backendTimeoutMs, extra.signal, shutdownSignal);
+            await runOperation((signal) => conversations.sendThread(sendInput, signal));
           } catch (error) {
             const reconcilable = error instanceof ProviderError
               && (error.code === 'TIMEOUT' || error.metadata.submit_triggered === true);
@@ -599,41 +585,21 @@ export function registerMarketplaceTools(
           const conversations = requireBackend(options.conversations, 'The messenger surface is not configured on this deployment.');
           const listConsumerThreads = conversations.listConsumerThreads;
           if (!listConsumerThreads) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');
-          const page = await runBackendOperation(
-            (signal) => listConsumerThreads.call(conversations, parsed.data as z.infer<typeof consumerThreadsListInputSchema>, signal),
-            backendTimeoutMs,
-            extra.signal,
-            shutdownSignal
-          );
+          const page = await runOperation((signal) => listConsumerThreads.call(conversations, parsed.data as z.infer<typeof consumerThreadsListInputSchema>, signal));
           output = { ok: true, backend: backendName, threads: page.threads, truncated: page.truncated, coverage: page.coverage };
         } else if (name === 'consumer_threads_search') {
           const conversations = requireBackend(options.conversations, 'The messenger surface is not configured on this deployment.');
           const searchConsumerThreadsMethod = conversations.searchConsumerThreads;
           if (!searchConsumerThreadsMethod) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');
-          const page = await runBackendOperation(
-            (signal) => searchConsumerThreadsMethod.call(conversations, parsed.data as z.infer<typeof consumerThreadsSearchInputSchema>, signal),
-            backendTimeoutMs,
-            extra.signal,
-            shutdownSignal
-          );
+          const page = await runOperation((signal) => searchConsumerThreadsMethod.call(conversations, parsed.data as z.infer<typeof consumerThreadsSearchInputSchema>, signal));
           output = { ok: true, backend: backendName, matches: page.matches, truncated: page.truncated, coverage: page.coverage };
         } else if (name === 'messenger_meta_threads_list') {
           const meta = requireBackend(options.metaConversations, 'The mautrix-meta Messenger transport is not configured on this deployment.');
-          const listing = await runBackendOperation(
-            (signal) => meta.listThreads(parsed.data as z.infer<typeof threadsListInputSchema>, signal),
-            backendTimeoutMs,
-            extra.signal,
-            shutdownSignal
-          );
+          const listing = await runOperation((signal) => meta.listThreads(parsed.data as z.infer<typeof threadsListInputSchema>, signal));
           output = { ok: true, backend: meta.name, threads: listing.threads, truncated: listing.truncated };
         } else if (name === 'messenger_meta_thread_read') {
           const meta = requireBackend(options.metaConversations, 'The mautrix-meta Messenger transport is not configured on this deployment.');
-          const thread = await runBackendOperation(
-            (signal) => meta.readThread(parsed.data as z.infer<typeof threadReadInputSchema>, signal),
-            backendTimeoutMs,
-            extra.signal,
-            shutdownSignal
-          );
+          const thread = await runOperation((signal) => meta.readThread(parsed.data as z.infer<typeof threadReadInputSchema>, signal));
           output = thread === null
             ? runtimeFailure('NOT_FOUND', 'No conversation thread matched the supplied identifier.')
             : {
@@ -646,84 +612,44 @@ export function registerMarketplaceTools(
         } else if (name === 'messenger_meta_thread_backfill') {
           const meta = requireBackend(options.metaConversations, 'The mautrix-meta Messenger transport is not configured on this deployment.');
           const backfillInput = parsed.data as z.infer<typeof threadBackfillInputSchema>;
-          const page = await runBackendOperation(
-            (signal) => meta.backfillThread(backfillInput, signal),
-            backendTimeoutMs,
-            extra.signal,
-            shutdownSignal
-          );
+          const page = await runOperation((signal) => meta.backfillThread(backfillInput, signal));
           output = page === null
             ? runtimeFailure('NOT_FOUND', 'No conversation thread matched the supplied identifier.')
             : { ok: true, backend: meta.name, thread_id: backfillInput.thread_id, messages: page.messages, coverage: page.coverage };
         } else if (name === 'shopping_search') {
           const shopping = requireBackend(options.shopping, 'The shopping surface is not configured on this deployment.');
-          const offers = await runBackendOperation(
-            (signal) => shopping.search(parsed.data as z.infer<typeof shoppingSearchInputSchema>, signal),
-            backendTimeoutMs,
-            extra.signal,
-            shutdownSignal
-          );
+          const offers = await runOperation((signal) => shopping.search(parsed.data as z.infer<typeof shoppingSearchInputSchema>, signal));
           output = { ok: true, backend: shopping.name, offers };
         } else if (name === 'shopping_fetch') {
           const shopping = requireBackend(options.shopping, 'The shopping surface is not configured on this deployment.');
-          const offer = await runBackendOperation(
-            (signal) => shopping.fetch(parsed.data as z.infer<typeof shoppingFetchInputSchema>, signal),
-            backendTimeoutMs,
-            extra.signal,
-            shutdownSignal
-          );
+          const offer = await runOperation((signal) => shopping.fetch(parsed.data as z.infer<typeof shoppingFetchInputSchema>, signal));
           output = offer === null
             ? runtimeFailure('NOT_FOUND', 'No product offer matched the supplied identifier.')
             : { ok: true, backend: shopping.name, offer };
         } else if (name === 'events_search') {
           const events = requireBackend(options.events, 'The events surface is not configured on this deployment.');
-          const results = await runBackendOperation(
-            (signal) => events.search(parsed.data as z.infer<typeof eventsSearchInputSchema>, signal),
-            backendTimeoutMs,
-            extra.signal,
-            shutdownSignal
-          );
+          const results = await runOperation((signal) => events.search(parsed.data as z.infer<typeof eventsSearchInputSchema>, signal));
           output = { ok: true, backend: events.name, events: results };
         } else if (name === 'events_fetch') {
           const events = requireBackend(options.events, 'The events surface is not configured on this deployment.');
-          const event = await runBackendOperation(
-            (signal) => events.fetch(parsed.data as z.infer<typeof eventsFetchInputSchema>, signal),
-            backendTimeoutMs,
-            extra.signal,
-            shutdownSignal
-          );
+          const event = await runOperation((signal) => events.fetch(parsed.data as z.infer<typeof eventsFetchInputSchema>, signal));
           output = event === null
             ? runtimeFailure('NOT_FOUND', 'No event matched the supplied identifier.')
             : { ok: true, backend: events.name, event };
         } else if (name === 'threads_posts_list') {
           const threads = requireBackend(options.threads, 'The Threads social surface is not configured on this deployment.');
-          const result = await runBackendOperation(
-            (signal) => threads.listOwnPosts(parsed.data as z.infer<typeof threadsPostsListInputSchema>, signal),
-            backendTimeoutMs,
-            extra.signal,
-            shutdownSignal
-          );
+          const result = await runOperation((signal) => threads.listOwnPosts(parsed.data as z.infer<typeof threadsPostsListInputSchema>, signal));
           output = { ok: true, backend: threads.name, posts: result.posts, truncated: result.truncated };
         } else if (name === 'threads_replies_list') {
           const threads = requireBackend(options.threads, 'The Threads social surface is not configured on this deployment.');
           const repliesInput = parsed.data as z.infer<typeof threadsRepliesListInputSchema>;
-          const result = await runBackendOperation(
-            (signal) => threads.listReplies(repliesInput, signal),
-            backendTimeoutMs,
-            extra.signal,
-            shutdownSignal
-          );
+          const result = await runOperation((signal) => threads.listReplies(repliesInput, signal));
           output = result === null
             ? runtimeFailure('NOT_FOUND', 'No Threads media matched the supplied identifier.')
             : { ok: true, backend: threads.name, media_id: repliesInput.media_id, replies: result.replies, truncated: result.truncated };
         } else if (name === 'threads_mentions_list') {
           const threads = requireBackend(options.threads, 'The Threads social surface is not configured on this deployment.');
-          const result = await runBackendOperation(
-            (signal) => threads.listMentions(parsed.data as z.infer<typeof threadsMentionsListInputSchema>, signal),
-            backendTimeoutMs,
-            extra.signal,
-            shutdownSignal
-          );
+          const result = await runOperation((signal) => threads.listMentions(parsed.data as z.infer<typeof threadsMentionsListInputSchema>, signal));
           output = { ok: true, backend: threads.name, mentions: result.mentions, truncated: result.truncated };
         } else {
           const sessionAssessment = options.sessionAssessment;
