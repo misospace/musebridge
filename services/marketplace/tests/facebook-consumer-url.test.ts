@@ -4,9 +4,9 @@ import {
   parseConsumerThreadRoute,
   CONSUMER_MENU_PATHNAME,
   CONSUMER_E2EE_PREFIX,
-  CONSUMER_THREAD_ID_PATTERN,
   CONSUMER_THREAD_ROUTE_PATTERN
 } from '../src/facebook-consumer-url.js';
+import { THREAD_ID_PATTERN } from '../src/domain.js';
 
 describe('buildConsumerMenuUrl', () => {
   it('builds the root-pathname menu URL for the configured origin', () => {
@@ -82,8 +82,8 @@ describe('parseConsumerThreadRoute', () => {
     expect(CONSUMER_THREAD_ROUTE_PATTERN.test(`${CONSUMER_E2EE_PREFIX}t/x1/`)).toBe(true);
     expect(CONSUMER_THREAD_ROUTE_PATTERN.test('/messages/recent/')).toBe(false);
     expect(CONSUMER_THREAD_ROUTE_PATTERN.test('/messages/t/a/b/')).toBe(false);
-    expect(CONSUMER_THREAD_ID_PATTERN.test('abc-123._')).toBe(true);
-    expect(CONSUMER_THREAD_ID_PATTERN.test('.leading-dot')).toBe(false);
-    expect(CONSUMER_THREAD_ID_PATTERN.test('')).toBe(false);
+    expect(THREAD_ID_PATTERN.test('abc-123._')).toBe(true);
+    expect(THREAD_ID_PATTERN.test('.leading-dot')).toBe(false);
+    expect(THREAD_ID_PATTERN.test('')).toBe(false);
   });
 });
