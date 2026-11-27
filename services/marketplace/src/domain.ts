@@ -49,7 +49,18 @@ const httpUrlSchema = z.string().max(2048).url().regex(/^[Hh][Tt][Tt][Pp][Ss]?:\
 }, 'Must be an HTTP(S) URL');
 
 const isoDateTimeSchema = z.string().datetime({ offset: true });
-const threadIdSchema = z.string().trim().min(1).max(MAX_THREAD_ID_LENGTH).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
+
+// The thread-id grammar, owned beside the schema that enforces it, so the tool contract and the
+// provider-route validation cannot drift. (In-page extractors restate it by necessity: an
+// evaluate() function cannot close over module scope.)
+export const THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const threadIdSchema = z.string().trim().min(1).max(MAX_THREAD_ID_LENGTH).regex(THREAD_ID_PATTERN);
+
+/** The grammar plus the length bound, exactly as the route builders must apply it to a provider-supplied id. */
+export function isValidThreadId(value: string): boolean {
+  return value.length <= MAX_THREAD_ID_LENGTH && THREAD_ID_PATTERN.test(value);
+}
+
 const listingIdSchema = z.string().min(1).max(MAX_LISTING_ID_LENGTH);
 
 export const sellerSchema = z.object({

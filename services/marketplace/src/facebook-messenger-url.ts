@@ -1,11 +1,8 @@
-import { MAX_THREAD_ID_LENGTH } from './domain.js';
+import { isValidThreadId } from './domain.js';
 import { assertFacebookOrigin } from './facebook.js';
 
 export const MESSENGER_THREAD_PATH = '/messages/t/';
 export const MESSENGER_INBOX_PATH = '/marketplace/inbox/';
-
-// Keep in sync with the thread id expression used by domain.ts.
-export const THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export interface MessengerInboxUrlInput {
   baseUrl: string;
@@ -38,7 +35,7 @@ export function buildMessengerThreadUrl(input: MessengerThreadUrlInput): string 
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw new TypeError('Thread URL input is required');
   }
-  if (typeof input.threadId !== 'string' || input.threadId.length > MAX_THREAD_ID_LENGTH || !THREAD_ID_PATTERN.test(input.threadId)) {
+  if (typeof input.threadId !== 'string' || !isValidThreadId(input.threadId)) {
     throw new TypeError('Messenger thread id is invalid');
   }
   const baseUrl = assertFacebookOrigin(input.baseUrl);
@@ -57,6 +54,6 @@ export function extractMessengerThreadId(href: string): string | undefined {
   }
   if (!pathname.startsWith(MESSENGER_THREAD_PATH)) return undefined;
   const threadId = pathname.slice(MESSENGER_THREAD_PATH.length).split('/')[0];
-  if (!threadId || threadId.length > MAX_THREAD_ID_LENGTH || !THREAD_ID_PATTERN.test(threadId)) return undefined;
+  if (!threadId || !isValidThreadId(threadId)) return undefined;
   return threadId;
 }

@@ -1,4 +1,4 @@
-import { MAX_THREAD_ID_LENGTH } from './domain.js';
+import { isValidThreadId } from './domain.js';
 import { assertFacebookOrigin } from './facebook.js';
 
 // The consumer discovery source is the Facebook homepage header Messenger menu (#79 evidence
@@ -11,9 +11,6 @@ export const CONSUMER_MENU_PATHNAME = '/';
 // preserved per row; an E2EE-surfaced key is never rewritten to the plain path.
 export const CONSUMER_THREAD_ROUTE_PATTERN = /^\/messages\/(?:e2ee\/)?t\/([^/]+)\/?$/;
 export const CONSUMER_E2EE_PREFIX = '/messages/e2ee/';
-
-// Keep in sync with the thread id expression used by domain.ts.
-export const CONSUMER_THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export interface ConsumerMenuUrlInput {
   baseUrl: string;
@@ -46,7 +43,7 @@ export function parseConsumerThreadRoute(pathname: string): { threadId: string; 
   } catch {
     // Keep the raw segment; the grammar check below decides it.
   }
-  if (!threadId || threadId.length > MAX_THREAD_ID_LENGTH || !CONSUMER_THREAD_ID_PATTERN.test(threadId)) {
+  if (!threadId || !isValidThreadId(threadId)) {
     return undefined;
   }
   return { threadId, route };
