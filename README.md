@@ -35,3 +35,7 @@ The plain `npm` commands above remain authoritative and work without mise; CI (`
 The service package retains its own `dist/index.js` runtime entry. See the [Marketplace service README](services/marketplace/README.md) for tools, configuration, safety constraints, and container instructions.
 
 Before write-capable provider tools, actions are governed by the [provider action boundary contract](docs/provider-action-boundaries.md): session scopes per provider/account/surface, action risk classes, and single-use approval grants enforced by the service. Consumer-surface research and integration-path decisions are recorded in the [capability inventory](docs/capability-inventory.md) (#39).
+
+## License
+
+[AGPL-3.0-only](LICENSE). See [licensing and corresponding source](docs/licensing.md).

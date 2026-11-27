@@ -68,10 +68,6 @@
           "type": "json",
           "path": "/package-lock.json",
           "jsonpath": "$.packages['services/marketplace'].version"
-        },
-        {
-          "type": "generic",
-          "path": "/services/marketplace/src/domain.ts"
         }
       ]
     }

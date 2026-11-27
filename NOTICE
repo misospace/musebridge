@@ -1,0 +1,6 @@
+Musebridge
+Copyright 2026 The Musebridge contributors.
+
+Musebridge is distributed under AGPL-3.0-only. Independent third-party components retain their respective licenses.
+
+Historical contribution: penielgold-hub, pull request #59 (https://github.com/misospace/musebridge/pull/59). Its version-marker/configuration and test implementation were removed or replaced before the license migration; historical commits retain their original attribution and terms.

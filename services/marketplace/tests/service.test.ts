@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { createServer as createHttpServer, request as httpRequest } from 'node:http';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -17,7 +18,7 @@ import { facebookCredentialsFromEnv } from '../src/facebook-login.js';
 import { createMarketplaceService, type MarketplaceService, parseBackendKind, parseBackendTimeout, parseEventsBackendKind, parseLoginWaitMs, parseMessengerEnabled, parseMessengerProbeOnly, parseShoppingBackendKind, parseThreadsBackendKind, parseThreadsLiveValidated } from '../src/service.js';
 import * as packageEntry from '../src/index.js';
 import { runBackendOperation } from '../src/tools.js';
-import { threadsListInputSchema, threadReadInputSchema } from '../src/domain.js';
+import { SERVICE_VERSION, threadsListInputSchema, threadReadInputSchema } from '../src/domain.js';
 import { FakeReauthRuntime } from './helpers/fake-reauth-runtime.js';
 import { UnverifiedGrantAuthorizer } from './helpers/unverified-grant-authorizer.js';
 import { symlinkOrSkip } from './helpers/symlink-or-skip.js';
@@ -25,9 +26,12 @@ import { browserAvailable } from './helpers/browser-availability.js';
 import { InMemoryGrantConsumptionStore } from '../src/grant-state.js';
 import { canonicalActionInput, type ActionRequest, type ApprovalGrant, type SignedGrantEnvelope } from '../src/authorization.js';
 
-const packageVersion = JSON.parse(
-  readFileSync(new URL('../package.json', import.meta.url), 'utf8')
-).version as string;
+it('reports the version from the service package metadata', async () => {
+  const manifest = z.object({ version: z.string().min(1) }).parse(
+    JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+  );
+  expect(SERVICE_VERSION).toBe(manifest.version);
+});
 
 it('validates the Messenger probe-only switch without silently enabling login on a typo', () => {
   expect(parseMessengerProbeOnly(undefined)).toBe(false);
@@ -317,7 +321,7 @@ describe('fixture MCP service', () => {
 
   it('supports SDK initialize, list tools, calls, and validates declared schemas', async () => {
     const client = await connectClient();
-    expect(client.getServerVersion()).toEqual({ name: 'marketplace', version: packageVersion });
+    expect(client.getServerVersion()).toEqual({ name: 'marketplace', version: SERVICE_VERSION });
     const tools = await client.listTools();
     expect(tools.tools.map(({ name }) => name)).toEqual([
       'marketplace_search', 'marketplace_fetch', 'marketplace_status', 'shopping_search', 'shopping_fetch', 'events_search', 'events_fetch', 'messenger_threads_list', 'messenger_thread_read', 'messenger_prepare', 'messenger_send', 'consumer_threads_list', 'consumer_threads_search', 'threads_posts_list', 'threads_replies_list', 'threads_mentions_list'
@@ -958,7 +962,7 @@ describe('fixture MCP service', () => {
     const result = structured(await (await connectClient()).callTool({ name: 'marketplace_status', arguments: {} }));
     expect(result).toEqual({
       ok: true,
-      service_version: packageVersion,
+      service_version: SERVICE_VERSION,
       schema_version: '1.11.0',
       backend: 'status-only',
       facebook_session: { status: 'session_unknown' },
