@@ -214,3 +214,7 @@ npm run lint
 The source package, tests, scripts, and TypeScript configs now live under `services/marketplace`. Hosts that mounted the old source, `tests`, or `dist` paths must update those paths to `services/marketplace/src`, `services/marketplace/tests`, and `services/marketplace/dist`. Root-level `npm start` remains supported; hosts that launched the file directly must change `node dist/index.js` to `node services/marketplace/dist/index.js`. The container entry remains `/app/dist/index.js`. The image is now `ghcr.io/misospace/marketplace-mcp`; the legacy `ghcr.io/misospace/marketplace` image is no longer published and there is no alias, so hosts must update their image references. Image tags (`main`, SHA, and semantic version) remain unchanged, with Git release tags matching `v*.*.*`. Coordinate any future image, profile, or tag changes with the service owner.
 
 The stale release PR #21 must be regenerated after this monorepo change merges; it must not be auto-merged.
+
+## License
+
+[AGPL-3.0-only](../../LICENSE). See [licensing and corresponding source](../../docs/licensing.md).

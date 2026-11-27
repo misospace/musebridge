@@ -17,6 +17,9 @@ COPY services/marketplace/package.json ./services/marketplace/package.json
 RUN npm ci --omit=dev --ignore-scripts
 
 FROM base AS runtime
+LABEL org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.source="https://github.com/misospace/musebridge"
+COPY LICENSE NOTICE /usr/share/doc/musebridge/
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=8080 \
