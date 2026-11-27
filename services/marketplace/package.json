@@ -1,7 +1,7 @@
 {
   "name": "marketplace-mcp",
   "license": "AGPL-3.0-only",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "Marketplace MCP service with fixture and Facebook backends",
